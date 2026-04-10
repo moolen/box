@@ -1,0 +1,101 @@
+# Default box configuration for local use and CI.
+# `box` reads this file from the current directory unless `--config` is set.
+
+sandbox:
+  # `host-overlay` reuses host tooling read-only and bind-mounts the repo read-write.
+  # `image` uses an unpacked rootfs from `rootfs_source`.
+  rootfs: host-overlay
+
+  # Required when `rootfs: image`.
+  rootfs_source: ""
+
+  # Hostname visible inside the sandbox.
+  hostname: box
+
+  # `.` means the current working tree path on the host.
+  # Relative paths are resolved against the invocation directory.
+  workdir: .
+
+  # Extra environment variables injected into the sandbox process.
+  env:
+    - "PS1=box# "
+    - TERM=xterm
+
+  # Everything after `box --` is shell-escaped and passed as one command string here.
+  command_shell: /bin/bash -ilc
+
+network:
+  # `monitor` is the current default and safest starting point.
+  # Other supported values: `enforce-dns`, `enforce-proxy`, `deny-all`.
+  mode: monitor
+
+  # Per-sandbox point-to-point subnet used for the host veth and sandbox NIC.
+  subnet: 100.96.0.0/30
+
+  dns:
+    # `auto` uses port 1053. In monitor mode, `box` binds that port on the
+    # sandbox gateway IP so sandbox DNS can reach the interceptor.
+    # You can also pin a port with values such as `127.0.0.1:1053`.
+    bind_addr: auto
+
+    # Upstreams that the host-side DNS interceptor forwards to.
+    upstream:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+
+  transparent_proxy:
+    # Enables host-side interception for HTTP and TLS.
+    enabled: true
+
+    # `peek` logs HTTP metadata and TLS SNI without full TLS MITM.
+    # `mitm` is parsed by config validation but rejected by the runtime today.
+    mode: peek
+
+    # Host listener ports used by the transparent proxy.
+    http_port: 18080
+    tls_port: 18443
+
+policy:
+  # Domain and CIDR lists are placeholders for the future policy engine.
+  allow_domains: []
+  deny_domains: []
+  allow_cidrs: []
+  deny_cidrs: []
+
+  # Emit connection events even when no allow/deny rules are active.
+  log_all_connects: true
+
+mounts:
+  # Extra host paths to bind read-only or read-write into the sandbox.
+  # Use absolute host paths.
+  extra_ro: []
+  extra_rw: []
+
+docker:
+  # Opt in when the sandbox should start `dockerd` before the payload command.
+  enabled: false
+
+  # Private Docker state inside the sandbox rootfs.
+  data_root: /var/lib/docker
+
+  # Unix socket exposed inside the sandbox.
+  socket_path: /var/run/docker.sock
+
+  # Wait for the socket to accept connections before running the user command.
+  wait_for_socket: true
+
+  # Timeout used when waiting for dockerd readiness.
+  ready_timeout: 10s
+
+  # Intended future behavior for nested containers; currently kept for config shape.
+  host_network_nested_containers: true
+
+gvisor:
+  # gVisor platform passed to `runsc`.
+  platform: systrap
+
+  # gVisor networking mode. Keep `sandbox` for the current host-managed netns path.
+  network: sandbox
+
+  # Reserved for additional runtime debugging later.
+  debug: false
