@@ -147,6 +147,9 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime state root %q: %w", req.StateRoot, err)
 	}
+	if err := cleanupOrphanedRuntimes(ctx, stateRoot, deps.CommandExec); err != nil {
+		return nil, err
+	}
 
 	stateDir := filepath.Join(stateRoot, runtimeID)
 	if err := assertNoStateConflict(stateDir); err != nil {

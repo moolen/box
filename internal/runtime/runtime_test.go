@@ -510,6 +510,117 @@ func TestMonitorPreflightConflictPreventsMonitorMutationAndTeardown(t *testing.T
 	}
 }
 
+func TestRunCleansTrustedOrphansBeforeMonitorPreflight(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	orphanDir := filepath.Join(stateRoot, "runtime-orphan-preflight")
+	orphanCleanupCmd := "nft delete table inet box_orphaned_before_preflight"
+
+	writeOrphanManifestForTest(t, Manifest{
+		RuntimeID:    "runtime-orphan-preflight",
+		StateRoot:    stateRoot,
+		StateDir:     orphanDir,
+		ManifestPath: filepath.Join(orphanDir, manifestFileName),
+		TeardownCmds: []string{
+			orphanCleanupCmd,
+		},
+		ManagedPaths: []ManagedPath{
+			{Path: filepath.Join(orphanDir, manifestFileName), Kind: PathKindFile},
+			{Path: orphanDir, Kind: PathKindDir},
+		},
+	})
+
+	cfg := testConfig("monitor")
+	exec := &recordingCommandExec{}
+	preflightCalled := false
+
+	_, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: stateRoot,
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-live-preflight-order" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			preflightCalled = true
+			if !exec.contains(orphanCleanupCmd) {
+				t.Fatalf("orphan cleanup command %q was not executed before monitor preflight; calls=%#v", orphanCleanupCmd, exec.calls)
+			}
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !preflightCalled {
+		t.Fatalf("monitor preflight was not called")
+	}
+	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
+		t.Fatalf("trusted orphan state dir still exists after startup cleanup: %v", err)
+	}
+}
+
+func TestRunLeavesUntrustedOrphanStateForConflictHandling(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	orphanDir := filepath.Join(stateRoot, "runtime-orphan-untrusted")
+	untrustedCleanupCmd := "nft delete table inet box_untrusted_orphan"
+
+	writeOrphanManifestForTest(t, Manifest{
+		RuntimeID:    "runtime-not-matching-dir",
+		StateRoot:    stateRoot,
+		StateDir:     orphanDir,
+		ManifestPath: filepath.Join(orphanDir, manifestFileName),
+		TeardownCmds: []string{
+			untrustedCleanupCmd,
+		},
+		ManagedPaths: []ManagedPath{
+			{Path: filepath.Join(orphanDir, manifestFileName), Kind: PathKindFile},
+			{Path: orphanDir, Kind: PathKindDir},
+		},
+	})
+
+	cfg := testConfig("monitor")
+	exec := &recordingCommandExec{}
+	preflightCalled := false
+
+	_, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: stateRoot,
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-live-strict-conflict" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			preflightCalled = true
+			return errors.New("nft table already owned by another runtime")
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("Run() error = nil, want ErrResourceConflict for untrusted orphan conflict")
+	}
+	if !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("Run() error = %v, want ErrResourceConflict", err)
+	}
+	if !preflightCalled {
+		t.Fatalf("monitor preflight was not called")
+	}
+	if exec.contains(untrustedCleanupCmd) {
+		t.Fatalf("untrusted orphan cleanup command %q was executed; calls=%#v", untrustedCleanupCmd, exec.calls)
+	}
+	if _, statErr := os.Stat(orphanDir); statErr != nil {
+		t.Fatalf("untrusted orphan state dir should remain for strict conflict handling; stat err=%v", statErr)
+	}
+}
+
 func TestMonitorModeWithoutPreflightFailsClosedBeforeMutation(t *testing.T) {
 	t.Parallel()
 
