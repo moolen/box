@@ -43,6 +43,10 @@ Integration tests cover:
 - `env`
 - `getent hosts example.com`
 - `curl http://example.com`
+- read-only `/usr` behavior (writes are blocked)
+- writable `/tmp`
+- writable sandbox workdir
+- isolation checks for mounts and sandbox privileges
 - enforce-mode blocked DNS resolution
 - enforce-mode nested Docker multi-stage builds on Linux hosts with `docker`, `dockerd`,
   and `skopeo` available
