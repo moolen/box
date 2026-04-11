@@ -21,6 +21,7 @@ func StartTLS(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 		if s.onEvent != nil {
 			s.onEvent(Event{
 				Protocol: "tls",
+				Hostname: sni,
 				SNI:      sni,
 			})
 		}

@@ -11,6 +11,7 @@ import (
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/netns"
+	"gvisor-net/internal/proxy"
 )
 
 func TestRunCreatesStateDirAndEventLog(t *testing.T) {
@@ -121,6 +122,26 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 		t.Fatalf("ResourcesForRuntimeID() error = %v", err)
 	}
 
+	wantSetupPrefix := []string{
+		"ip netns add " + resources.NetNS,
+		"ip link add " + resources.HostVeth + " type veth peer name " + resources.GuestVeth,
+		"ip link set " + resources.GuestVeth + " netns " + resources.NetNS,
+		"ip addr add 100.96.0.1/30 dev " + resources.HostVeth,
+		"ip link set " + resources.HostVeth + " up",
+		"ip netns exec " + resources.NetNS + " ip link set lo up",
+		"ip netns exec " + resources.NetNS + " ip addr add 100.96.0.2/30 dev " + resources.GuestVeth,
+		"ip netns exec " + resources.NetNS + " ip link set " + resources.GuestVeth + " up",
+		"ip netns exec " + resources.NetNS + " ip route add default via 100.96.0.1 dev " + resources.GuestVeth,
+	}
+	if len(exec.calls) < len(wantSetupPrefix) {
+		t.Fatalf("command exec calls too short = %#v", exec.calls)
+	}
+	for i, want := range wantSetupPrefix {
+		if exec.calls[i] != want {
+			t.Fatalf("setup command %d = %q, want %q", i, exec.calls[i], want)
+		}
+	}
+
 	if !exec.contains("nft add table inet " + resources.TableName) {
 		t.Fatalf("firewall setup commands = %#v, want nft table scoped to runtime", exec.calls)
 	}
@@ -130,6 +151,140 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	if !exec.contains("ip rule add fwmark") || !exec.contains("lookup") {
 		t.Fatalf("routing setup commands = %#v, want policy routing setup", exec.calls)
 	}
+}
+
+func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	exec := &recordingCommandExec{}
+	resources, err := netns.ResourcesForRuntimeID("runtime-monitor-teardown")
+	if err != nil {
+		t.Fatalf("ResourcesForRuntimeID() error = %v", err)
+	}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-teardown" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip netns del "+resources.NetNS)
+	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip link del "+resources.HostVeth)
+}
+
+func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	cfg.Policy.AllowDomains = []string{"example.com"}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-summary" },
+		CommandExec: noopCommandExec{},
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			if req.OnQuery == nil {
+				t.Fatalf("DNSStartRequest.OnQuery = nil, want callback")
+			}
+			req.OnQuery("dns.example.com")
+			return noopRunner{}, nil
+		},
+		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
+			if req.OnEvent == nil {
+				t.Fatalf("ProxyStartRequest.OnEvent = nil, want callback")
+			}
+			req.OnEvent(proxy.Event{
+				Protocol: "http",
+				Hostname: "api.example.com",
+				Method:   "GET",
+				Path:     "/hello",
+			})
+			req.OnEvent(proxy.Event{
+				Protocol: "tls",
+				Hostname: "tls.example.com",
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	summary := rt.MonitorSummary()
+	mustContain(t, summary, "Monitor summary")
+	mustContain(t, summary, "DNS:")
+	mustContain(t, summary, "dns.example.com [ALLOW]: 1")
+	mustContain(t, summary, "HTTP:")
+	mustContain(t, summary, "GET api.example.com [ALLOW]: 1")
+	mustContain(t, summary, "TLS:")
+	mustContain(t, summary, "tls.example.com [ALLOW]: 1")
+	mustContain(t, summary, "Total events: 3")
+}
+
+func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-events" },
+		CommandExec: noopCommandExec{},
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			req.OnQuery("dns.example.com")
+			return noopRunner{}, nil
+		},
+		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
+			req.OnEvent(proxy.Event{
+				Protocol: "http",
+				Hostname: "api.example.com",
+				Method:   "POST",
+				Path:     "/submit",
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	eventLog, err := os.ReadFile(rt.Manifest.EventLogPath)
+	if err != nil {
+		t.Fatalf("ReadFile(event log) error = %v", err)
+	}
+	text := string(eventLog)
+	mustContain(t, text, `"type":"dns"`)
+	mustContain(t, text, `"hostname":"dns.example.com"`)
+	mustContain(t, text, `"type":"proxy"`)
+	mustContain(t, text, `"protocol":"http"`)
+	mustContain(t, text, `"hostname":"api.example.com"`)
+	mustContain(t, text, `"method":"POST"`)
+	mustContain(t, text, `"path":"/submit"`)
 }
 
 func TestNonMonitorModeDoesNotForceGatewayResolvConf(t *testing.T) {
@@ -671,5 +826,12 @@ func testConfig(networkMode string) config.Config {
 				TLSPort:  18443,
 			},
 		},
+	}
+}
+
+func mustContain(t *testing.T, text, want string) {
+	t.Helper()
+	if !strings.Contains(text, want) {
+		t.Fatalf("text = %q, want contains %q", text, want)
 	}
 }

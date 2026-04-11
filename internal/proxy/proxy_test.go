@@ -65,7 +65,7 @@ func TestHTTPProxyForwardsAndEmitsEvent(t *testing.T) {
 	}
 	defer client.Close()
 
-	req := "GET /hello HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	req := "GET /hello?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
 	if _, err := client.Write([]byte(req)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
@@ -84,11 +84,17 @@ func TestHTTPProxyForwardsAndEmitsEvent(t *testing.T) {
 		if ev.Protocol != "http" {
 			t.Fatalf("Event.Protocol = %q, want %q", ev.Protocol, "http")
 		}
+		if ev.Hostname != "example.com" {
+			t.Fatalf("Event.Hostname = %q, want %q", ev.Hostname, "example.com")
+		}
+		if ev.Method != "GET" {
+			t.Fatalf("Event.Method = %q, want %q", ev.Method, "GET")
+		}
+		if ev.Path != "/hello" {
+			t.Fatalf("Event.Path = %q, want %q", ev.Path, "/hello")
+		}
 		if ev.Host != "example.com" {
 			t.Fatalf("Event.Host = %q, want %q", ev.Host, "example.com")
-		}
-		if ev.SNI != "" {
-			t.Fatalf("Event.SNI = %q, want empty", ev.SNI)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for event")
@@ -176,11 +182,11 @@ func TestTLSPeekExtractsSNIAndForwardsClientHello(t *testing.T) {
 		if ev.Protocol != "tls" {
 			t.Fatalf("Event.Protocol = %q, want %q", ev.Protocol, "tls")
 		}
+		if ev.Hostname != "example.com" {
+			t.Fatalf("Event.Hostname = %q, want %q", ev.Hostname, "example.com")
+		}
 		if ev.SNI != "example.com" {
 			t.Fatalf("Event.SNI = %q, want %q", ev.SNI, "example.com")
-		}
-		if ev.Host != "" {
-			t.Fatalf("Event.Host = %q, want empty", ev.Host)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for event")

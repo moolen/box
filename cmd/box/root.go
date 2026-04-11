@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +15,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/dns"
@@ -27,6 +31,8 @@ import (
 const (
 	envInitShimPath     = "BOX_INIT_SHIM_PATH"
 	defaultInitShimPath = "/usr/local/libexec/box-initshim"
+	ipTransparent       = 19
+	ipv6Transparent     = 75
 )
 
 type ttyState struct {
@@ -105,17 +111,81 @@ func runPayload(d deps, configPath string, payload []string) error {
 	return d.executor.Run(req)
 }
 
-type runtimeExecutor struct{}
+type runtimeHandle interface {
+	Cleanup(context.Context, boxruntime.Deps) error
+	MonitorSummary() string
+	PayloadNetNS() string
+	RuntimeManifest() boxruntime.Manifest
+}
 
-func (runtimeExecutor) Run(req runRequest) error {
+type runtimeExecutor struct {
+	stderr           io.Writer
+	getwd            func() (string, error)
+	loadConfig       func(path, cwd string) (config.Config, error)
+	startRuntime     func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
+	buildRootfsPlan  func(rootfs.PlanRequest) (rootfs.Plan, error)
+	applyRootfs      func(rootfs.ApplyRequest) (rootfs.ApplyResult, error)
+	buildSandboxSpec func(gvisor.BuildSpecRequest) (gvisor.Spec, error)
+	writeBundleSpec  func(string, gvisor.Spec) error
+	runSandbox       func(gvisor.RunRequest) error
+}
+
+func (e runtimeExecutor) Run(req runRequest) error {
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	getwd := e.getwd
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+
+	loadConfig := e.loadConfig
+	if loadConfig == nil {
+		loadConfig = config.Load
+	}
+
+	startRuntime := e.startRuntime
+	if startRuntime == nil {
+		startRuntime = func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
+			return boxruntime.Run(ctx, boxruntime.Request{Config: cfg}, deps)
+		}
+	}
+
+	buildRootfsPlan := e.buildRootfsPlan
+	if buildRootfsPlan == nil {
+		buildRootfsPlan = rootfs.BuildPlan
+	}
+
+	applyRootfs := e.applyRootfs
+	if applyRootfs == nil {
+		applyRootfs = rootfs.Apply
+	}
+
+	buildSandboxSpec := e.buildSandboxSpec
+	if buildSandboxSpec == nil {
+		buildSandboxSpec = gvisor.BuildSandboxSpec
+	}
+
+	writeBundleSpec := e.writeBundleSpec
+	if writeBundleSpec == nil {
+		writeBundleSpec = writeBundleSpecFile
+	}
+
+	runSandbox := e.runSandbox
+	if runSandbox == nil {
+		runSandbox = gvisor.Runner{}.Run
+	}
+
+	stderr := e.stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("determine working directory: %w", err)
 	}
 
-	cfg, err := config.Load(req.ConfigPath, cwd)
+	cfg, err := loadConfig(req.ConfigPath, cwd)
 	if err != nil {
 		return err
 	}
@@ -124,21 +194,22 @@ func (runtimeExecutor) Run(req runRequest) error {
 	deps := boxruntime.Deps{
 		CommandExec:      hostCommandExec{},
 		DNS:              startDNSRunner,
+		Proxy:            startTransparentProxy,
 		MonitorPreflight: monitorPreflight,
-		Proxy:            startHTTPProxyRunner,
 	}
 
-	rt, err := boxruntime.Run(ctx, boxruntime.Request{Config: cfg}, deps)
+	rt, err := startRuntime(ctx, cfg, deps)
 	if err != nil {
 		return err
 	}
 
-	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
+	manifest := rt.RuntimeManifest()
+	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
 		RootfsMode:     cfg.Sandbox.Rootfs,
 		RepoPath:       cwd,
 		Workdir:        cfg.Sandbox.Workdir,
 		NetworkMode:    cfg.Network.Mode,
-		GatewayIP:      rt.Manifest.GatewayIP,
+		GatewayIP:      manifest.GatewayIP,
 		SandboxHostn:   cfg.Sandbox.Hostname,
 		DockerEnabled:  cfg.Docker.Enabled,
 		DockerDataRoot: cfg.Docker.DataRoot,
@@ -150,8 +221,8 @@ func (runtimeExecutor) Run(req runRequest) error {
 		return fmt.Errorf("build rootfs plan: %w", err)
 	}
 
-	bundleDir := filepath.Join(rt.Manifest.StateDir, "bundle")
-	if _, err := rootfs.Apply(rootfs.ApplyRequest{
+	bundleDir := filepath.Join(manifest.StateDir, "bundle")
+	if _, err := applyRootfs(rootfs.ApplyRequest{
 		Plan:           rootfsPlan,
 		BundleDir:      bundleDir,
 		InitShimPath:   req.InitShimPath,
@@ -161,12 +232,12 @@ func (runtimeExecutor) Run(req runRequest) error {
 		return fmt.Errorf("apply rootfs plan: %w", err)
 	}
 
-	spec, err := gvisor.BuildSandboxSpec(gvisor.BuildSpecRequest{
+	spec, err := buildSandboxSpec(gvisor.BuildSpecRequest{
 		Config:               cfg,
 		Workdir:              cfg.Sandbox.Workdir,
 		Payload:              req.ShellCommand,
 		RootfsPlan:           rootfsPlan,
-		NetworkNamespacePath: filepath.Join("/run/netns", rt.Manifest.Net.NetNS),
+		NetworkNamespacePath: filepath.Join("/run/netns", manifest.Net.NetNS),
 	})
 	if err != nil {
 		_ = rt.Cleanup(ctx, deps)
@@ -177,13 +248,14 @@ func (runtimeExecutor) Run(req runRequest) error {
 		return err
 	}
 
-	payloadErr := gvisor.Runner{}.Run(gvisor.RunRequest{
+	payloadErr := runSandbox(gvisor.RunRequest{
 		BundleDir:   bundleDir,
-		ContainerID: rt.Manifest.RuntimeID,
-		NetNS:       rt.Manifest.Net.NetNS,
+		ContainerID: manifest.RuntimeID,
+		NetNS:       manifest.Net.NetNS,
 	})
 	cleanupErr := rt.Cleanup(ctx, deps)
-	return errors.Join(payloadErr, cleanupErr)
+	summaryErr := writeMonitorSummary(stderr, rt.MonitorSummary())
+	return errors.Join(payloadErr, cleanupErr, summaryErr)
 }
 
 type hostCommandExec struct{}
@@ -196,6 +268,230 @@ func (hostCommandExec) Run(ctx context.Context, name string, args ...string) err
 	return cmd.Run()
 }
 
+func writeMonitorSummary(stderr io.Writer, summary string) error {
+	if stderr == nil || strings.TrimSpace(summary) == "" {
+		return nil
+	}
+	_, err := io.WriteString(stderr, summary)
+	return err
+}
+
+func startDNSRunner(ctx context.Context, req boxruntime.DNSStartRequest) (boxruntime.Runner, error) {
+	cfg := req.Config
+	if cfg.OnQuery == nil {
+		cfg.OnQuery = req.OnQuery
+	}
+
+	server, err := dns.Start(ctx, cfg, dns.Deps{
+		Mode:      req.Mode,
+		GatewayIP: req.GatewayIP,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stopFunc(server.Close), nil
+}
+
+type proxyFactoryDeps struct {
+	listen          func(network, address string) (net.Listener, error)
+	startHTTP       func(context.Context, proxy.ProxyConfig) (*proxy.Server, error)
+	startTLS        func(context.Context, proxy.ProxyConfig) (*proxy.Server, error)
+	resolveUpstream func(net.Conn) (string, error)
+}
+
+func startTransparentProxy(ctx context.Context, req boxruntime.ProxyStartRequest) (boxruntime.Runner, error) {
+	return startTransparentProxyWithDeps(ctx, req, proxyFactoryDeps{
+		listen: transparentListen,
+	})
+}
+
+func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStartRequest, deps proxyFactoryDeps) (boxruntime.Runner, error) {
+	if deps.listen == nil {
+		deps.listen = net.Listen
+	}
+	if deps.startHTTP == nil {
+		deps.startHTTP = proxy.StartHTTP
+	}
+	if deps.startTLS == nil {
+		deps.startTLS = proxy.StartTLS
+	}
+	if deps.resolveUpstream == nil {
+		deps.resolveUpstream = resolveOriginalDst
+	}
+
+	onEvent := req.OnEvent
+
+	httpListener, tlsListener, err := proxy.TransparentListenerFactory(req.Config, deps.listen)
+	if err != nil {
+		return nil, err
+	}
+
+	httpServer, err := deps.startHTTP(ctx, proxy.ProxyConfig{
+		Listen:          consumeListener(httpListener),
+		ResolveUpstream: deps.resolveUpstream,
+		OnEvent:         onEvent,
+	})
+	if err != nil {
+		_ = httpListener.Close()
+		_ = tlsListener.Close()
+		return nil, err
+	}
+
+	tlsServer, err := deps.startTLS(ctx, proxy.ProxyConfig{
+		Listen:          consumeListener(tlsListener),
+		ResolveUpstream: deps.resolveUpstream,
+		OnEvent:         onEvent,
+	})
+	if err != nil {
+		_ = httpServer.Close()
+		_ = tlsListener.Close()
+		return nil, err
+	}
+
+	return proxyRunner{
+		http: httpServer,
+		tls:  tlsServer,
+	}, nil
+}
+
+type proxyRunner struct {
+	http *proxy.Server
+	tls  *proxy.Server
+}
+
+func (r proxyRunner) Stop() error {
+	return errors.Join(closeProxyServer(r.tls), closeProxyServer(r.http))
+}
+
+func closeProxyServer(server *proxy.Server) error {
+	if server == nil {
+		return nil
+	}
+	return server.Close()
+}
+
+func consumeListener(listener net.Listener) func(network, address string) (net.Listener, error) {
+	used := false
+	return func(string, string) (net.Listener, error) {
+		if used {
+			return nil, errors.New("listener already consumed")
+		}
+		used = true
+		return listener, nil
+	}
+}
+
+func transparentListen(network, address string) (net.Listener, error) {
+	var lc net.ListenConfig
+	lc.Control = func(_, _ string, c syscall.RawConn) error {
+		var controlErr error
+		if err := c.Control(func(fd uintptr) {
+			controlErr = errors.Join(
+				setSockoptBestEffort(int(fd), syscall.SOL_IP, ipTransparent, 1),
+				setSockoptBestEffort(int(fd), syscall.SOL_IPV6, ipv6Transparent, 1),
+			)
+		}); err != nil {
+			return err
+		}
+		return controlErr
+	}
+	return lc.Listen(context.Background(), network, address)
+}
+
+func setSockoptBestEffort(fd int, level int, opt int, value int) error {
+	if err := syscall.SetsockoptInt(fd, level, opt, value); err != nil && !errors.Is(err, syscall.ENOPROTOOPT) {
+		return err
+	}
+	return nil
+}
+
+const soOriginalDst = 80
+
+func resolveOriginalDst(conn net.Conn) (string, error) {
+	sysconn, ok := conn.(syscall.Conn)
+	if !ok {
+		return "", errors.New("connection does not expose syscall conn")
+	}
+
+	rawConn, err := sysconn.SyscallConn()
+	if err != nil {
+		return "", fmt.Errorf("get syscall conn: %w", err)
+	}
+
+	var (
+		addr       *net.TCPAddr
+		controlErr error
+	)
+	if err := rawConn.Control(func(fd uintptr) {
+		addr, controlErr = originalDstFromFD(int(fd), conn.LocalAddr())
+	}); err != nil {
+		return "", fmt.Errorf("control original dst fd: %w", err)
+	}
+	if controlErr != nil {
+		return "", controlErr
+	}
+	return addr.String(), nil
+}
+
+func originalDstFromFD(fd int, localAddr net.Addr) (*net.TCPAddr, error) {
+	if tcpAddr, ok := localAddr.(*net.TCPAddr); ok && tcpAddr.IP.To4() == nil {
+		return originalDstIPv6(fd)
+	}
+	return originalDstIPv4(fd)
+}
+
+func originalDstIPv4(fd int) (*net.TCPAddr, error) {
+	var raw syscall.RawSockaddrInet4
+	size := uint32(unsafe.Sizeof(raw))
+	if errno := getSockoptRaw(fd, syscall.IPPROTO_IP, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
+		return nil, fmt.Errorf("get ipv4 original dst: %w", errno)
+	}
+	return tcpAddrFromSockaddrIPv4(raw), nil
+}
+
+func originalDstIPv6(fd int) (*net.TCPAddr, error) {
+	var raw syscall.RawSockaddrInet6
+	size := uint32(unsafe.Sizeof(raw))
+	if errno := getSockoptRaw(fd, syscall.IPPROTO_IPV6, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
+		return nil, fmt.Errorf("get ipv6 original dst: %w", errno)
+	}
+	return tcpAddrFromSockaddrIPv6(raw), nil
+}
+
+func tcpAddrFromSockaddrIPv4(raw syscall.RawSockaddrInet4) *net.TCPAddr {
+	return &net.TCPAddr{
+		IP:   net.IP(raw.Addr[:]),
+		Port: decodeSockaddrPort(raw.Port),
+	}
+}
+
+func tcpAddrFromSockaddrIPv6(raw syscall.RawSockaddrInet6) *net.TCPAddr {
+	addr := &net.TCPAddr{
+		IP:   net.IP(raw.Addr[:]),
+		Port: decodeSockaddrPort(raw.Port),
+	}
+	if raw.Scope_id != 0 {
+		addr.Zone = strconv.FormatUint(uint64(raw.Scope_id), 10)
+	}
+	return addr
+}
+
+func decodeSockaddrPort(port uint16) int {
+	return int(binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&port))[:]))
+}
+
+func getSockoptRaw(fd int, level int, opt int, value unsafe.Pointer, size unsafe.Pointer) syscall.Errno {
+	_, _, errno := syscall.Syscall6(
+		syscall.SYS_GETSOCKOPT,
+		uintptr(fd),
+		uintptr(level),
+		uintptr(opt),
+		uintptr(value),
+		uintptr(size),
+		0,
+	)
+	return errno
+}
 type preflightCommandRunner func(ctx context.Context, name string, args ...string) (string, error)
 
 func monitorPreflight(ctx context.Context, req boxruntime.MonitorPreflightRequest) error {
@@ -435,7 +731,7 @@ func isTerminalFD(fd uintptr) bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
-func writeBundleSpec(bundleDir string, spec gvisor.Spec) error {
+func writeBundleSpecFile(bundleDir string, spec gvisor.Spec) error {
 	content, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal gvisor spec: %w", err)
@@ -470,31 +766,6 @@ func commandShellForTTY(commandShell string, tty ttyState) string {
 		return strings.Join(fields, " ")
 	}
 	return commandShell
-}
-
-func startDNSRunner(ctx context.Context, req boxruntime.DNSStartRequest) (boxruntime.Runner, error) {
-	server, err := dns.Start(ctx, req.Config, dns.Deps{
-		Mode:      req.Mode,
-		GatewayIP: req.GatewayIP,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return stopFunc(server.Close), nil
-}
-
-func startHTTPProxyRunner(ctx context.Context, req boxruntime.ProxyStartRequest) (boxruntime.Runner, error) {
-	if !req.Config.Enabled {
-		return nil, nil
-	}
-
-	server, err := proxy.StartHTTP(ctx, proxy.ProxyConfig{
-		ListenAddr: net.JoinHostPort("", strconv.Itoa(req.Config.HTTPPort)),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return stopFunc(server.Close), nil
 }
 
 type stopFunc func() error

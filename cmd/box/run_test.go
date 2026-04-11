@@ -1,15 +1,26 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+	"unsafe"
 
+	"gvisor-net/internal/config"
+	"gvisor-net/internal/gvisor"
+	"gvisor-net/internal/proxy"
+	"gvisor-net/internal/rootfs"
 	boxruntime "gvisor-net/internal/runtime"
 )
 
@@ -266,6 +277,382 @@ func TestCheckMonitorOwnershipFailsClosedWhenProbeErrors(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorPrintsMonitorSummaryToStderr(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	rt := &fakeRuntimeHandle{
+		summary: "Monitor summary\nDNS:\n  example.com [ALLOW]: 1\nTotal events: 1\n",
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-a",
+			StateDir:  "/tmp/runtime-a",
+			Net: boxruntime.NetResources{
+				NetNS: "box-runtime-a",
+			},
+		},
+	}
+
+	exec := runtimeExecutor{
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(path, cwd string) (config.Config, error) {
+			if path != "box.yaml" {
+				t.Fatalf("loadConfig path = %q, want %q", path, "box.yaml")
+			}
+			if cwd != "/workspace" {
+				t.Fatalf("loadConfig cwd = %q, want %q", cwd, "/workspace")
+			}
+			return config.Config{}, nil
+		},
+			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+				return rt, nil
+			},
+			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+				return rootfs.Plan{}, nil
+			},
+			applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+				if req.BundleDir != "/tmp/runtime-a/bundle" {
+					t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
+				}
+				return rootfs.ApplyResult{}, nil
+			},
+			buildSandboxSpec: func(req gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+				if req.NetworkNamespacePath != "/run/netns/box-runtime-a" {
+					t.Fatalf("NetworkNamespacePath = %q, want %q", req.NetworkNamespacePath, "/run/netns/box-runtime-a")
+				}
+				if req.Payload != "" {
+					t.Fatalf("Payload = %q, want empty shell command for this test", req.Payload)
+				}
+				return gvisor.Spec{}, nil
+			},
+			writeBundleSpec: func(bundleDir string, _ gvisor.Spec) error {
+				if bundleDir != "/tmp/runtime-a/bundle" {
+					t.Fatalf("bundleDir = %q, want %q", bundleDir, "/tmp/runtime-a/bundle")
+				}
+				return nil
+			},
+			runSandbox: func(req gvisor.RunRequest) error {
+				if req.BundleDir != "/tmp/runtime-a/bundle" {
+					t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
+				}
+				if req.ContainerID != "runtime-a" {
+					t.Fatalf("ContainerID = %q, want %q", req.ContainerID, "runtime-a")
+				}
+				if req.NetNS != "box-runtime-a" {
+					t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-runtime-a")
+				}
+				return nil
+			},
+		}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !rt.cleaned {
+		t.Fatalf("runtime cleanup was not called")
+	}
+	if got := stderr.String(); got != rt.summary {
+		t.Fatalf("stderr = %q, want %q", got, rt.summary)
+	}
+}
+
+func TestRuntimeExecutorPrintsMonitorSummaryWhenPayloadFails(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	payloadErr := errors.New("payload failed")
+	rt := &fakeRuntimeHandle{
+		summary: "Monitor summary\nHTTP:\n  GET example.com [ALLOW]: 1\nTotal events: 1\n",
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-b",
+			StateDir:  "/tmp/runtime-b",
+			Net: boxruntime.NetResources{
+				NetNS: "box-runtime-b",
+			},
+		},
+	}
+
+	exec := runtimeExecutor{
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+			loadConfig: func(string, string) (config.Config, error) {
+				return config.Config{}, nil
+			},
+			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+				return rt, nil
+			},
+			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+				return rootfs.Plan{}, nil
+			},
+			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+				return rootfs.ApplyResult{}, nil
+			},
+			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+				return gvisor.Spec{}, nil
+			},
+			writeBundleSpec: func(string, gvisor.Spec) error {
+				return nil
+			},
+			runSandbox: func(gvisor.RunRequest) error {
+				return payloadErr
+			},
+		}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/false"},
+	})
+	if !errors.Is(err, payloadErr) {
+		t.Fatalf("Run() error = %v, want payload error", err)
+	}
+	if !rt.cleaned {
+		t.Fatalf("runtime cleanup was not called")
+	}
+	if got := stderr.String(); got != rt.summary {
+		t.Fatalf("stderr = %q, want %q", got, rt.summary)
+	}
+}
+
+func TestRuntimeExecutorPassesRuntimeNetNSToSandboxRunner(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-c",
+			StateDir:  "/tmp/runtime-c",
+			Net: boxruntime.NetResources{
+				NetNS: "box-deadbeef",
+			},
+		},
+	}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+			loadConfig: func(string, string) (config.Config, error) {
+				return config.Config{}, nil
+			},
+			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+				return rt, nil
+			},
+			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+				return rootfs.Plan{}, nil
+			},
+			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+				return rootfs.ApplyResult{}, nil
+			},
+			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+				return gvisor.Spec{}, nil
+			},
+			writeBundleSpec: func(string, gvisor.Spec) error {
+				return nil
+			},
+			runSandbox: func(req gvisor.RunRequest) error {
+				if req.NetNS != "box-deadbeef" {
+					t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-deadbeef")
+				}
+				return nil
+			},
+		}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRuntimeExecutorSuppliesMonitorDNSAndProxyFactories(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+			startRuntime: func(_ context.Context, _ config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
+				if deps.DNS == nil {
+					t.Fatalf("Deps.DNS = nil, want non-nil")
+			}
+			if deps.Proxy == nil {
+				t.Fatalf("Deps.Proxy = nil, want non-nil")
+				}
+				return rt, nil
+			},
+			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+				return rootfs.Plan{}, nil
+			},
+			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+				return rootfs.ApplyResult{}, nil
+			},
+			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+				return gvisor.Spec{}, nil
+			},
+			writeBundleSpec: func(string, gvisor.Spec) error {
+				return nil
+			},
+			runSandbox: func(gvisor.RunRequest) error {
+				return nil
+			},
+		}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestStartTransparentProxyInvokesCallbackAndStopsBothListeners(t *testing.T) {
+	t.Parallel()
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() upstream error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+	}()
+
+	var listeners []net.Listener
+	events := make(chan proxy.Event, 1)
+	runner, err := startTransparentProxyWithDeps(context.Background(), boxruntime.ProxyStartRequest{
+		Config: config.TransparentProxyConfig{
+			HTTPPort: 18080,
+			TLSPort:  18443,
+		},
+		OnEvent: func(ev proxy.Event) {
+			events <- ev
+		},
+	}, proxyFactoryDeps{
+		listen: func(network, address string) (net.Listener, error) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err == nil {
+				listeners = append(listeners, ln)
+			}
+			return ln, err
+		},
+		startHTTP: proxy.StartHTTP,
+		startTLS:  proxy.StartTLS,
+		resolveUpstream: func(net.Conn) (string, error) {
+			return upstream.Addr().String(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("startTransparentProxyWithDeps() error = %v", err)
+	}
+
+	if len(listeners) != 2 {
+		t.Fatalf("listeners started = %d, want 2", len(listeners))
+	}
+
+	client, err := net.Dial("tcp", listeners[0].Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	req := "GET /hello?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	if _, err := client.Write([]byte(req)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	_ = client.Close()
+	if !bytes.Contains(resp, []byte("\r\n\r\nok")) {
+		t.Fatalf("response = %q, want body ok", string(resp))
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Protocol != "http" {
+			t.Fatalf("Event.Protocol = %q, want %q", ev.Protocol, "http")
+		}
+		if ev.Hostname != "example.com" {
+			t.Fatalf("Event.Hostname = %q, want %q", ev.Hostname, "example.com")
+		}
+		if ev.Method != "GET" {
+			t.Fatalf("Event.Method = %q, want %q", ev.Method, "GET")
+		}
+		if ev.Path != "/hello" {
+			t.Fatalf("Event.Path = %q, want %q", ev.Path, "/hello")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for proxy event")
+	}
+
+	if err := runner.Stop(); err != nil {
+		t.Fatalf("runner.Stop() error = %v", err)
+	}
+	<-upstreamDone
+
+	for i, ln := range listeners {
+		conn, err := net.DialTimeout("tcp", ln.Addr().String(), 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("listener %d still accepts connections after Stop()", i)
+		}
+	}
+}
+
+func TestDecodeSockaddrPortReadsNetworkByteOrder(t *testing.T) {
+	t.Parallel()
+
+	var port uint16
+	raw := (*[2]byte)(unsafe.Pointer(&port))
+	binary.BigEndian.PutUint16(raw[:], 8080)
+
+	if got := decodeSockaddrPort(port); got != 8080 {
+		t.Fatalf("decodeSockaddrPort() = %d, want %d", got, 8080)
+	}
+}
+
+func TestOriginalDstIPv4DecodesPortFromSockaddrBytes(t *testing.T) {
+	t.Parallel()
+
+	var raw syscall.RawSockaddrInet4
+	raw.Addr = [4]byte{203, 0, 113, 7}
+	binary.BigEndian.PutUint16((*[2]byte)(unsafe.Pointer(&raw.Port))[:], 8443)
+
+	addr := tcpAddrFromSockaddrIPv4(raw)
+	if addr.Port != 8443 {
+		t.Fatalf("tcpAddrFromSockaddrIPv4().Port = %d, want %d", addr.Port, 8443)
+	}
+	if got := addr.IP.String(); got != "203.0.113.7" {
+		t.Fatalf("tcpAddrFromSockaddrIPv4().IP = %q, want %q", got, "203.0.113.7")
+	}
+}
+
 type preflightCommandResult struct {
 	output string
 	err    error
@@ -280,4 +667,31 @@ func fakePreflightRunner(results map[string]preflightCommandResult) preflightCom
 		}
 		return result.output, result.err
 	}
+}
+
+type fakeRuntimeHandle struct {
+	summary string
+	cleaned bool
+	manifest boxruntime.Manifest
+	netns   string
+}
+
+func (f *fakeRuntimeHandle) Cleanup(context.Context, boxruntime.Deps) error {
+	f.cleaned = true
+	return nil
+}
+
+func (f *fakeRuntimeHandle) MonitorSummary() string {
+	return f.summary
+}
+
+func (f *fakeRuntimeHandle) PayloadNetNS() string {
+	return f.netns
+}
+
+func (f *fakeRuntimeHandle) RuntimeManifest() boxruntime.Manifest {
+	if f.netns != "" && f.manifest.Net.NetNS == "" {
+		f.manifest.Net.NetNS = f.netns
+	}
+	return f.manifest
 }
