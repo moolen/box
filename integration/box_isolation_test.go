@@ -22,6 +22,10 @@ func TestBoxCannotWriteReadOnlyUsr(t *testing.T) {
 		_ = os.Remove(sentinel)
 		t.Fatalf("expected write to /usr to fail; stderr=%q", stderr)
 	}
+	lowerStderr := strings.ToLower(stderr)
+	if !strings.Contains(lowerStderr, "read-only file system") && !strings.Contains(lowerStderr, "permission denied") {
+		t.Fatalf("expected readonly or permission error for /usr write, got stderr=%q", stderr)
+	}
 }
 
 func TestBoxCanWriteTmp(t *testing.T) {
