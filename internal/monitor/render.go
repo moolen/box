@@ -16,9 +16,9 @@ func RenderSummary(snapshot Snapshot) string {
 		b.WriteString("DNS:\n")
 		keys := sortedHosts(snapshot.DNS)
 		for _, host := range keys {
-			count := snapshot.DNS[host]
-			total += count
-			b.WriteString(fmt.Sprintf("  %s: %d\n", host, count))
+			row := snapshot.DNS[host]
+			total += row.Count
+			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", host, row.Verdict, row.Count))
 		}
 	}
 
@@ -26,9 +26,9 @@ func RenderSummary(snapshot Snapshot) string {
 		b.WriteString("HTTP:\n")
 		keys := sortedHTTPKeys(snapshot.HTTP)
 		for _, key := range keys {
-			count := snapshot.HTTP[key]
-			total += count
-			b.WriteString(fmt.Sprintf("  %s %s: %d\n", key.Method, key.Hostname, count))
+			row := snapshot.HTTP[key]
+			total += row.Count
+			b.WriteString(fmt.Sprintf("  %s %s [%s]: %d\n", key.Method, key.Hostname, row.Verdict, row.Count))
 		}
 	}
 
@@ -36,9 +36,9 @@ func RenderSummary(snapshot Snapshot) string {
 		b.WriteString("TLS:\n")
 		keys := sortedHosts(snapshot.TLS)
 		for _, host := range keys {
-			count := snapshot.TLS[host]
-			total += count
-			b.WriteString(fmt.Sprintf("  %s: %d\n", host, count))
+			row := snapshot.TLS[host]
+			total += row.Count
+			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", host, row.Verdict, row.Count))
 		}
 	}
 
@@ -46,7 +46,7 @@ func RenderSummary(snapshot Snapshot) string {
 	return b.String()
 }
 
-func sortedHosts(m map[string]int) []string {
+func sortedHosts(m map[string]Row) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
@@ -55,7 +55,7 @@ func sortedHosts(m map[string]int) []string {
 	return keys
 }
 
-func sortedHTTPKeys(m map[HTTPKey]int) []HTTPKey {
+func sortedHTTPKeys(m map[HTTPKey]Row) []HTTPKey {
 	keys := make([]HTTPKey, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
