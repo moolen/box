@@ -169,6 +169,54 @@ func TestForwarderEmitsHostnameEvent(t *testing.T) {
 	}
 }
 
+func TestForwarderDoesNotEmitHostnameEventWhenParsingFails(t *testing.T) {
+	upstreamAddr, upstreamShutdown := startFakeUpstream(t, func(query []byte) []byte {
+		response := make([]byte, len(query))
+		copy(response, query)
+		return response
+	})
+	defer upstreamShutdown()
+
+	events := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := Start(ctx, Config{
+		ListenAddr: "127.0.0.1:0",
+		Upstreams:  []string{upstreamAddr},
+		OnQuery: func(hostname string) {
+			events <- hostname
+		},
+	}, Deps{})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("udp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	invalidQuery := []byte{0xde, 0xad, 0xbe}
+	if _, err := client.Write(invalidQuery); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	if _, err := client.Read(buf); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	select {
+	case got := <-events:
+		t.Fatalf("unexpected hostname event = %q", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func startFakeUpstream(t *testing.T, responder func(query []byte) []byte) (addr string, shutdown func()) {
 	t.Helper()
 

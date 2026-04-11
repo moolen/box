@@ -144,8 +144,9 @@ func (s *Server) serve(ctx context.Context) {
 		copy(query, buf[:n])
 
 		if s.onQuery != nil {
-			hostname, _ := parseQueryHostname(query)
-			s.onQuery(hostname)
+			if hostname, ok := parseQueryHostname(query); ok {
+				s.onQuery(hostname)
+			}
 		}
 
 		s.wg.Add(1)
@@ -222,8 +223,6 @@ func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
 
 	labels := make([]string, 0, 4)
 	curr := off
-	next := off
-	jumped := false
 
 	for {
 		if curr >= len(msg) {
@@ -232,10 +231,7 @@ func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
 
 		n := msg[curr]
 		if n == 0 {
-			if !jumped {
-				next = curr + 1
-			}
-			return strings.Join(labels, "."), next, true
+			return strings.Join(labels, "."), curr + 1, true
 		}
 
 		if n&0xC0 == 0xC0 {
@@ -250,10 +246,7 @@ func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
 			if label != "" {
 				labels = append(labels, label)
 			}
-			if !jumped {
-				next = curr + 2
-			}
-			return strings.Join(labels, "."), next, true
+			return strings.Join(labels, "."), curr + 2, true
 		}
 
 		labelLen := int(n)
@@ -267,8 +260,5 @@ func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
 
 		labels = append(labels, string(msg[curr:curr+labelLen]))
 		curr += labelLen
-		if !jumped {
-			next = curr
-		}
 	}
 }
