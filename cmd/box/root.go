@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,17 +100,55 @@ func runPayload(d deps, configPath string, payload []string) error {
 	return d.executor.Run(req)
 }
 
-type runtimeExecutor struct{}
+type runtimeHandle interface {
+	Cleanup(context.Context, boxruntime.Deps) error
+	MonitorSummary() string
+}
 
-func (runtimeExecutor) Run(req runRequest) error {
+type runtimeExecutor struct {
+	stderr       io.Writer
+	getwd        func() (string, error)
+	loadConfig   func(path, cwd string) (config.Config, error)
+	startRuntime func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
+	runPayload   func(context.Context, []string) error
+}
+
+func (e runtimeExecutor) Run(req runRequest) error {
 	ctx := context.Background()
 
-	cwd, err := os.Getwd()
+	getwd := e.getwd
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+
+	loadConfig := e.loadConfig
+	if loadConfig == nil {
+		loadConfig = config.Load
+	}
+
+	startRuntime := e.startRuntime
+	if startRuntime == nil {
+		startRuntime = func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
+			return boxruntime.Run(ctx, boxruntime.Request{Config: cfg}, deps)
+		}
+	}
+
+	runPayload := e.runPayload
+	if runPayload == nil {
+		runPayload = runPayloadCommand
+	}
+
+	stderr := e.stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("determine working directory: %w", err)
 	}
 
-	cfg, err := config.Load(req.ConfigPath, cwd)
+	cfg, err := loadConfig(req.ConfigPath, cwd)
 	if err != nil {
 		return err
 	}
@@ -119,14 +158,15 @@ func (runtimeExecutor) Run(req runRequest) error {
 		MonitorPreflight: monitorPreflight,
 	}
 
-	rt, err := boxruntime.Run(ctx, boxruntime.Request{Config: cfg}, deps)
+	rt, err := startRuntime(ctx, cfg, deps)
 	if err != nil {
 		return err
 	}
 
-	payloadErr := runPayloadCommand(ctx, req.Payload)
+	payloadErr := runPayload(ctx, req.Payload)
 	cleanupErr := rt.Cleanup(ctx, deps)
-	return errors.Join(payloadErr, cleanupErr)
+	summaryErr := writeMonitorSummary(stderr, rt.MonitorSummary())
+	return errors.Join(payloadErr, cleanupErr, summaryErr)
 }
 
 type hostCommandExec struct{}
@@ -145,6 +185,14 @@ func runPayloadCommand(ctx context.Context, payload []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func writeMonitorSummary(stderr io.Writer, summary string) error {
+	if stderr == nil || strings.TrimSpace(summary) == "" {
+		return nil
+	}
+	_, err := io.WriteString(stderr, summary)
+	return err
 }
 
 type preflightCommandRunner func(ctx context.Context, name string, args ...string) (string, error)

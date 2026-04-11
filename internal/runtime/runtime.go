@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/dns"
 	"gvisor-net/internal/firewall"
+	"gvisor-net/internal/monitor"
 	"gvisor-net/internal/netns"
+	"gvisor-net/internal/proxy"
 	"gvisor-net/internal/rootfs"
 )
 
@@ -57,11 +60,13 @@ type DNSStartRequest struct {
 	Mode      string
 	GatewayIP string
 	Config    dns.Config
+	OnQuery   func(hostname string)
 }
 
 type ProxyStartRequest struct {
-	Mode   string
-	Config config.TransparentProxyConfig
+	Mode    string
+	Config  config.TransparentProxyConfig
+	OnEvent func(proxy.Event)
 }
 
 type MonitorPreflightRequest struct {
@@ -76,6 +81,8 @@ type MonitorPreflightFunc func(ctx context.Context, req MonitorPreflightRequest)
 type Runtime struct {
 	Manifest Manifest
 	runners  map[string]Runner
+	monitor  *monitor.Collector
+	eventMu  sync.Mutex
 }
 
 type Manifest struct {
@@ -209,6 +216,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}()
 
 	if strings.EqualFold(network, "monitor") {
+		rt.monitor = monitor.NewCollector(req.Config.Policy)
 		if err := rt.startMonitorResources(ctx, req.Config, deps); err != nil {
 			return nil, err
 		}
@@ -239,6 +247,13 @@ func (rt *Runtime) Cleanup(ctx context.Context, deps Deps) error {
 	})
 }
 
+func (rt *Runtime) MonitorSummary() string {
+	if rt == nil || rt.monitor == nil {
+		return ""
+	}
+	return monitor.RenderSummary(rt.monitor.Snapshot())
+}
+
 func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config, deps Deps) error {
 	if deps.MonitorPreflight == nil {
 		return conflictError(errors.New("monitor preflight conflict/ownership check is required"))
@@ -253,13 +268,16 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 
 	if deps.DNS != nil {
+		onQuery := rt.monitorDNSCallback()
 		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
 			Mode:      cfg.Network.Mode,
 			GatewayIP: rt.Manifest.GatewayIP,
 			Config: dns.Config{
 				ListenAddr: cfg.Network.DNS.BindAddr,
 				Upstreams:  append([]string(nil), cfg.Network.DNS.Upstream...),
+				OnQuery:    onQuery,
 			},
+			OnQuery: onQuery,
 		})
 		if err != nil {
 			return fmt.Errorf("start dns: %w", err)
@@ -309,9 +327,11 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 
 	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
+		onEvent := rt.monitorProxyCallback()
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:   cfg.Network.TransparentProxy.Mode,
-			Config: cfg.Network.TransparentProxy,
+			Mode:    cfg.Network.TransparentProxy.Mode,
+			Config:  cfg.Network.TransparentProxy,
+			OnEvent: onEvent,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -323,6 +343,79 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 
 	return nil
+}
+
+func (rt *Runtime) monitorDNSCallback() func(hostname string) {
+	if rt == nil || rt.monitor == nil {
+		return nil
+	}
+	return func(hostname string) {
+		rt.monitor.AddDNS(hostname)
+		rt.logRawMonitorEvent(rawMonitorEvent{
+			Type:     "dns",
+			Hostname: hostname,
+		})
+	}
+}
+
+func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
+	if rt == nil || rt.monitor == nil {
+		return nil
+	}
+	return func(event proxy.Event) {
+		hostname := proxyEventHostname(event)
+		switch strings.ToLower(strings.TrimSpace(event.Protocol)) {
+		case "http":
+			rt.monitor.AddHTTP(event.Method, hostname)
+		case "tls":
+			rt.monitor.AddTLS(hostname)
+		}
+
+		rt.logRawMonitorEvent(rawMonitorEvent{
+			Type:     "proxy",
+			Protocol: event.Protocol,
+			Hostname: hostname,
+			Method:   event.Method,
+			Path:     event.Path,
+			Host:     event.Host,
+			SNI:      event.SNI,
+		})
+	}
+}
+
+type rawMonitorEvent struct {
+	Type     string `json:"type"`
+	Protocol string `json:"protocol,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+	Method   string `json:"method,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Host     string `json:"host,omitempty"`
+	SNI      string `json:"sni,omitempty"`
+}
+
+func (rt *Runtime) logRawMonitorEvent(event rawMonitorEvent) {
+	if rt == nil {
+		return
+	}
+
+	line, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+
+	rt.eventMu.Lock()
+	defer rt.eventMu.Unlock()
+	_ = appendEvent(rt.Manifest.EventLogPath, string(line))
+}
+
+func proxyEventHostname(event proxy.Event) string {
+	if hostname := strings.TrimSpace(event.Hostname); hostname != "" {
+		return hostname
+	}
+	if host := strings.TrimSpace(event.Host); host != "" {
+		return host
+	}
+	return strings.TrimSpace(event.SNI)
 }
 
 func nowUTC(deps Deps) time.Time {

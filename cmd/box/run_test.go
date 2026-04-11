@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"gvisor-net/internal/config"
 	boxruntime "gvisor-net/internal/runtime"
 )
 
@@ -258,6 +260,94 @@ func TestCheckMonitorOwnershipFailsClosedWhenProbeErrors(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorPrintsMonitorSummaryToStderr(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	rt := &fakeRuntimeHandle{
+		summary: "Monitor summary\nDNS:\n  example.com [ALLOW]: 1\nTotal events: 1\n",
+	}
+
+	exec := runtimeExecutor{
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(path, cwd string) (config.Config, error) {
+			if path != "box.yaml" {
+				t.Fatalf("loadConfig path = %q, want %q", path, "box.yaml")
+			}
+			if cwd != "/workspace" {
+				t.Fatalf("loadConfig cwd = %q, want %q", cwd, "/workspace")
+			}
+			return config.Config{}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		runPayload: func(_ context.Context, payload []string) error {
+			if got, want := payload, []string{"/bin/true"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("payload = %#v, want %#v", got, want)
+			}
+			return nil
+		},
+	}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !rt.cleaned {
+		t.Fatalf("runtime cleanup was not called")
+	}
+	if got := stderr.String(); got != rt.summary {
+		t.Fatalf("stderr = %q, want %q", got, rt.summary)
+	}
+}
+
+func TestRuntimeExecutorPrintsMonitorSummaryWhenPayloadFails(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	payloadErr := errors.New("payload failed")
+	rt := &fakeRuntimeHandle{
+		summary: "Monitor summary\nHTTP:\n  GET example.com [ALLOW]: 1\nTotal events: 1\n",
+	}
+
+	exec := runtimeExecutor{
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		runPayload: func(context.Context, []string) error {
+			return payloadErr
+		},
+	}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/false"},
+	})
+	if !errors.Is(err, payloadErr) {
+		t.Fatalf("Run() error = %v, want payload error", err)
+	}
+	if !rt.cleaned {
+		t.Fatalf("runtime cleanup was not called")
+	}
+	if got := stderr.String(); got != rt.summary {
+		t.Fatalf("stderr = %q, want %q", got, rt.summary)
+	}
+}
+
 type preflightCommandResult struct {
 	output string
 	err    error
@@ -272,4 +362,18 @@ func fakePreflightRunner(results map[string]preflightCommandResult) preflightCom
 		}
 		return result.output, result.err
 	}
+}
+
+type fakeRuntimeHandle struct {
+	summary string
+	cleaned bool
+}
+
+func (f *fakeRuntimeHandle) Cleanup(context.Context, boxruntime.Deps) error {
+	f.cleaned = true
+	return nil
+}
+
+func (f *fakeRuntimeHandle) MonitorSummary() string {
+	return f.summary
 }
