@@ -5,13 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gvisor-net/internal/config"
+	"gvisor-net/internal/proxy"
 	boxruntime "gvisor-net/internal/runtime"
 )
 
@@ -345,6 +349,148 @@ func TestRuntimeExecutorPrintsMonitorSummaryWhenPayloadFails(t *testing.T) {
 	}
 	if got := stderr.String(); got != rt.summary {
 		t.Fatalf("stderr = %q, want %q", got, rt.summary)
+	}
+}
+
+func TestRuntimeExecutorSuppliesMonitorDNSAndProxyFactories(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+		startRuntime: func(_ context.Context, _ config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
+			if deps.DNS == nil {
+				t.Fatalf("Deps.DNS = nil, want non-nil")
+			}
+			if deps.Proxy == nil {
+				t.Fatalf("Deps.Proxy = nil, want non-nil")
+			}
+			return rt, nil
+		},
+		runPayload: func(context.Context, []string) error {
+			return nil
+		},
+	}
+
+	err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestStartTransparentProxyInvokesCallbackAndStopsBothListeners(t *testing.T) {
+	t.Parallel()
+
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() upstream error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+	}()
+
+	var listeners []net.Listener
+	events := make(chan proxy.Event, 1)
+	runner, err := startTransparentProxyWithDeps(context.Background(), boxruntime.ProxyStartRequest{
+		Config: config.TransparentProxyConfig{
+			HTTPPort: 18080,
+			TLSPort:  18443,
+		},
+		OnEvent: func(ev proxy.Event) {
+			events <- ev
+		},
+	}, proxyFactoryDeps{
+		listen: func(network, address string) (net.Listener, error) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err == nil {
+				listeners = append(listeners, ln)
+			}
+			return ln, err
+		},
+		startHTTP: proxy.StartHTTP,
+		startTLS:  proxy.StartTLS,
+		resolveUpstream: func(net.Conn) (string, error) {
+			return upstream.Addr().String(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("startTransparentProxyWithDeps() error = %v", err)
+	}
+
+	if len(listeners) != 2 {
+		t.Fatalf("listeners started = %d, want 2", len(listeners))
+	}
+
+	client, err := net.Dial("tcp", listeners[0].Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+
+	req := "GET /hello?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	if _, err := client.Write([]byte(req)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	_ = client.Close()
+	if !bytes.Contains(resp, []byte("\r\n\r\nok")) {
+		t.Fatalf("response = %q, want body ok", string(resp))
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Protocol != "http" {
+			t.Fatalf("Event.Protocol = %q, want %q", ev.Protocol, "http")
+		}
+		if ev.Hostname != "example.com" {
+			t.Fatalf("Event.Hostname = %q, want %q", ev.Hostname, "example.com")
+		}
+		if ev.Method != "GET" {
+			t.Fatalf("Event.Method = %q, want %q", ev.Method, "GET")
+		}
+		if ev.Path != "/hello" {
+			t.Fatalf("Event.Path = %q, want %q", ev.Path, "/hello")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for proxy event")
+	}
+
+	if err := runner.Stop(); err != nil {
+		t.Fatalf("runner.Stop() error = %v", err)
+	}
+	<-upstreamDone
+
+	for i, ln := range listeners {
+		conn, err := net.DialTimeout("tcp", ln.Addr().String(), 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("listener %d still accepts connections after Stop()", i)
+		}
 	}
 }
 

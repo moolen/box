@@ -29,6 +29,8 @@ box -- <command...>
 box run -- <command...>
 ```
 
+In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end of the run.
+
 Integration tests cover:
 
 - `pwd`
