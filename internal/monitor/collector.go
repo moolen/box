@@ -27,7 +27,7 @@ type Snapshot struct {
 
 type Collector struct {
 	mu     sync.Mutex
-	policy config.PolicyConfig
+	policy Policy
 	dns    map[string]Row
 	http   map[HTTPKey]Row
 	tls    map[string]Row
@@ -35,7 +35,7 @@ type Collector struct {
 
 func NewCollector(policy config.PolicyConfig) *Collector {
 	return &Collector{
-		policy: policy,
+		policy: CompilePolicy(policy),
 		dns:    make(map[string]Row),
 		http:   make(map[HTTPKey]Row),
 		tls:    make(map[string]Row),
@@ -50,7 +50,7 @@ func (c *Collector) AddDNS(hostname string) {
 
 	row := c.dns[display]
 	row.Count++
-	row.Verdict = EvaluateHostname(c.policy, normalized)
+	row.Verdict = c.policy.EvaluateNormalized(normalized)
 	c.dns[display] = row
 }
 
@@ -62,7 +62,7 @@ func (c *Collector) AddTLS(hostname string) {
 
 	row := c.tls[display]
 	row.Count++
-	row.Verdict = EvaluateHostname(c.policy, normalized)
+	row.Verdict = c.policy.EvaluateNormalized(normalized)
 	c.tls[display] = row
 }
 
@@ -78,7 +78,7 @@ func (c *Collector) AddHTTP(method string, hostname string) {
 
 	row := c.http[key]
 	row.Count++
-	row.Verdict = EvaluateHostname(c.policy, normalized)
+	row.Verdict = c.policy.EvaluateNormalized(normalized)
 	c.http[key] = row
 }
 

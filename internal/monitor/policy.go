@@ -16,6 +16,12 @@ const (
 	VerdictDeny  Verdict = "deny"
 )
 
+type Policy struct {
+	allow   []string
+	deny    []string
+	invalid bool
+}
+
 func NormalizeHostname(hostname string) string {
 	normalized := strings.TrimSpace(hostname)
 	if normalized == "" {
@@ -39,35 +45,56 @@ func NormalizeHostname(hostname string) string {
 }
 
 func EvaluateHostname(policy config.PolicyConfig, hostname string) Verdict {
+	return CompilePolicy(policy).Evaluate(hostname)
+}
+
+func CompilePolicy(policy config.PolicyConfig) Policy {
+	compiled := Policy{}
+	compiled.allow, compiled.invalid = normalizeRules(policy.AllowDomains)
+	compiled.deny, compiled.invalid = appendNormalizedRules(policy.DenyDomains, compiled.invalid)
+	return compiled
+}
+
+func (p Policy) Evaluate(hostname string) Verdict {
 	host := NormalizeHostname(hostname)
+	return p.EvaluateNormalized(host)
+}
+
+func (p Policy) EvaluateNormalized(host string) Verdict {
+	if p.invalid {
+		return VerdictDeny
+	}
 	if host == "" {
 		return VerdictDeny
 	}
-
-	allowRules := normalizeRules(policy.AllowDomains)
-	denyRules := normalizeRules(policy.DenyDomains)
-
-	if matchesAny(host, denyRules) {
+	if matchesAny(host, p.deny) {
 		return VerdictDeny
 	}
-
-	if len(allowRules) > 0 && !matchesAny(host, allowRules) {
+	if len(p.allow) > 0 && !matchesAny(host, p.allow) {
 		return VerdictDeny
 	}
-
 	return VerdictAllow
 }
 
-func normalizeRules(rules []string) []string {
+func normalizeRules(rules []string) ([]string, bool) {
+	return appendNormalizedRules(rules, false)
+}
+
+func appendNormalizedRules(rules []string, invalid bool) ([]string, bool) {
 	out := make([]string, 0, len(rules))
 	for _, rule := range rules {
+		trimmed := strings.TrimSpace(rule)
+		if trimmed == "" {
+			continue
+		}
 		normalized := NormalizeHostname(rule)
 		if normalized == "" {
+			invalid = true
 			continue
 		}
 		out = append(out, normalized)
 	}
-	return out
+	return out, invalid
 }
 
 func matchesAny(host string, rules []string) bool {

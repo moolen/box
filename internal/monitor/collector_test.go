@@ -29,6 +29,46 @@ func TestVerdictDenyWinsOverAllow(t *testing.T) {
 	}
 }
 
+func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy config.PolicyConfig
+		host   string
+	}{
+		{
+			name: "malformed allow rule",
+			policy: config.PolicyConfig{
+				AllowDomains: []string{"bad rule"},
+			},
+			host: "example.com",
+		},
+		{
+			name: "malformed deny rule",
+			policy: config.PolicyConfig{
+				DenyDomains: []string{"https://blocked.example.com"},
+			},
+			host: "example.com",
+		},
+		{
+			name: "mixed valid and malformed rules",
+			policy: config.PolicyConfig{
+				AllowDomains: []string{"example.com"},
+				DenyDomains:  []string{"bad/deny"},
+			},
+			host: "example.com",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EvaluateHostname(tc.policy, tc.host)
+			if got != VerdictDeny {
+				t.Fatalf("EvaluateHostname() = %q, want %q for conservative handling of malformed rules", got, VerdictDeny)
+			}
+		})
+	}
+}
+
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector := NewCollector(config.PolicyConfig{
 		AllowDomains: []string{"example.com"},
