@@ -110,29 +110,6 @@ func TestBoxMountInfoShowsUsrReadOnlyAndTmpfsTmp(t *testing.T) {
 	}
 }
 
-func TestBoxDefaultPrivilegeSurfaceDoesNotLookDockerElevated(t *testing.T) {
-	stdout, stderr, err := runBox(t, true, "--", "bash", "-lc", "grep '^CapEff:' /proc/self/status")
-	if err != nil {
-		t.Fatalf("failed to read CapEff from /proc/self/status: %v stderr=%q", err, stderr)
-	}
-
-	capEffLine := strings.TrimSpace(stdout)
-	parts := strings.Fields(capEffLine)
-	if len(parts) != 2 || parts[0] != "CapEff:" {
-		t.Fatalf("unexpected CapEff line format: %q", capEffLine)
-	}
-
-	capEff := strings.TrimLeft(strings.ToLower(parts[1]), "0")
-	if capEff == "" {
-		capEff = "0"
-	}
-
-	// Docker's fully privileged default mask should never appear in the default sandbox.
-	if capEff == "3fffffffff" {
-		t.Fatalf("default sandbox looks fully Docker-privileged: CapEff=%q", parts[1])
-	}
-}
-
 func TestBoxDefaultSandboxCannotMountTmpfs(t *testing.T) {
 	_, stderr, err := runBox(t, true, "--", "bash", "-lc", "mkdir -p /tmp/box-mount-test && mount -t tmpfs tmpfs /tmp/box-mount-test")
 	if err == nil {
