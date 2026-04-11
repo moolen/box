@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -103,6 +104,71 @@ func TestForwarderShutdownClosesListener(t *testing.T) {
 	_ = ln.Close()
 }
 
+func TestParseQueryHostnameReturnsFirstQuestionName(t *testing.T) {
+	t.Parallel()
+
+	query := buildDNSQuery(t, []string{"first.example.com", "second.example.com"})
+
+	got, ok := parseQueryHostname(query)
+	if !ok {
+		t.Fatalf("parseQueryHostname() ok = false, want true")
+	}
+	if got != "first.example.com" {
+		t.Fatalf("parseQueryHostname() = %q, want %q", got, "first.example.com")
+	}
+}
+
+func TestForwarderEmitsHostnameEvent(t *testing.T) {
+	upstreamAddr, upstreamShutdown := startFakeUpstream(t, func(query []byte) []byte {
+		response := make([]byte, len(query))
+		copy(response, query)
+		return response
+	})
+	defer upstreamShutdown()
+
+	events := make(chan string, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := Start(ctx, Config{
+		ListenAddr: "127.0.0.1:0",
+		Upstreams:  []string{upstreamAddr},
+		OnQuery: func(hostname string) {
+			events <- hostname
+		},
+	}, Deps{})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("udp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	query := buildDNSQuery(t, []string{"monitor.example.com"})
+	if _, err := client.Write(query); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	if _, err := client.Read(buf); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	select {
+	case got := <-events:
+		if got != "monitor.example.com" {
+			t.Fatalf("event hostname = %q, want %q", got, "monitor.example.com")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for query event")
+	}
+}
+
 func startFakeUpstream(t *testing.T, responder func(query []byte) []byte) (addr string, shutdown func()) {
 	t.Helper()
 
@@ -132,4 +198,39 @@ func startFakeUpstream(t *testing.T, responder func(query []byte) []byte) (addr 
 		_ = ln.Close()
 		<-done
 	}
+}
+
+func buildDNSQuery(t *testing.T, names []string) []byte {
+	t.Helper()
+	if len(names) == 0 {
+		t.Fatalf("buildDNSQuery() requires at least one name")
+	}
+
+	query := make([]byte, 12)
+	binary.BigEndian.PutUint16(query[0:2], 0x1234) // ID
+	binary.BigEndian.PutUint16(query[2:4], 0x0100) // standard query, recursion desired
+	binary.BigEndian.PutUint16(query[4:6], uint16(len(names)))
+
+	for _, name := range names {
+		for _, label := range splitDomainName(name) {
+			query = append(query, byte(len(label)))
+			query = append(query, label...)
+		}
+		query = append(query, 0x00)       // root
+		query = append(query, 0x00, 0x01) // QTYPE A
+		query = append(query, 0x00, 0x01) // QCLASS IN
+	}
+	return query
+}
+
+func splitDomainName(name string) []string {
+	labels := make([]string, 0, 4)
+	start := 0
+	for i := 0; i <= len(name); i++ {
+		if i == len(name) || name[i] == '.' {
+			labels = append(labels, name[start:i])
+			start = i + 1
+		}
+	}
+	return labels
 }
