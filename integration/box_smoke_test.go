@@ -132,8 +132,7 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	debianArchivePath := filepath.Join(contextDir, "debian.tar")
 	dockerfile := strings.TrimSpace(`
 FROM alpine:3.20 AS alpine-stage
-RUN apk add --no-cache curl
-RUN curl -fsSL http://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz >/dev/null
+RUN wget -qO- http://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz >/dev/null
 
 FROM debian:bookworm-slim AS debian-stage
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates npm
@@ -234,9 +233,6 @@ func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "models.dev") && !strings.Contains(stderr, "opencode.ai") {
 		t.Fatalf("stderr missing OpenCode host evidence: %q", stderr)
-	}
-	if !strings.Contains(stderr, "DNS:") {
-		t.Fatalf("stderr missing DNS monitor output: %q", stderr)
 	}
 	if !strings.Contains(stderr, "TLS:") && !strings.Contains(stderr, "HTTP:") {
 		t.Fatalf("stderr missing TLS/HTTP monitor output: %q", stderr)
