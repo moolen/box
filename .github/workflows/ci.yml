@@ -91,10 +91,20 @@ jobs:
           set -euxo pipefail
           OPENCODE_PREFIX="${RUNNER_TEMP}/opencode-prefix"
           npm install --global --prefix "${OPENCODE_PREFIX}" opencode-ai@1.4.3
-          OPENCODE_REAL_BIN="$(find "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules" -path '*/bin/opencode' -type f | head -n1)"
+          OPENCODE_REAL_BIN=""
+          for candidate in \
+            "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64/bin/opencode" \
+            "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64-baseline/bin/opencode" \
+            "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64-musl/bin/opencode" \
+            "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules/opencode-linux-x64-baseline-musl/bin/opencode"; do
+            if [ -f "${candidate}" ]; then
+              OPENCODE_REAL_BIN="${candidate}"
+              break
+            fi
+          done
           test -n "${OPENCODE_REAL_BIN}"
-          cp "${OPENCODE_REAL_BIN}" "${OPENCODE_PREFIX}/bin/opencode"
-          chmod +x "${OPENCODE_PREFIX}/bin/opencode"
+          rm -f "${OPENCODE_PREFIX}/bin/opencode"
+          install -m 0755 "${OPENCODE_REAL_BIN}" "${OPENCODE_PREFIX}/bin/opencode"
           echo "${OPENCODE_PREFIX}/bin" >> "${GITHUB_PATH}"
           OPENCODE_BIN="${OPENCODE_PREFIX}/bin/opencode"
           echo "OpenCode bin: ${OPENCODE_BIN}"
