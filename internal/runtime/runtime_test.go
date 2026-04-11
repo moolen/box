@@ -706,6 +706,31 @@ func TestRunNormalizesStateRootToAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestRunCreatesMissingStateRootBeforeStartupChecks(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := filepath.Join(t.TempDir(), "missing-state-root")
+	cfg := testConfig("enforce")
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: stateRoot,
+	}, Deps{
+		Clock:    fixedClock,
+		RandomID: func() string { return "runtime-create-missing-state-root" },
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(stateRoot); err != nil {
+		t.Fatalf("state root stat error = %v", err)
+	}
+	if _, err := os.Stat(rt.Manifest.StateDir); err != nil {
+		t.Fatalf("state dir stat error = %v", err)
+	}
+}
+
 func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	t.Parallel()
 

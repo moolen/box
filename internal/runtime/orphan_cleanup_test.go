@@ -144,6 +144,39 @@ func TestCleanupOrphanedRuntimesReturnsErrorWhenTrustedCleanupFails(t *testing.T
 	}
 }
 
+func TestCleanupOrphanedRuntimesSkipsCleanupWhenCommandExecMissing(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	stateDir := filepath.Join(stateRoot, "runtime-orphan-no-exec")
+	manifest := Manifest{
+		RuntimeID:    "runtime-orphan-no-exec",
+		StateRoot:    stateRoot,
+		StateDir:     stateDir,
+		ManifestPath: filepath.Join(stateDir, manifestFileName),
+		TeardownCmds: []string{
+			"nft delete table inet box_orphan_no_exec",
+		},
+		ManagedPaths: []ManagedPath{
+			{Path: filepath.Join(stateDir, manifestFileName), Kind: PathKindFile},
+			{Path: stateDir, Kind: PathKindDir},
+		},
+	}
+	writeOrphanManifestForTest(t, manifest)
+
+	err := cleanupOrphanedRuntimes(context.Background(), stateRoot, nil)
+	if err != nil {
+		t.Fatalf("cleanupOrphanedRuntimes() error = %v", err)
+	}
+
+	if _, err := os.Stat(stateDir); err != nil {
+		t.Fatalf("state dir should remain when command exec is unavailable: %v", err)
+	}
+	if _, err := os.Stat(manifest.ManifestPath); err != nil {
+		t.Fatalf("manifest should remain when command exec is unavailable: %v", err)
+	}
+}
+
 func writeOrphanManifestForTest(t *testing.T, manifest Manifest) {
 	t.Helper()
 

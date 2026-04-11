@@ -147,6 +147,9 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime state root %q: %w", req.StateRoot, err)
 	}
+	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("create runtime state root %q: %w", stateRoot, err)
+	}
 	if err := cleanupOrphanedRuntimes(ctx, stateRoot, deps.CommandExec); err != nil {
 		return nil, err
 	}

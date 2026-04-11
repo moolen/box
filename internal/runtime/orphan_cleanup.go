@@ -9,6 +9,10 @@ import (
 )
 
 func cleanupOrphanedRuntimes(ctx context.Context, stateRoot string, execer CommandExec) error {
+	if execer == nil {
+		return nil
+	}
+
 	entries, err := os.ReadDir(stateRoot)
 	if err != nil {
 		return fmt.Errorf("scan runtime state root %q: %w", stateRoot, err)
