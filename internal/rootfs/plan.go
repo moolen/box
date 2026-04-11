@@ -42,6 +42,7 @@ type GeneratedFile struct {
 type Plan struct {
 	Binds          []Bind
 	GeneratedFiles []GeneratedFile
+	WritableDirs   []string
 }
 
 func BuildPlan(req PlanRequest) (Plan, error) {
@@ -56,6 +57,14 @@ func BuildPlan(req PlanRequest) (Plan, error) {
 	plan := Plan{
 		Binds:          make([]Bind, 0, 24),
 		GeneratedFiles: generatedEtcFiles(req),
+		WritableDirs:   make([]string, 0, 8),
+	}
+
+	for _, path := range writableRuntimeDirs {
+		plan.WritableDirs = appendUniquePath(plan.WritableDirs, path)
+	}
+	if req.DockerEnabled && strings.TrimSpace(req.DockerDataRoot) != "" {
+		plan.WritableDirs = appendUniquePath(plan.WritableDirs, strings.TrimSpace(req.DockerDataRoot))
 	}
 
 	if mode != "host-overlay" {
@@ -70,22 +79,11 @@ func BuildPlan(req PlanRequest) (Plan, error) {
 			plan.Binds = append(plan.Binds, Bind{Source: src, Target: src, ReadOnly: true})
 		}
 	}
-	for _, path := range writableRuntimeDirs {
-		plan.Binds = append(plan.Binds, Bind{Source: path, Target: path, ReadOnly: false})
-	}
 
 	if strings.TrimSpace(req.RepoPath) != "" && strings.TrimSpace(req.Workdir) != "" {
 		plan.Binds = append(plan.Binds, Bind{
 			Source:   req.RepoPath,
 			Target:   req.Workdir,
-			ReadOnly: false,
-		})
-	}
-
-	if req.DockerEnabled && strings.TrimSpace(req.DockerDataRoot) != "" {
-		plan.Binds = append(plan.Binds, Bind{
-			Source:   req.DockerDataRoot,
-			Target:   req.DockerDataRoot,
 			ReadOnly: false,
 		})
 	}
@@ -106,6 +104,14 @@ func BuildPlan(req PlanRequest) (Plan, error) {
 	}
 
 	return plan, nil
+}
+
+func appendUniquePath(paths []string, path string) []string {
+	path = strings.TrimSpace(path)
+	if path == "" || slices.Contains(paths, path) {
+		return paths
+	}
+	return append(paths, path)
 }
 
 func generatedEtcFiles(req PlanRequest) []GeneratedFile {

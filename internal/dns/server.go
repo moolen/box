@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const defaultDNSPort = "1053"
+const defaultDNSPort = "53"
 
 type Config struct {
 	ListenAddr string

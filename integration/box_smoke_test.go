@@ -1,13 +1,16 @@
 package integration
 
 import (
+	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gvisor-net/integration/testenv"
+	"gvisor-net/internal/config"
 )
 
 func TestBoxRunsPwd(t *testing.T) {
@@ -35,6 +38,46 @@ func TestBoxCanCurlExampleDotCom(t *testing.T) {
 	output := runBoxSmoke(t, "curl", "http://example.com")
 	if !strings.Contains(output, "Example Domain") {
 		t.Fatalf("curl output = %q, want Example Domain response body", output)
+	}
+}
+
+func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	cfg, err := config.Load("box.yaml", binary.ModuleRoot)
+	if err != nil {
+		t.Fatalf("config.Load() error = %v", err)
+	}
+
+	prefix, err := netip.ParsePrefix(cfg.Network.Subnet)
+	if err != nil {
+		t.Fatalf("ParsePrefix(%q) error = %v", cfg.Network.Subnet, err)
+	}
+	expectedSandboxIP := prefix.Masked().Addr().Next().Next()
+	expectedCIDR := expectedSandboxIP.String() + "/" + strconv.Itoa(prefix.Bits())
+
+	hostIPOutput, err := exec.Command("ip", "-4", "-o", "addr", "show").CombinedOutput()
+	if err != nil {
+		t.Fatalf("host ip command error = %v: %s", err, strings.TrimSpace(string(hostIPOutput)))
+	}
+	if strings.Contains(string(hostIPOutput), expectedCIDR) {
+		t.Skipf("host already exposes expected sandbox address %q; dirty host state", expectedCIDR)
+	}
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--", "ip", "-4", "-o", "addr", "show")
+	if err != nil {
+		t.Fatalf("run box ip command error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, expectedCIDR) {
+		t.Fatalf("ip output = %q, want sandbox cidr %q", stdout, expectedCIDR)
+	}
+	if stdout == string(hostIPOutput) {
+		t.Fatalf("sandbox ip output matched host network view exactly; stdout=%q", stdout)
 	}
 }
 

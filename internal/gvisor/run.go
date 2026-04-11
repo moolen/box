@@ -10,6 +10,7 @@ import (
 type RunRequest struct {
 	BundleDir   string
 	ContainerID string
+	NetNS       string
 }
 
 type CommandRunner interface {
@@ -39,7 +40,12 @@ func (r Runner) Run(req RunRequest) error {
 		command = ExecCommandRunner{}
 	}
 
-	args := []string{"run", "--bundle", req.BundleDir, req.ContainerID}
+	args := []string{"--ignore-cgroups", "run", "--bundle", req.BundleDir, req.ContainerID}
+	if strings.TrimSpace(req.NetNS) != "" {
+		ipArgs := []string{"netns", "exec", strings.TrimSpace(req.NetNS), binary}
+		ipArgs = append(ipArgs, args...)
+		return command.Run("ip", ipArgs...)
+	}
 	return command.Run(binary, args...)
 }
 

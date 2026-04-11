@@ -28,8 +28,15 @@ func BuildBoxBinary(t *testing.T) BuiltBox {
 	if runtime.GOOS == "windows" {
 		output += ".exe"
 	}
+	initShimOutput := filepath.Join(filepath.Dir(output), "box-initshim")
+	if runtime.GOOS == "windows" {
+		initShimOutput += ".exe"
+	}
 
 	if err := buildPackageAt(moduleRoot, "./cmd/box", output); err != nil {
+		t.Fatalf("buildPackageAt() error = %v", err)
+	}
+	if err := buildPackageAt(moduleRoot, "./internal/initshim", initShimOutput); err != nil {
 		t.Fatalf("buildPackageAt() error = %v", err)
 	}
 

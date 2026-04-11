@@ -44,6 +44,11 @@ func Apply(req ApplyRequest) (ApplyResult, error) {
 			return ApplyResult{}, err
 		}
 	}
+	for _, dir := range req.Plan.WritableDirs {
+		if err := writeWritableDir(rootfsDir, dir); err != nil {
+			return ApplyResult{}, err
+		}
+	}
 
 	shimSource := resolveInitShimPath(req.InitShimPath, req.ExecutablePath)
 	bundleShimPath := filepath.Join(rootfsDir, "box-initshim")
@@ -91,6 +96,19 @@ func writeGeneratedFile(rootfsDir string, file GeneratedFile) error {
 		mode = 0o644
 	}
 	return os.WriteFile(path, []byte(file.Content), mode)
+}
+
+func writeWritableDir(rootfsDir, dir string) error {
+	clean := filepath.Clean(dir)
+	rel := strings.TrimPrefix(clean, "/")
+	if rel == "." || rel == "" {
+		return fmt.Errorf("invalid writable dir path %q", dir)
+	}
+	path := filepath.Join(rootfsDir, rel)
+	if !pathWithinRootfs(rootfsDir, path) {
+		return fmt.Errorf("writable dir path %q escapes rootfs", dir)
+	}
+	return os.MkdirAll(path, 0o755)
 }
 
 func copyFile(src, dst string, fallbackMode os.FileMode) error {

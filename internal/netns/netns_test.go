@@ -1,6 +1,8 @@
 package netns
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -39,5 +41,52 @@ func TestRuntimeIDProducesDeterministicResourceNames(t *testing.T) {
 	}
 	if !strings.HasPrefix(first.TableName, "box_") {
 		t.Fatalf("TableName = %q, want prefix %q", first.TableName, "box_")
+	}
+}
+
+func TestBuildSetupPlanAssignsGatewayAndSandboxAddress(t *testing.T) {
+	resources, err := ResourcesForRuntimeID("runtime-abc-123")
+	if err != nil {
+		t.Fatalf("ResourcesForRuntimeID() error: %v", err)
+	}
+
+	plan, err := BuildSetupPlan(resources, "100.96.0.0/30")
+	if err != nil {
+		t.Fatalf("BuildSetupPlan() error: %v", err)
+	}
+
+	if plan.GatewayCIDR != "100.96.0.1/30" {
+		t.Fatalf("GatewayCIDR = %q, want %q", plan.GatewayCIDR, "100.96.0.1/30")
+	}
+	if plan.SandboxCIDR != "100.96.0.2/30" {
+		t.Fatalf("SandboxCIDR = %q, want %q", plan.SandboxCIDR, "100.96.0.2/30")
+	}
+	if plan.GatewayIP != "100.96.0.1" {
+		t.Fatalf("GatewayIP = %q, want %q", plan.GatewayIP, "100.96.0.1")
+	}
+	if plan.SandboxIP != "100.96.0.2" {
+		t.Fatalf("SandboxIP = %q, want %q", plan.SandboxIP, "100.96.0.2")
+	}
+
+	wantCommands := []string{
+		fmt.Sprintf("ip netns add %s", resources.NetNS),
+		fmt.Sprintf("ip link add %s type veth peer name %s", resources.HostVeth, resources.GuestVeth),
+		fmt.Sprintf("ip link set %s netns %s", resources.GuestVeth, resources.NetNS),
+		fmt.Sprintf("ip addr add 100.96.0.1/30 dev %s", resources.HostVeth),
+		fmt.Sprintf("ip netns exec %s ip addr add 100.96.0.2/30 dev %s", resources.NetNS, resources.GuestVeth),
+		fmt.Sprintf("ip netns exec %s ip route add default via 100.96.0.1 dev %s", resources.NetNS, resources.GuestVeth),
+	}
+	for _, want := range wantCommands {
+		if !slices.Contains(plan.Commands, want) {
+			t.Fatalf("setup commands missing %q; got %#v", want, plan.Commands)
+		}
+	}
+
+	wantTeardown := []string{
+		fmt.Sprintf("ip link del %s", resources.HostVeth),
+		fmt.Sprintf("ip netns del %s", resources.NetNS),
+	}
+	if !slices.Equal(plan.Teardown, wantTeardown) {
+		t.Fatalf("Teardown = %#v, want %#v", plan.Teardown, wantTeardown)
 	}
 }

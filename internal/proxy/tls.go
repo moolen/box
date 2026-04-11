@@ -25,7 +25,12 @@ func StartTLS(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			})
 		}
 
-		s.forward(client, io.MultiReader(bytes.NewReader(clientHello), reader))
+		upstreamAddr, err := s.resolveUpstreamAddr(client, sni, "443")
+		if err != nil {
+			return
+		}
+
+		s.forward(client, io.MultiReader(bytes.NewReader(clientHello), reader), upstreamAddr)
 	})
 }
 

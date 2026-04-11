@@ -121,6 +121,9 @@ func pathInsideOrEqual(parent, child string) bool {
 func defaultRemovePath(path string, kind PathKind) error {
 	switch kind {
 	case PathKindFile, PathKindDir:
+		if kind == PathKindDir {
+			return os.RemoveAll(path)
+		}
 		return os.Remove(path)
 	default:
 		return fmt.Errorf("unsupported path kind %q", kind)

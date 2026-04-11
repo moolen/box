@@ -63,7 +63,12 @@ func StartHTTP(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			})
 		}
 
-		s.forward(client, io.MultiReader(bytes.NewReader(head), reader))
+		upstreamAddr, err := s.resolveUpstreamAddr(client, parseHTTPHost(head), "80")
+		if err != nil {
+			return
+		}
+
+		s.forward(client, io.MultiReader(bytes.NewReader(head), reader), upstreamAddr)
 	})
 }
 
@@ -97,10 +102,6 @@ func TransparentListenerFactory(
 }
 
 func start(ctx context.Context, cfg ProxyConfig, handler func(*Server, net.Conn)) (*Server, error) {
-	if cfg.ResolveUpstream == nil {
-		return nil, errors.New("resolve upstream function is required")
-	}
-
 	listen := cfg.Listen
 	if listen == nil {
 		listen = net.Listen
@@ -187,12 +188,7 @@ func (s *Server) serve(ctx context.Context) {
 	}
 }
 
-func (s *Server) forward(client net.Conn, clientReader io.Reader) {
-	upstreamAddr, err := s.resolveUpstream(client)
-	if err != nil {
-		return
-	}
-
+func (s *Server) forward(client net.Conn, clientReader io.Reader, upstreamAddr string) {
 	upstream, err := s.dialContext(s.dialCtx, "tcp", upstreamAddr)
 	if err != nil {
 		return
@@ -208,6 +204,21 @@ func (s *Server) forward(client net.Conn, clientReader io.Reader) {
 	_ = client.Close()
 	_ = upstream.Close()
 	<-copyDone
+}
+
+func (s *Server) resolveUpstreamAddr(client net.Conn, fallbackHost, defaultPort string) (string, error) {
+	if s.resolveUpstream != nil {
+		return s.resolveUpstream(client)
+	}
+
+	host := strings.TrimSpace(fallbackHost)
+	if host == "" {
+		return "", errors.New("upstream host is required")
+	}
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host, nil
+	}
+	return net.JoinHostPort(host, defaultPort), nil
 }
 
 func copyHalf(dst io.Writer, src io.Reader, done chan<- struct{}) {

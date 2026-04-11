@@ -43,25 +43,24 @@ func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
 		in.SubnetCIDR,
 		in.DNSPort,
 	)
-	tproxyRule := fmt.Sprintf(
-		"iifname %s ip saddr %s tcp dport {80,443} tproxy ip to :%d meta mark set %d",
+	httpRedirectRule := fmt.Sprintf(
+		"iifname %s ip saddr %s tcp dport 80 redirect to :%d",
 		in.HostVeth,
 		in.SubnetCIDR,
 		in.ProxyPort,
-		in.FWMark,
 	)
 
 	return MonitorPlan{
 		Rules: []string{
 			dnsRule,
-			tproxyRule,
+			httpRedirectRule,
 		},
 		Commands: []string{
 			fmt.Sprintf("nft add table inet %s", in.TableName),
 			fmt.Sprintf("nft add chain inet %s prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
-			fmt.Sprintf("nft add chain inet %s prerouting_tproxy { type filter hook prerouting priority mangle; policy accept; }", in.TableName),
+			fmt.Sprintf("nft add chain inet %s prerouting_http { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
 			fmt.Sprintf("nft add rule inet %s prerouting_dns %s", in.TableName, dnsRule),
-			fmt.Sprintf("nft add rule inet %s prerouting_tproxy %s", in.TableName, tproxyRule),
+			fmt.Sprintf("nft add rule inet %s prerouting_http %s", in.TableName, httpRedirectRule),
 		},
 	}, nil
 }

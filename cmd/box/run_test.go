@@ -187,6 +187,14 @@ func TestTTYDetectionReportsInteractiveStdStreams(t *testing.T) {
 	}
 }
 
+func TestCommandShellForTTYDropsInteractiveFlagWithoutTTY(t *testing.T) {
+	got := commandShellForTTY("/bin/bash -ilc", ttyState{})
+	want := "/bin/bash -lc"
+	if got != want {
+		t.Fatalf("commandShellForTTY() = %q, want %q", got, want)
+	}
+}
+
 func TestCheckMonitorOwnershipDetectsNftTableConflict(t *testing.T) {
 	t.Parallel()
 

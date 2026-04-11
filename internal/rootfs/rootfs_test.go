@@ -33,7 +33,7 @@ func TestHostOverlayPlanIncludesRecoveredReadonlyBinds(t *testing.T) {
 	}
 }
 
-func TestHostOverlayPlanIncludesWritableRuntimeDirs(t *testing.T) {
+func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
 		RootfsMode:     "host-overlay",
 		RepoPath:       "/home/user/repo",
@@ -45,22 +45,20 @@ func TestHostOverlayPlanIncludesWritableRuntimeDirs(t *testing.T) {
 		t.Fatalf("BuildPlan() error: %v", err)
 	}
 
-	var rwTargets []string
 	var foundWorkdirBind bool
 	for _, bind := range plan.Binds {
-		if bind.ReadOnly {
-			continue
-		}
-		rwTargets = append(rwTargets, bind.Target)
 		if bind.Source == "/home/user/repo" && bind.Target == "/workspace" {
 			foundWorkdirBind = true
 		}
 	}
 
-	wantRW := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache", "/var/lib/docker"}
-	for _, target := range wantRW {
-		if !slices.Contains(rwTargets, target) {
-			t.Fatalf("writable binds missing %q; got %#v", target, rwTargets)
+	wantWritableDirs := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache", "/var/lib/docker"}
+	for _, target := range wantWritableDirs {
+		if !slices.Contains(plan.WritableDirs, target) {
+			t.Fatalf("WritableDirs missing %q; got %#v", target, plan.WritableDirs)
+		}
+		if bindTargetExists(plan.Binds, target) {
+			t.Fatalf("host bind for writable runtime dir %q must not exist; binds=%#v", target, plan.Binds)
 		}
 	}
 	if !foundWorkdirBind {
@@ -185,4 +183,13 @@ func mapsKeys(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func bindTargetExists(binds []Bind, target string) bool {
+	for _, bind := range binds {
+		if bind.Target == target {
+			return true
+		}
+	}
+	return false
 }

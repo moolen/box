@@ -11,7 +11,7 @@ func TestMonitorModeRendersScopedDNSRule(t *testing.T) {
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0x101,
 	})
@@ -19,23 +19,23 @@ func TestMonitorModeRendersScopedDNSRule(t *testing.T) {
 		t.Fatalf("BuildMonitorPlan() error: %v", err)
 	}
 
-	want := "iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :1053"
+	want := "iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :53"
 	if !slices.Contains(plan.Rules, want) {
 		t.Fatalf("DNS rule missing.\nwant: %q\ngot: %#v", want, plan.Rules)
 	}
 
-	wantAttach := "nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :1053"
+	wantAttach := "nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :53"
 	if !slices.Contains(plan.Commands, wantAttach) {
 		t.Fatalf("DNS rule must be attached to DNS prerouting chain.\nwant: %q\ngot: %#v", wantAttach, plan.Commands)
 	}
 }
 
-func TestMonitorModeRendersScopedTPROXYRuleWithIPFamilyToken(t *testing.T) {
+func TestMonitorModeRendersScopedHTTPRedirectRule(t *testing.T) {
 	plan, err := BuildMonitorPlan(MonitorPlanInput{
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0x101,
 	})
@@ -43,23 +43,23 @@ func TestMonitorModeRendersScopedTPROXYRuleWithIPFamilyToken(t *testing.T) {
 		t.Fatalf("BuildMonitorPlan() error: %v", err)
 	}
 
-	want := "tproxy ip to :18080"
+	want := "tcp dport 80 redirect to :18080"
 	if !containsFragment(plan.Rules, want) {
-		t.Fatalf("TPROXY rule fragment missing.\nwant fragment: %q\ngot: %#v", want, plan.Rules)
+		t.Fatalf("HTTP redirect rule fragment missing.\nwant fragment: %q\ngot: %#v", want, plan.Rules)
 	}
 
-	wantAttachFragment := "nft add rule inet box_deadbeef prerouting_tproxy "
+	wantAttachFragment := "nft add rule inet box_deadbeef prerouting_http "
 	if !containsFragment(plan.Commands, wantAttachFragment) {
-		t.Fatalf("TPROXY rule must be attached to TPROXY prerouting chain.\nwant fragment: %q\ngot: %#v", wantAttachFragment, plan.Commands)
+		t.Fatalf("HTTP redirect rule must be attached to HTTP prerouting chain.\nwant fragment: %q\ngot: %#v", wantAttachFragment, plan.Commands)
 	}
 }
 
-func TestMonitorModeRendersFullyScopedTPROXYRule(t *testing.T) {
+func TestMonitorModeRendersFullyScopedHTTPRedirectRule(t *testing.T) {
 	plan, err := BuildMonitorPlan(MonitorPlanInput{
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0x101,
 	})
@@ -67,21 +67,21 @@ func TestMonitorModeRendersFullyScopedTPROXYRule(t *testing.T) {
 		t.Fatalf("BuildMonitorPlan() error: %v", err)
 	}
 
-	var tproxyRule string
+	var httpRule string
 	for _, rule := range plan.Rules {
-		if strings.Contains(rule, "tproxy ip to :18080") {
-			tproxyRule = rule
+		if strings.Contains(rule, "tcp dport 80 redirect to :18080") {
+			httpRule = rule
 			break
 		}
 	}
-	if tproxyRule == "" {
-		t.Fatalf("TPROXY rule missing from rules: %#v", plan.Rules)
+	if httpRule == "" {
+		t.Fatalf("HTTP redirect rule missing from rules: %#v", plan.Rules)
 	}
-	if !strings.Contains(tproxyRule, "iifname vethhdeadbeef") {
-		t.Fatalf("TPROXY rule must scope by host veth. got: %q", tproxyRule)
+	if !strings.Contains(httpRule, "iifname vethhdeadbeef") {
+		t.Fatalf("HTTP redirect rule must scope by host veth. got: %q", httpRule)
 	}
-	if !strings.Contains(tproxyRule, "ip saddr 100.96.0.0/30") {
-		t.Fatalf("TPROXY rule must scope by subnet CIDR. got: %q", tproxyRule)
+	if !strings.Contains(httpRule, "ip saddr 100.96.0.0/30") {
+		t.Fatalf("HTTP redirect rule must scope by subnet CIDR. got: %q", httpRule)
 	}
 }
 
@@ -90,7 +90,7 @@ func TestIIFNameTokenIsNotQuoted(t *testing.T) {
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0x101,
 	})
@@ -121,12 +121,12 @@ func TestPolicyRoutingPlanUsesLocalRouteToLoopback(t *testing.T) {
 	}
 }
 
-func TestMonitorModeRendersSeparateDNSAndTPROXYChains(t *testing.T) {
+func TestMonitorModeRendersSeparateDNSAndHTTPChains(t *testing.T) {
 	plan, err := BuildMonitorPlan(MonitorPlanInput{
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0x101,
 	})
@@ -135,12 +135,12 @@ func TestMonitorModeRendersSeparateDNSAndTPROXYChains(t *testing.T) {
 	}
 
 	wantDNSChain := "nft add chain inet box_deadbeef prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }"
-	wantTPROXYChain := "nft add chain inet box_deadbeef prerouting_tproxy { type filter hook prerouting priority mangle; policy accept; }"
+	wantHTTPChain := "nft add chain inet box_deadbeef prerouting_http { type nat hook prerouting priority dstnat; policy accept; }"
 	if !slices.Contains(plan.Commands, wantDNSChain) {
 		t.Fatalf("DNS chain command missing.\nwant: %q\ngot: %#v", wantDNSChain, plan.Commands)
 	}
-	if !slices.Contains(plan.Commands, wantTPROXYChain) {
-		t.Fatalf("TPROXY chain command missing.\nwant: %q\ngot: %#v", wantTPROXYChain, plan.Commands)
+	if !slices.Contains(plan.Commands, wantHTTPChain) {
+		t.Fatalf("HTTP chain command missing.\nwant: %q\ngot: %#v", wantHTTPChain, plan.Commands)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestBuildMonitorPlanRejectsZeroFWMark(t *testing.T) {
 		TableName:  "box_deadbeef",
 		HostVeth:   "vethhdeadbeef",
 		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    1053,
+		DNSPort:    53,
 		ProxyPort:  18080,
 		FWMark:     0,
 	})

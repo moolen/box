@@ -15,8 +15,8 @@ func TestAutoBindInMonitorModeUsesGatewayIPAndDefaultPort(t *testing.T) {
 		t.Fatalf("ResolveListenAddr() error = %v", err)
 	}
 
-	if got != "100.96.0.1:1053" {
-		t.Fatalf("ResolveListenAddr() = %q, want %q", got, "100.96.0.1:1053")
+	if got != "100.96.0.1:53" {
+		t.Fatalf("ResolveListenAddr() = %q, want %q", got, "100.96.0.1:53")
 	}
 }
 

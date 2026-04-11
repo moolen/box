@@ -209,6 +209,16 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}()
 
 	if strings.EqualFold(network, "monitor") {
+		if err := monitorPreflightCheck(ctx, rt.Manifest, req.Config, deps); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := rt.startNetNSResources(ctx, req.Config, deps); err != nil {
+		return nil, err
+	}
+
+	if strings.EqualFold(network, "monitor") {
 		if err := rt.startMonitorResources(ctx, req.Config, deps); err != nil {
 			return nil, err
 		}
@@ -240,18 +250,6 @@ func (rt *Runtime) Cleanup(ctx context.Context, deps Deps) error {
 }
 
 func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config, deps Deps) error {
-	if deps.MonitorPreflight == nil {
-		return conflictError(errors.New("monitor preflight conflict/ownership check is required"))
-	}
-	if err := deps.MonitorPreflight(ctx, MonitorPreflightRequest{
-		RuntimeID: rt.Manifest.RuntimeID,
-		StateDir:  rt.Manifest.StateDir,
-		Network:   cfg.Network.Mode,
-		Net:       rt.Manifest.Net,
-	}); err != nil {
-		return conflictError(fmt.Errorf("monitor preflight: %w", err))
-	}
-
 	if deps.DNS != nil {
 		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
 			Mode:      cfg.Network.Mode,
@@ -322,6 +320,51 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		}
 	}
 
+	return nil
+}
+
+func (rt *Runtime) startNetNSResources(ctx context.Context, cfg config.Config, deps Deps) error {
+	setupPlan, err := netns.BuildSetupPlan(netns.Resources{
+		NetNS:      rt.Manifest.Net.NetNS,
+		HostVeth:   rt.Manifest.Net.HostVeth,
+		GuestVeth:  rt.Manifest.Net.GuestVeth,
+		TableName:  rt.Manifest.Net.TableName,
+		FWMark:     rt.Manifest.Net.FWMark,
+		RouteTable: rt.Manifest.Net.RouteTable,
+	}, cfg.Network.Subnet)
+	if err != nil {
+		return fmt.Errorf("build netns setup plan: %w", err)
+	}
+
+	rt.Manifest.GatewayIP = setupPlan.GatewayIP
+	commands := []ownedCommand{
+		{Apply: setupPlan.Commands[0], Teardown: setupPlan.Teardown[1]},
+		{Apply: setupPlan.Commands[1], Teardown: setupPlan.Teardown[0]},
+	}
+	for _, command := range setupPlan.Commands[2:] {
+		commands = append(commands, ownedCommand{Apply: command})
+	}
+
+	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, commands)
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("apply netns setup plan: %w", err)
+	}
+	return nil
+}
+
+func monitorPreflightCheck(ctx context.Context, manifest Manifest, cfg config.Config, deps Deps) error {
+	if deps.MonitorPreflight == nil {
+		return conflictError(errors.New("monitor preflight conflict/ownership check is required"))
+	}
+	if err := deps.MonitorPreflight(ctx, MonitorPreflightRequest{
+		RuntimeID: manifest.RuntimeID,
+		StateDir:  manifest.StateDir,
+		Network:   cfg.Network.Mode,
+		Net:       manifest.Net,
+	}); err != nil {
+		return conflictError(fmt.Errorf("monitor preflight: %w", err))
+	}
 	return nil
 }
 
@@ -449,7 +492,7 @@ func runOwnedCommands(ctx context.Context, execer CommandExec, commands []ownedC
 			return teardown, fmt.Errorf("run %q: %w", command.Apply, err)
 		}
 		if strings.TrimSpace(command.Teardown) != "" {
-			teardown = append(teardown, command.Teardown)
+			teardown = append([]string{command.Teardown}, teardown...)
 		}
 	}
 	return teardown, nil

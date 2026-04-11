@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,10 @@ import (
 	"strings"
 
 	"gvisor-net/internal/config"
+	"gvisor-net/internal/dns"
+	"gvisor-net/internal/gvisor"
+	"gvisor-net/internal/proxy"
+	"gvisor-net/internal/rootfs"
 	boxruntime "gvisor-net/internal/runtime"
 
 	"github.com/spf13/cobra"
@@ -113,10 +119,13 @@ func (runtimeExecutor) Run(req runRequest) error {
 	if err != nil {
 		return err
 	}
+	cfg.Sandbox.CommandShell = commandShellForTTY(cfg.Sandbox.CommandShell, req.TTY)
 
 	deps := boxruntime.Deps{
 		CommandExec:      hostCommandExec{},
+		DNS:              startDNSRunner,
 		MonitorPreflight: monitorPreflight,
+		Proxy:            startHTTPProxyRunner,
 	}
 
 	rt, err := boxruntime.Run(ctx, boxruntime.Request{Config: cfg}, deps)
@@ -124,7 +133,55 @@ func (runtimeExecutor) Run(req runRequest) error {
 		return err
 	}
 
-	payloadErr := runPayloadCommand(ctx, req.Payload)
+	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
+		RootfsMode:     cfg.Sandbox.Rootfs,
+		RepoPath:       cwd,
+		Workdir:        cfg.Sandbox.Workdir,
+		NetworkMode:    cfg.Network.Mode,
+		GatewayIP:      rt.Manifest.GatewayIP,
+		SandboxHostn:   cfg.Sandbox.Hostname,
+		DockerEnabled:  cfg.Docker.Enabled,
+		DockerDataRoot: cfg.Docker.DataRoot,
+		ExtraRO:        cfg.Mounts.ExtraRO,
+		ExtraRW:        cfg.Mounts.ExtraRW,
+	})
+	if err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return fmt.Errorf("build rootfs plan: %w", err)
+	}
+
+	bundleDir := filepath.Join(rt.Manifest.StateDir, "bundle")
+	if _, err := rootfs.Apply(rootfs.ApplyRequest{
+		Plan:           rootfsPlan,
+		BundleDir:      bundleDir,
+		InitShimPath:   req.InitShimPath,
+		ExecutablePath: req.InitShimPath,
+	}); err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return fmt.Errorf("apply rootfs plan: %w", err)
+	}
+
+	spec, err := gvisor.BuildSandboxSpec(gvisor.BuildSpecRequest{
+		Config:               cfg,
+		Workdir:              cfg.Sandbox.Workdir,
+		Payload:              req.ShellCommand,
+		RootfsPlan:           rootfsPlan,
+		NetworkNamespacePath: filepath.Join("/run/netns", rt.Manifest.Net.NetNS),
+	})
+	if err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return fmt.Errorf("build sandbox spec: %w", err)
+	}
+	if err := writeBundleSpec(bundleDir, spec); err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return err
+	}
+
+	payloadErr := gvisor.Runner{}.Run(gvisor.RunRequest{
+		BundleDir:   bundleDir,
+		ContainerID: rt.Manifest.RuntimeID,
+		NetNS:       rt.Manifest.Net.NetNS,
+	})
 	cleanupErr := rt.Cleanup(ctx, deps)
 	return errors.Join(payloadErr, cleanupErr)
 }
@@ -133,14 +190,6 @@ type hostCommandExec struct{}
 
 func (hostCommandExec) Run(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func runPayloadCommand(ctx context.Context, payload []string) error {
-	cmd := exec.CommandContext(ctx, payload[0], payload[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -384,4 +433,72 @@ func isTerminalFD(fd uintptr) bool {
 		return false
 	}
 	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func writeBundleSpec(bundleDir string, spec gvisor.Spec) error {
+	content, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal gvisor spec: %w", err)
+	}
+	content = append(content, '\n')
+	configPath := filepath.Join(bundleDir, "config.json")
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		return fmt.Errorf("write bundle config %q: %w", configPath, err)
+	}
+	return nil
+}
+
+func commandShellForTTY(commandShell string, tty ttyState) string {
+	if tty.Stdin || tty.Stdout || tty.Stderr {
+		return commandShell
+	}
+
+	fields := strings.Fields(commandShell)
+	for i, field := range fields {
+		if !strings.HasPrefix(field, "-") || len(field) == 1 {
+			continue
+		}
+		trimmed := strings.ReplaceAll(field[1:], "i", "")
+		if trimmed == field[1:] {
+			continue
+		}
+		if trimmed == "" {
+			fields = append(fields[:i], fields[i+1:]...)
+		} else {
+			fields[i] = "-" + trimmed
+		}
+		return strings.Join(fields, " ")
+	}
+	return commandShell
+}
+
+func startDNSRunner(ctx context.Context, req boxruntime.DNSStartRequest) (boxruntime.Runner, error) {
+	server, err := dns.Start(ctx, req.Config, dns.Deps{
+		Mode:      req.Mode,
+		GatewayIP: req.GatewayIP,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stopFunc(server.Close), nil
+}
+
+func startHTTPProxyRunner(ctx context.Context, req boxruntime.ProxyStartRequest) (boxruntime.Runner, error) {
+	if !req.Config.Enabled {
+		return nil, nil
+	}
+
+	server, err := proxy.StartHTTP(ctx, proxy.ProxyConfig{
+		ListenAddr: net.JoinHostPort("", strconv.Itoa(req.Config.HTTPPort)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stopFunc(server.Close), nil
+}
+
+type stopFunc func() error
+
+func (f stopFunc) Stop() error {
+	return f()
 }
