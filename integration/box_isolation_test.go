@@ -43,15 +43,29 @@ func TestBoxCanWriteSandboxWorkdir(t *testing.T) {
 	requireRootIfNeededForIsolation(t)
 
 	binary := testenv.BuildBoxBinary(t)
+	workdir := t.TempDir()
+	if err := os.Chmod(workdir, 0o777); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", workdir, err)
+	}
 
 	sentinel := fmt.Sprintf(".box-workdir-write-test.%d", time.Now().UnixNano())
-	hostPath := filepath.Join(binary.ModuleRoot, sentinel)
-	t.Cleanup(func() {
-		_ = os.Remove(hostPath)
-	})
+	hostPath := filepath.Join(workdir, sentinel)
 
 	command := fmt.Sprintf("printf isolated >%q", sentinel)
-	if _, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--", "bash", "-lc", command); err != nil {
+	configPath := filepath.Join(binary.ModuleRoot, "box.yaml")
+	args := []string{binary.BinaryPath, "--config", configPath, "--", "bash", "-lc", command}
+	if os.Geteuid() != 0 {
+		args = append([]string{"sudo", "-E"}, args...)
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = workdir
+
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		stderr := stderrBuf.String()
 		t.Fatalf("workdir write failed: %v stderr=%q", err, stderr)
 	}
 
