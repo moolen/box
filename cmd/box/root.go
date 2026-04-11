@@ -219,9 +219,9 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		DockerEnabled:    cfg.Docker.Enabled,
 		DockerDataRoot:   cfg.Docker.DataRoot,
 		DockerSocketPath: cfg.Docker.SocketPath,
-		DockerHTTPProxy:  proxyURL(manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
-		DockerHTTPSProxy: proxyURL(manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
-		DockerNoProxy:    defaultNoProxy,
+		DockerHTTPProxy:  dockerProxyValue(manifest.GatewayIP, cfg),
+		DockerHTTPSProxy: dockerProxyValue(manifest.GatewayIP, cfg),
+		DockerNoProxy:    dockerNoProxyValue(cfg),
 		ExtraRO:          cfg.Mounts.ExtraRO,
 		ExtraRW:          cfg.Mounts.ExtraRW,
 	})
@@ -259,9 +259,10 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	}
 
 	payloadErr := runSandbox(gvisor.RunRequest{
-		BundleDir:   bundleDir,
-		ContainerID: manifest.RuntimeID,
-		NetNS:       manifest.Net.NetNS,
+		BundleDir:     bundleDir,
+		ContainerID:   manifest.RuntimeID,
+		NetNS:         manifest.Net.NetNS,
+		DockerEnabled: cfg.Docker.Enabled,
 	})
 	cleanupErr := rt.Cleanup(ctx, deps)
 	summaryErr := writeMonitorSummary(stderr, rt.MonitorSummary())
@@ -290,6 +291,12 @@ func startDNSRunner(ctx context.Context, req boxruntime.DNSStartRequest) (boxrun
 	cfg := req.Config
 	if cfg.OnQuery == nil {
 		cfg.OnQuery = req.OnQuery
+	}
+	if cfg.AllowQuery == nil {
+		cfg.AllowQuery = req.AllowQuery
+	}
+	if cfg.OnResolved == nil {
+		cfg.OnResolved = req.OnResolved
 	}
 
 	server, err := dns.Start(ctx, cfg, dns.Deps{
@@ -780,11 +787,14 @@ func commandShellForTTY(commandShell string, tty ttyState) string {
 }
 
 func sandboxProxyAndDockerEnv(gatewayIP string, cfg config.Config) []string {
-	proxy := proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
-	env := []string{
-		"HTTP_PROXY=" + proxy,
-		"HTTPS_PROXY=" + proxy,
-		"NO_PROXY=" + defaultNoProxy,
+	var env []string
+	if modeUsesProxy(cfg) {
+		proxy := proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
+		env = append(env,
+			"HTTP_PROXY="+proxy,
+			"HTTPS_PROXY="+proxy,
+			"NO_PROXY="+defaultNoProxy,
+		)
 	}
 	if !cfg.Docker.Enabled {
 		return env
@@ -805,6 +815,24 @@ func sandboxProxyAndDockerEnv(gatewayIP string, cfg config.Config) []string {
 
 func proxyURL(host string, port int) string {
 	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func modeUsesProxy(cfg config.Config) bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "monitor") && cfg.Network.TransparentProxy.Enabled
+}
+
+func dockerProxyValue(gatewayIP string, cfg config.Config) string {
+	if !modeUsesProxy(cfg) {
+		return ""
+	}
+	return proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
+}
+
+func dockerNoProxyValue(cfg config.Config) string {
+	if !modeUsesProxy(cfg) {
+		return ""
+	}
+	return defaultNoProxy
 }
 
 func boolString(value bool) string {

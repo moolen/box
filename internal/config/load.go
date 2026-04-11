@@ -43,6 +43,13 @@ func Load(path, cwd string) (Config, error) {
 }
 
 func ValidateRuntime(cfg Config) error {
+	mode := strings.TrimSpace(cfg.Network.Mode)
+	if mode == "" {
+		mode = "monitor"
+	}
+	if !strings.EqualFold(mode, "monitor") && !strings.EqualFold(mode, "enforce") {
+		return fmt.Errorf("network.mode=%q is unsupported; allowed values are monitor and enforce", cfg.Network.Mode)
+	}
 	if strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
 		return errors.New("network.transparent_proxy.mode=mitm is not supported by runtime yet")
 	}

@@ -21,9 +21,10 @@ type Spec struct {
 }
 
 type ProcessSpec struct {
-	Args []string `json:"args"`
-	Cwd  string   `json:"cwd"`
-	Env  []string `json:"env,omitempty"`
+	Args         []string               `json:"args"`
+	Cwd          string                 `json:"cwd"`
+	Env          []string               `json:"env,omitempty"`
+	Capabilities *LinuxCapabilitiesSpec `json:"capabilities,omitempty"`
 }
 
 type RootSpec struct {
@@ -40,6 +41,14 @@ type MountSpec struct {
 
 type LinuxSpec struct {
 	Namespaces []LinuxNamespace `json:"namespaces,omitempty"`
+}
+
+type LinuxCapabilitiesSpec struct {
+	Bounding    []string `json:"bounding,omitempty"`
+	Effective   []string `json:"effective,omitempty"`
+	Inheritable []string `json:"inheritable,omitempty"`
+	Permitted   []string `json:"permitted,omitempty"`
+	Ambient     []string `json:"ambient,omitempty"`
 }
 
 type LinuxNamespace struct {
@@ -90,9 +99,10 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 	return Spec{
 		OCIVersion: "1.0.2",
 		Process: ProcessSpec{
-			Args: args,
-			Cwd:  cwd,
-			Env:  ensureDefaultEnv(cfg.Sandbox.Env, req.ExtraEnv),
+			Args:         args,
+			Cwd:          cwd,
+			Env:          ensureDefaultEnv(cfg.Sandbox.Env, req.ExtraEnv),
+			Capabilities: dockerSandboxCapabilities(cfg),
 		},
 		Root: RootSpec{
 			Path:     "rootfs",
@@ -104,6 +114,41 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 			Namespaces: buildNamespaces(req.NetworkNamespacePath),
 		},
 	}, nil
+}
+
+func dockerSandboxCapabilities(cfg config.Config) *LinuxCapabilitiesSpec {
+	if !cfg.Docker.Enabled {
+		return nil
+	}
+
+	caps := append([]string(nil), dockerSandboxCapabilitySet...)
+	return &LinuxCapabilitiesSpec{
+		Bounding:    append([]string(nil), caps...),
+		Effective:   append([]string(nil), caps...),
+		Inheritable: append([]string(nil), caps...),
+		Permitted:   append([]string(nil), caps...),
+		Ambient:     append([]string(nil), caps...),
+	}
+}
+
+var dockerSandboxCapabilitySet = []string{
+	"CAP_AUDIT_WRITE",
+	"CAP_CHOWN",
+	"CAP_DAC_OVERRIDE",
+	"CAP_FOWNER",
+	"CAP_FSETID",
+	"CAP_KILL",
+	"CAP_MKNOD",
+	"CAP_NET_BIND_SERVICE",
+	"CAP_NET_ADMIN",
+	"CAP_NET_RAW",
+	"CAP_SETFCAP",
+	"CAP_SETGID",
+	"CAP_SETPCAP",
+	"CAP_SETUID",
+	"CAP_SYS_ADMIN",
+	"CAP_SYS_CHROOT",
+	"CAP_SYS_PTRACE",
 }
 
 func buildMounts(plan rootfs.Plan) []MountSpec {

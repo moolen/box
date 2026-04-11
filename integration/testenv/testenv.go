@@ -109,6 +109,62 @@ func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
 	return path
 }
 
+func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
+	t.Helper()
+
+	content := fmt.Sprintf(`sandbox:
+  rootfs: host-overlay
+  rootfs_source: ""
+  hostname: box
+  workdir: .
+  env:
+    - TERM=xterm
+  command_shell: /bin/bash -lc
+network:
+  mode: enforce
+  subnet: 100.96.0.0/30
+  dns:
+    bind_addr: auto
+    upstream:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  transparent_proxy:
+    enabled: false
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+policy:
+  allow_domains:
+%s
+  deny_domains: []
+  allow_cidrs: []
+  deny_cidrs: []
+  extra_allowed_cidrs:
+%s
+  log_all_connects: false
+mounts:
+  extra_ro: []
+  extra_rw: []
+docker:
+  enabled: true
+  data_root: /var/lib/docker
+  socket_path: /var/run/docker.sock
+  wait_for_socket: true
+  ready_timeout: 30s
+  host_network_nested_containers: true
+gvisor:
+  platform: systrap
+  network: sandbox
+  debug: false
+`, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
+
+	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
 func buildPackage(pkgPath, output string) error {
 	moduleRoot, err := moduleRootFromWorkingDir()
 	if err != nil {
@@ -172,4 +228,16 @@ func findModuleRoot(start string) (string, error) {
 		}
 		current = parent
 	}
+}
+
+func yamlList(values []string, indent string) string {
+	if len(values) == 0 {
+		return indent + "[]"
+	}
+
+	lines := make([]string, 0, len(values))
+	for _, value := range values {
+		lines = append(lines, indent+"- "+value)
+	}
+	return strings.Join(lines, "\n")
 }

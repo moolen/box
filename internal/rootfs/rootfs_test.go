@@ -32,6 +32,9 @@ func TestHostOverlayPlanIncludesRecoveredReadonlyBinds(t *testing.T) {
 			t.Fatalf("readonly binds missing %q; got %#v", target, roTargets)
 		}
 	}
+	if _, err := os.Stat("/etc/ssl"); err == nil && !slices.Contains(roTargets, "/etc/ssl") {
+		t.Fatalf("readonly binds missing optional trust store /etc/ssl; got %#v", roTargets)
+	}
 }
 
 func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T) {
@@ -98,6 +101,35 @@ func TestGeneratedEtcFilesUseGatewayDNSInMonitorMode(t *testing.T) {
 	if strings.Contains(resolv, "127.0.0.1") {
 		t.Fatalf("resolv.conf = %q, must not use localhost nameserver in monitor mode", resolv)
 	}
+}
+
+func TestGeneratedEtcFilesUseGatewayDNSInEnforceMode(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:   "host-overlay",
+		RepoPath:     "/repo",
+		Workdir:      "/work",
+		NetworkMode:  "enforce",
+		GatewayIP:    "100.96.0.1",
+		SandboxHostn: "box",
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	for _, file := range plan.GeneratedFiles {
+		if file.Path != "/etc/resolv.conf" {
+			continue
+		}
+		if !strings.Contains(file.Content, "nameserver 100.96.0.1") {
+			t.Fatalf("resolv.conf = %q, want nameserver gateway", file.Content)
+		}
+		if strings.Contains(file.Content, "127.0.0.1") {
+			t.Fatalf("resolv.conf = %q, must not use localhost nameserver in enforce mode", file.Content)
+		}
+		return
+	}
+
+	t.Fatalf("generated resolv.conf missing from plan: %#v", plan.GeneratedFiles)
 }
 
 func TestBuildPlanGeneratesDockerDaemonConfigWithProxySettings(t *testing.T) {

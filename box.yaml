@@ -26,7 +26,7 @@ sandbox:
 
 network:
   # `monitor` is the current default and safest starting point.
-  # Other supported values: `enforce-dns`, `enforce-proxy`, `deny-all`.
+  # The only other supported value is `enforce`.
   mode: monitor
 
   # Per-sandbox point-to-point subnet used for the host veth and sandbox NIC.
@@ -56,11 +56,12 @@ network:
     tls_port: 18443
 
 policy:
-  # Domain and CIDR lists are placeholders for the future policy engine.
+  # Domain rules drive the DNS decision in enforce mode.
   allow_domains: []
   deny_domains: []
   allow_cidrs: []
   deny_cidrs: []
+  extra_allowed_cidrs: []
 
   # Emit connection events even when no allow/deny rules are active.
   log_all_connects: true

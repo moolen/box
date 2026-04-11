@@ -91,6 +91,35 @@ func TestValidateRejectsTransparentProxyMITMEvenWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsMonitorAndEnforceModes(t *testing.T) {
+	for _, mode := range []string{"monitor", "enforce", "MONITOR", "ENFORCE"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := Config{}
+			cfg.Network.Mode = mode
+			if err := ValidateRuntime(cfg); err != nil {
+				t.Fatalf("ValidateRuntime() error = %v, want nil for mode %q", err, mode)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsDeprecatedNetworkModes(t *testing.T) {
+	for _, mode := range []string{"deny-all", "enforce-dns", "enforce-proxy"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := Config{}
+			cfg.Network.Mode = mode
+
+			err := ValidateRuntime(cfg)
+			if err == nil {
+				t.Fatalf("ValidateRuntime() error = nil, want rejection for mode %q", mode)
+			}
+			if !strings.Contains(err.Error(), "network.mode") {
+				t.Fatalf("ValidateRuntime() error = %q, want mention of network.mode", err.Error())
+			}
+		})
+	}
+}
+
 func TestDNSBindAddrAutoUsesSentinelValueUntilRuntimePlanning(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {

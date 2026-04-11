@@ -8,9 +8,10 @@ import (
 )
 
 type RunRequest struct {
-	BundleDir   string
-	ContainerID string
-	NetNS       string
+	BundleDir     string
+	ContainerID   string
+	NetNS         string
+	DockerEnabled bool
 }
 
 type CommandRunner interface {
@@ -40,7 +41,11 @@ func (r Runner) Run(req RunRequest) error {
 		command = ExecCommandRunner{}
 	}
 
-	args := []string{"--ignore-cgroups", "run", "--bundle", req.BundleDir, req.ContainerID}
+	args := []string{"--ignore-cgroups"}
+	if req.DockerEnabled {
+		args = append(args, "--net-raw", "--allow-packet-socket-write")
+	}
+	args = append(args, "run", "--bundle", req.BundleDir, req.ContainerID)
 	if strings.TrimSpace(req.NetNS) != "" {
 		ipArgs := []string{"netns", "exec", strings.TrimSpace(req.NetNS), binary}
 		ipArgs = append(ipArgs, args...)

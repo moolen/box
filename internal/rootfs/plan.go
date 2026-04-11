@@ -11,7 +11,7 @@ import (
 
 var (
 	requiredReadonlyBinds = []string{"/bin", "/sbin", "/usr", "/lib", "/lib64"}
-	optionalReadonlyBinds = []string{"/etc/alternatives", "/opt", "/snap", "/nix"}
+	optionalReadonlyBinds = []string{"/etc/alternatives", "/etc/ca-certificates", "/etc/pki", "/etc/ssl", "/opt", "/snap", "/nix"}
 	writableRuntimeDirs   = []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache"}
 )
 
@@ -126,7 +126,7 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 	}
 
 	nameserver := "127.0.0.1"
-	if req.NetworkMode == "monitor" && strings.TrimSpace(req.GatewayIP) != "" {
+	if usesGatewayDNS(req.NetworkMode) && strings.TrimSpace(req.GatewayIP) != "" {
 		nameserver = strings.TrimSpace(req.GatewayIP)
 	}
 
@@ -163,6 +163,11 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 	}
 
 	return files
+}
+
+func usesGatewayDNS(mode string) bool {
+	mode = strings.TrimSpace(mode)
+	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
 }
 
 func dockerDaemonConfigFile(req PlanRequest) GeneratedFile {

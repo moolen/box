@@ -206,6 +206,32 @@ func TestCommandShellForTTYDropsInteractiveFlagWithoutTTY(t *testing.T) {
 	}
 }
 
+func TestSandboxProxyAndDockerEnvOmitsProxyVariablesInEnforceMode(t *testing.T) {
+	cfg := config.Config{
+		Network: config.NetworkConfig{
+			Mode: "enforce",
+			TransparentProxy: config.TransparentProxyConfig{
+				Enabled:  true,
+				HTTPPort: 18080,
+			},
+		},
+		Docker: config.DockerConfig{
+			Enabled:       true,
+			SocketPath:    "/var/run/docker.sock",
+			WaitForSocket: true,
+			ReadyTimeout:  10 * time.Second,
+		},
+	}
+
+	env := sandboxProxyAndDockerEnv("100.96.0.1", cfg)
+	if containsString(env, "HTTP_PROXY=http://100.96.0.1:18080") {
+		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want no proxy env in enforce mode", env)
+	}
+	if !containsString(env, envDockerEnabled+"=1") {
+		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want docker env vars retained", env)
+	}
+}
+
 func TestCheckMonitorOwnershipDetectsNftTableConflict(t *testing.T) {
 	t.Parallel()
 
@@ -306,46 +332,46 @@ func TestRuntimeExecutorPrintsMonitorSummaryToStderr(t *testing.T) {
 			}
 			return config.Config{}, nil
 		},
-			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
-				return rt, nil
-			},
-			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
-				return rootfs.Plan{}, nil
-			},
-			applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
-				if req.BundleDir != "/tmp/runtime-a/bundle" {
-					t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
-				}
-				return rootfs.ApplyResult{}, nil
-			},
-			buildSandboxSpec: func(req gvisor.BuildSpecRequest) (gvisor.Spec, error) {
-				if req.NetworkNamespacePath != "/run/netns/box-runtime-a" {
-					t.Fatalf("NetworkNamespacePath = %q, want %q", req.NetworkNamespacePath, "/run/netns/box-runtime-a")
-				}
-				if req.Payload != "" {
-					t.Fatalf("Payload = %q, want empty shell command for this test", req.Payload)
-				}
-				return gvisor.Spec{}, nil
-			},
-			writeBundleSpec: func(bundleDir string, _ gvisor.Spec) error {
-				if bundleDir != "/tmp/runtime-a/bundle" {
-					t.Fatalf("bundleDir = %q, want %q", bundleDir, "/tmp/runtime-a/bundle")
-				}
-				return nil
-			},
-			runSandbox: func(req gvisor.RunRequest) error {
-				if req.BundleDir != "/tmp/runtime-a/bundle" {
-					t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
-				}
-				if req.ContainerID != "runtime-a" {
-					t.Fatalf("ContainerID = %q, want %q", req.ContainerID, "runtime-a")
-				}
-				if req.NetNS != "box-runtime-a" {
-					t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-runtime-a")
-				}
-				return nil
-			},
-		}
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			if req.BundleDir != "/tmp/runtime-a/bundle" {
+				t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
+			}
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(req gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			if req.NetworkNamespacePath != "/run/netns/box-runtime-a" {
+				t.Fatalf("NetworkNamespacePath = %q, want %q", req.NetworkNamespacePath, "/run/netns/box-runtime-a")
+			}
+			if req.Payload != "" {
+				t.Fatalf("Payload = %q, want empty shell command for this test", req.Payload)
+			}
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(bundleDir string, _ gvisor.Spec) error {
+			if bundleDir != "/tmp/runtime-a/bundle" {
+				t.Fatalf("bundleDir = %q, want %q", bundleDir, "/tmp/runtime-a/bundle")
+			}
+			return nil
+		},
+		runSandbox: func(req gvisor.RunRequest) error {
+			if req.BundleDir != "/tmp/runtime-a/bundle" {
+				t.Fatalf("BundleDir = %q, want %q", req.BundleDir, "/tmp/runtime-a/bundle")
+			}
+			if req.ContainerID != "runtime-a" {
+				t.Fatalf("ContainerID = %q, want %q", req.ContainerID, "runtime-a")
+			}
+			if req.NetNS != "box-runtime-a" {
+				t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-runtime-a")
+			}
+			return nil
+		},
+	}
 
 	err := exec.Run(runRequest{
 		ConfigPath: "box.yaml",
@@ -383,28 +409,28 @@ func TestRuntimeExecutorPrintsMonitorSummaryWhenPayloadFails(t *testing.T) {
 		getwd: func() (string, error) {
 			return "/workspace", nil
 		},
-			loadConfig: func(string, string) (config.Config, error) {
-				return config.Config{}, nil
-			},
-			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
-				return rt, nil
-			},
-			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
-				return rootfs.Plan{}, nil
-			},
-			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
-				return rootfs.ApplyResult{}, nil
-			},
-			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
-				return gvisor.Spec{}, nil
-			},
-			writeBundleSpec: func(string, gvisor.Spec) error {
-				return nil
-			},
-			runSandbox: func(gvisor.RunRequest) error {
-				return payloadErr
-			},
-		}
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return payloadErr
+		},
+	}
 
 	err := exec.Run(runRequest{
 		ConfigPath: "box.yaml",
@@ -437,31 +463,85 @@ func TestRuntimeExecutorPassesRuntimeNetNSToSandboxRunner(t *testing.T) {
 		getwd: func() (string, error) {
 			return "/workspace", nil
 		},
-			loadConfig: func(string, string) (config.Config, error) {
-				return config.Config{}, nil
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(req gvisor.RunRequest) error {
+			if req.NetNS != "box-deadbeef" {
+				t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-deadbeef")
+			}
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-d",
+			StateDir:  "/tmp/runtime-d",
+			Net: boxruntime.NetResources{
+				NetNS: "box-cafebabe",
 			},
-			startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
-				return rt, nil
-			},
-			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
-				return rootfs.Plan{}, nil
-			},
-			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
-				return rootfs.ApplyResult{}, nil
-			},
-			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
-				return gvisor.Spec{}, nil
-			},
-			writeBundleSpec: func(string, gvisor.Spec) error {
-				return nil
-			},
-			runSandbox: func(req gvisor.RunRequest) error {
-				if req.NetNS != "box-deadbeef" {
-					t.Fatalf("NetNS = %q, want %q", req.NetNS, "box-deadbeef")
-				}
-				return nil
-			},
-		}
+		},
+	}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Docker: config.DockerConfig{
+					Enabled: true,
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(req gvisor.RunRequest) error {
+			if !req.DockerEnabled {
+				t.Fatalf("DockerEnabled = false, want true")
+			}
+			return nil
+		},
+	}
 
 	if err := exec.Run(runRequest{
 		ConfigPath: "box.yaml",
@@ -482,31 +562,31 @@ func TestRuntimeExecutorSuppliesMonitorDNSAndProxyFactories(t *testing.T) {
 		loadConfig: func(string, string) (config.Config, error) {
 			return config.Config{}, nil
 		},
-			startRuntime: func(_ context.Context, _ config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
-				if deps.DNS == nil {
-					t.Fatalf("Deps.DNS = nil, want non-nil")
+		startRuntime: func(_ context.Context, _ config.Config, deps boxruntime.Deps) (runtimeHandle, error) {
+			if deps.DNS == nil {
+				t.Fatalf("Deps.DNS = nil, want non-nil")
 			}
 			if deps.Proxy == nil {
 				t.Fatalf("Deps.Proxy = nil, want non-nil")
-				}
-				return rt, nil
-			},
-			buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
-				return rootfs.Plan{}, nil
-			},
-			applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
-				return rootfs.ApplyResult{}, nil
-			},
-			buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
-				return gvisor.Spec{}, nil
-			},
-			writeBundleSpec: func(string, gvisor.Spec) error {
-				return nil
-			},
-			runSandbox: func(gvisor.RunRequest) error {
-				return nil
-			},
-		}
+			}
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
 
 	err := exec.Run(runRequest{
 		ConfigPath: "box.yaml",
@@ -653,6 +733,15 @@ func TestOriginalDstIPv4DecodesPortFromSockaddrBytes(t *testing.T) {
 	}
 }
 
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 type preflightCommandResult struct {
 	output string
 	err    error
@@ -670,10 +759,10 @@ func fakePreflightRunner(results map[string]preflightCommandResult) preflightCom
 }
 
 type fakeRuntimeHandle struct {
-	summary string
-	cleaned bool
+	summary  string
+	cleaned  bool
 	manifest boxruntime.Manifest
-	netns   string
+	netns    string
 }
 
 func (f *fakeRuntimeHandle) Cleanup(context.Context, boxruntime.Deps) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -217,6 +218,192 @@ func TestForwarderDoesNotEmitHostnameEventWhenParsingFails(t *testing.T) {
 	}
 }
 
+func TestForwarderReturnsNXDOMAINWhenHostnameIsDenied(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	upstreamCalls := 0
+	srv, err := Start(ctx, Config{
+		ListenAddr: "127.0.0.1:0",
+		Upstreams:  []string{"127.0.0.1:53535"},
+		AllowQuery: func(hostname string) bool {
+			return hostname != "blocked.example.com"
+		},
+	}, Deps{
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			upstreamCalls++
+			t.Fatalf("DialContext() should not be called for denied DNS queries")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("udp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	query := buildDNSQuery(t, []string{"blocked.example.com"})
+	if _, err := client.Write(query); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if upstreamCalls != 0 {
+		t.Fatalf("upstreamCalls = %d, want 0 for denied query", upstreamCalls)
+	}
+
+	resp := buf[:n]
+	if got := binary.BigEndian.Uint16(resp[0:2]); got != 0x1234 {
+		t.Fatalf("response id = %#x, want %#x", got, 0x1234)
+	}
+	flags := binary.BigEndian.Uint16(resp[2:4])
+	if flags&0x8000 == 0 {
+		t.Fatalf("response flags = %#x, want response bit set", flags)
+	}
+	if got := flags & 0x000f; got != 0x0003 {
+		t.Fatalf("response rcode = %#x, want NXDOMAIN", got)
+	}
+	if got := binary.BigEndian.Uint16(resp[6:8]); got != 0 {
+		t.Fatalf("ancount = %d, want 0", got)
+	}
+}
+
+func TestForwarderReportsResolvedIPsFromAllowedResponse(t *testing.T) {
+	upstreamAddr, upstreamShutdown := startFakeUpstream(t, func(query []byte) []byte {
+		return buildDNSAResponse(t, query, "allowed.example.com", []string{"93.184.216.34", "93.184.216.35"})
+	})
+	defer upstreamShutdown()
+
+	resolved := make(chan Resolution, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := Start(ctx, Config{
+		ListenAddr: "127.0.0.1:0",
+		Upstreams:  []string{upstreamAddr},
+		AllowQuery: func(hostname string) bool {
+			return hostname == "allowed.example.com"
+		},
+		OnResolved: func(event Resolution) {
+			resolved <- event
+		},
+	}, Deps{})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("udp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	query := buildDNSQuery(t, []string{"allowed.example.com"})
+	if _, err := client.Write(query); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	if _, err := client.Read(buf); err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	select {
+	case event := <-resolved:
+		if event.Hostname != "allowed.example.com" {
+			t.Fatalf("Resolution.Hostname = %q, want %q", event.Hostname, "allowed.example.com")
+		}
+		want := []netip.Addr{
+			netip.MustParseAddr("93.184.216.34"),
+			netip.MustParseAddr("93.184.216.35"),
+		}
+		if len(event.IPs) != len(want) {
+			t.Fatalf("Resolution.IPs = %#v, want %#v", event.IPs, want)
+		}
+		for i := range want {
+			if event.IPs[i] != want[i] {
+				t.Fatalf("Resolution.IPs[%d] = %v, want %v", i, event.IPs[i], want[i])
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for resolved IP callback")
+	}
+}
+
+func TestForwarderReturnsEmptySuccessForAllowedAAAAInEnforceMode(t *testing.T) {
+	upstreamCalls := 0
+	upstreamAddr, upstreamShutdown := startFakeUpstream(t, func(query []byte) []byte {
+		upstreamCalls++
+		return buildDNSAResponse(t, query, "registry-1.docker.io", []string{"93.184.216.34"})
+	})
+	defer upstreamShutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := Start(ctx, Config{
+		ListenAddr: "127.0.0.1:0",
+		Upstreams:  []string{upstreamAddr},
+		AllowQuery: func(hostname string) bool {
+			return hostname == "registry-1.docker.io"
+		},
+	}, Deps{
+		Mode:      "enforce",
+		GatewayIP: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("udp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	query := buildDNSQueryWithType(t, []string{"registry-1.docker.io"}, 28)
+	if _, err := client.Write(query); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 512)
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if upstreamCalls != 0 {
+		t.Fatalf("upstreamCalls = %d, want 0 for enforce AAAA query", upstreamCalls)
+	}
+
+	resp := buf[:n]
+	flags := binary.BigEndian.Uint16(resp[2:4])
+	if flags&0x8000 == 0 {
+		t.Fatalf("response flags = %#x, want response bit set", flags)
+	}
+	if got := flags & 0x000f; got != 0 {
+		t.Fatalf("response rcode = %#x, want NOERROR", got)
+	}
+	if got := binary.BigEndian.Uint16(resp[6:8]); got != 0 {
+		t.Fatalf("ancount = %d, want 0", got)
+	}
+}
+
 func startFakeUpstream(t *testing.T, responder func(query []byte) []byte) (addr string, shutdown func()) {
 	t.Helper()
 
@@ -250,6 +437,11 @@ func startFakeUpstream(t *testing.T, responder func(query []byte) []byte) (addr 
 
 func buildDNSQuery(t *testing.T, names []string) []byte {
 	t.Helper()
+	return buildDNSQueryWithType(t, names, 1)
+}
+
+func buildDNSQueryWithType(t *testing.T, names []string, qtype uint16) []byte {
+	t.Helper()
 	if len(names) == 0 {
 		t.Fatalf("buildDNSQuery() requires at least one name")
 	}
@@ -264,11 +456,65 @@ func buildDNSQuery(t *testing.T, names []string) []byte {
 			query = append(query, byte(len(label)))
 			query = append(query, label...)
 		}
-		query = append(query, 0x00)       // root
-		query = append(query, 0x00, 0x01) // QTYPE A
+		query = append(query, 0x00) // root
+		query = binary.BigEndian.AppendUint16(query, qtype)
 		query = append(query, 0x00, 0x01) // QCLASS IN
 	}
 	return query
+}
+
+func buildDNSAResponse(t *testing.T, query []byte, hostname string, ips []string) []byte {
+	t.Helper()
+
+	response := append([]byte(nil), query...)
+	flags := binary.BigEndian.Uint16(response[2:4])
+	flags |= 0x8000
+	flags &^= 0x000f
+	binary.BigEndian.PutUint16(response[2:4], flags)
+	binary.BigEndian.PutUint16(response[6:8], uint16(len(ips)))
+	binary.BigEndian.PutUint16(response[8:10], 0)
+	binary.BigEndian.PutUint16(response[10:12], 0)
+
+	for _, rawIP := range ips {
+		addr, err := netip.ParseAddr(rawIP)
+		if err != nil {
+			t.Fatalf("ParseAddr(%q) error = %v", rawIP, err)
+		}
+		if !addr.Is4() {
+			t.Fatalf("buildDNSAResponse() only supports IPv4 test answers, got %q", rawIP)
+		}
+		response = appendDNSName(response, hostname)
+		response = binary.BigEndian.AppendUint16(response, 1)
+		response = binary.BigEndian.AppendUint16(response, 1)
+		response = binary.BigEndian.AppendUint32(response, 60)
+		response = binary.BigEndian.AppendUint16(response, 4)
+		response = append(response, addr.AsSlice()...)
+	}
+
+	return response
+}
+
+func appendDNSName(buf []byte, hostname string) []byte {
+	for _, label := range splitLabels(hostname) {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	return append(buf, 0)
+}
+
+func splitLabels(hostname string) [][]byte {
+	parts := make([][]byte, 0, 4)
+	start := 0
+	for i := 0; i <= len(hostname); i++ {
+		if i != len(hostname) && hostname[i] != '.' {
+			continue
+		}
+		if start < i {
+			parts = append(parts, []byte(hostname[start:i]))
+		}
+		start = i + 1
+	}
+	return parts
 }
 
 func splitDomainName(name string) []string {

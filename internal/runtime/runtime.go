@@ -57,10 +57,12 @@ type Deps struct {
 }
 
 type DNSStartRequest struct {
-	Mode      string
-	GatewayIP string
-	Config    dns.Config
-	OnQuery   func(hostname string)
+	Mode       string
+	GatewayIP  string
+	Config     dns.Config
+	OnQuery    func(hostname string)
+	AllowQuery func(hostname string) bool
+	OnResolved func(dns.Resolution)
 }
 
 type ProxyStartRequest struct {
@@ -83,6 +85,8 @@ type Runtime struct {
 	runners  map[string]Runner
 	monitor  *monitor.Collector
 	eventMu  sync.Mutex
+	allowMu  sync.Mutex
+	allowIPs map[string]struct{}
 }
 
 type Manifest struct {
@@ -206,6 +210,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	rt := &Runtime{
 		Manifest: manifest,
 		runners:  make(map[string]Runner),
+		allowIPs: make(map[string]struct{}),
 	}
 
 	defer func() {
@@ -217,6 +222,8 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 
 	if strings.EqualFold(network, "monitor") {
 		rt.monitor = monitor.NewCollector(req.Config.Policy)
+	}
+	if usesManagedNetworkPolicy(network) && deps.CommandExec != nil {
 		if err := monitorPreflightCheck(ctx, rt.Manifest, req.Config, deps); err != nil {
 			return nil, err
 		}
@@ -228,6 +235,10 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 
 	if strings.EqualFold(network, "monitor") {
 		if err := rt.startMonitorResources(ctx, req.Config, deps); err != nil {
+			return nil, err
+		}
+	} else if strings.EqualFold(network, "enforce") {
+		if err := rt.startEnforceResources(ctx, req.Config, deps); err != nil {
 			return nil, err
 		}
 	}
@@ -300,7 +311,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		}
 	}
 
-	dnsPort, err := resolveMonitorDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
+	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
 	if err != nil {
 		return err
 	}
@@ -353,6 +364,62 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 			rt.runners["proxy"] = proxyRunner
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
 		}
+	}
+
+	return nil
+}
+
+func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config, deps Deps) error {
+	if deps.DNS != nil {
+		allowQuery := rt.enforceAllowQuery(cfg.Policy)
+		onResolved := rt.enforceResolvedCallback(ctx, deps)
+		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
+			Mode:      cfg.Network.Mode,
+			GatewayIP: rt.Manifest.GatewayIP,
+			Config: dns.Config{
+				ListenAddr: cfg.Network.DNS.BindAddr,
+				Upstreams:  append([]string(nil), cfg.Network.DNS.Upstream...),
+				AllowQuery: allowQuery,
+				OnResolved: onResolved,
+			},
+			AllowQuery: allowQuery,
+			OnResolved: onResolved,
+		})
+		if err != nil {
+			return fmt.Errorf("start dns: %w", err)
+		}
+		if dnsRunner != nil {
+			rt.runners["dns"] = dnsRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "dns")
+		}
+	}
+
+	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
+	if err != nil {
+		return err
+	}
+
+	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
+		return err
+	}
+
+	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
+		TableName:         rt.Manifest.Net.TableName,
+		HostVeth:          rt.Manifest.Net.HostVeth,
+		SubnetCIDR:        cfg.Network.Subnet,
+		DNSPort:           dnsPort,
+		ExtraAllowedCIDRs: append([]string(nil), cfg.Policy.ExtraAllowedCIDRs...),
+	})
+	if err != nil {
+		return fmt.Errorf("build firewall enforce plan: %w", err)
+	}
+
+	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
+		0: fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName),
+	}))
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("apply firewall enforce plan: %w", err)
 	}
 
 	return nil
@@ -441,6 +508,58 @@ func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
 	}
 }
 
+func (rt *Runtime) enforceAllowQuery(policyCfg config.PolicyConfig) func(hostname string) bool {
+	policy := monitor.CompilePolicy(policyCfg)
+	return func(hostname string) bool {
+		return policy.Evaluate(hostname) == monitor.VerdictAllow
+	}
+}
+
+func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps) func(dns.Resolution) {
+	return func(event dns.Resolution) {
+		if rt == nil {
+			return
+		}
+		for _, addr := range event.IPs {
+			if err := rt.allowResolvedIP(ctx, deps.CommandExec, addr); err != nil {
+				continue
+			}
+		}
+	}
+}
+
+func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, addr netip.Addr) error {
+	if rt == nil || execer == nil || !addr.Is4() {
+		return nil
+	}
+
+	ip := addr.Unmap().String()
+
+	rt.allowMu.Lock()
+	if _, exists := rt.allowIPs[ip]; exists {
+		rt.allowMu.Unlock()
+		return nil
+	}
+	rt.allowIPs[ip] = struct{}{}
+	rt.allowMu.Unlock()
+
+	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, ip)
+	if err != nil {
+		return err
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return nil
+	}
+	if err := execer.Run(ctx, fields[0], fields[1:]...); err != nil {
+		rt.allowMu.Lock()
+		delete(rt.allowIPs, ip)
+		rt.allowMu.Unlock()
+		return fmt.Errorf("allow resolved ip %q: %w", ip, err)
+	}
+	return nil
+}
+
 type rawMonitorEvent struct {
 	Type     string `json:"type"`
 	Protocol string `json:"protocol,omitempty"`
@@ -524,7 +643,7 @@ func gatewayIPFromSubnet(subnet string) (string, error) {
 	return gateway.String(), nil
 }
 
-func resolveMonitorDNSPort(bindAddr, gatewayIP string) (int, error) {
+func resolveGatewayDNSPort(bindAddr, gatewayIP string) (int, error) {
 	listenAddr, err := dns.ResolveListenAddr(bindAddr, "monitor", gatewayIP)
 	if err != nil {
 		return 0, err
@@ -538,6 +657,34 @@ func resolveMonitorDNSPort(bindAddr, gatewayIP string) (int, error) {
 		return 0, fmt.Errorf("invalid monitor dns listen port %q", port)
 	}
 	return value, nil
+}
+
+func usesManagedNetworkPolicy(mode string) bool {
+	mode = strings.TrimSpace(mode)
+	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
+}
+
+func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {
+	if execer == nil || manifest == nil {
+		return nil
+	}
+
+	currentBytes, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+	if err != nil {
+		return fmt.Errorf("read net.ipv4.ip_forward: %w", err)
+	}
+	current := strings.TrimSpace(string(currentBytes))
+	if current == "1" {
+		return nil
+	}
+
+	if err := execer.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+		return fmt.Errorf("enable net.ipv4.ip_forward: %w", err)
+	}
+	manifest.TeardownCmds = append([]string{
+		fmt.Sprintf("sysctl -w net.ipv4.ip_forward=%s", current),
+	}, manifest.TeardownCmds...)
+	return nil
 }
 
 func generatedFileContent(files []rootfs.GeneratedFile, path string) string {

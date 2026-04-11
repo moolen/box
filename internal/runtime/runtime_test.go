@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"gvisor-net/internal/config"
+	"gvisor-net/internal/dns"
 	"gvisor-net/internal/netns"
 	"gvisor-net/internal/proxy"
 )
@@ -18,7 +20,7 @@ func TestRunCreatesStateDirAndEventLog(t *testing.T) {
 	t.Parallel()
 
 	stateRoot := t.TempDir()
-	cfg := testConfig("deny-all")
+	cfg := testConfig("enforce")
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -287,10 +289,10 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 	mustContain(t, text, `"path":"/submit"`)
 }
 
-func TestNonMonitorModeDoesNotForceGatewayResolvConf(t *testing.T) {
+func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 	t.Parallel()
 
-	cfg := testConfig("enforce-dns")
+	cfg := testConfig("enforce")
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -303,18 +305,18 @@ func TestNonMonitorModeDoesNotForceGatewayResolvConf(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver 127.0.0.1") {
-		t.Fatalf("Manifest.ResolvConf = %q, want localhost nameserver outside monitor mode", rt.Manifest.ResolvConf)
+	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver 100.96.0.1") {
+		t.Fatalf("Manifest.ResolvConf = %q, want gateway nameserver in enforce mode", rt.Manifest.ResolvConf)
 	}
-	if strings.Contains(rt.Manifest.ResolvConf, "nameserver 100.96.0.1") {
-		t.Fatalf("Manifest.ResolvConf = %q, must not force gateway nameserver outside monitor mode", rt.Manifest.ResolvConf)
+	if strings.Contains(rt.Manifest.ResolvConf, "nameserver 127.0.0.1") {
+		t.Fatalf("Manifest.ResolvConf = %q, must not use localhost nameserver in enforce mode", rt.Manifest.ResolvConf)
 	}
 }
 
 func TestDockerSettingsPropagateIntoRuntimeState(t *testing.T) {
 	t.Parallel()
 
-	cfg := testConfig("deny-all")
+	cfg := testConfig("enforce")
 	cfg.Docker = config.DockerConfig{
 		Enabled:                     true,
 		DataRoot:                    "/sandbox/docker",
@@ -495,7 +497,7 @@ func TestRunNormalizesStateRootToAbsolutePath(t *testing.T) {
 		t.Fatalf("filepath.Rel() error = %v", err)
 	}
 
-	cfg := testConfig("deny-all")
+	cfg := testConfig("enforce")
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
 		StateRoot: stateRootRel,
@@ -519,6 +521,79 @@ func TestRunNormalizesStateRootToAbsolutePath(t *testing.T) {
 	}
 	if !filepath.IsAbs(rt.Manifest.StateRoot) {
 		t.Fatalf("Manifest.StateRoot = %q, want absolute path", rt.Manifest.StateRoot)
+	}
+}
+
+func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
+
+	exec := &recordingCommandExec{}
+	var dnsReq DNSStartRequest
+	var dnsCalled bool
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			dnsCalled = true
+			dnsReq = req
+			if req.AllowQuery == nil {
+				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
+			}
+			if req.OnResolved == nil {
+				t.Fatalf("DNSStartRequest.OnResolved = nil, want callback")
+			}
+			if req.AllowQuery("blocked.example.com") {
+				t.Fatalf("AllowQuery(blocked.example.com) = true, want false")
+			}
+			if !req.AllowQuery("allowed.example.com") {
+				t.Fatalf("AllowQuery(allowed.example.com) = false, want true")
+			}
+			req.OnResolved(dns.Resolution{
+				Hostname: "allowed.example.com",
+				IPs: []netip.Addr{
+					netip.MustParseAddr("93.184.216.34"),
+					netip.MustParseAddr("93.184.216.35"),
+					netip.MustParseAddr("93.184.216.34"),
+				},
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer func() {
+		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
+	}()
+
+	if !dnsCalled {
+		t.Fatalf("DNS factory was not called in enforce mode")
+	}
+	if dnsReq.Mode != "enforce" {
+		t.Fatalf("DNS request mode = %q, want %q", dnsReq.Mode, "enforce")
+	}
+	if dnsReq.GatewayIP != "100.96.0.1" {
+		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, "100.96.0.1")
+	}
+
+	mustContainCall(t, exec.calls, "nft add set inet box_")
+	mustContainCall(t, exec.calls, "nft add element inet box_")
+	mustContainCall(t, exec.calls, "93.184.216.34")
+	mustContainCall(t, exec.calls, "93.184.216.35")
+	if countCallsContaining(exec.calls, "93.184.216.34") != 1 {
+		t.Fatalf("expected duplicate learned IPs to be de-duplicated; calls=%#v", exec.calls)
 	}
 }
 
@@ -826,6 +901,7 @@ func testConfig(networkMode string) config.Config {
 				TLSPort:  18443,
 			},
 		},
+		Policy: config.PolicyConfig{},
 	}
 }
 
@@ -834,4 +910,24 @@ func mustContain(t *testing.T, text, want string) {
 	if !strings.Contains(text, want) {
 		t.Fatalf("text = %q, want contains %q", text, want)
 	}
+}
+
+func mustContainCall(t *testing.T, calls []string, want string) {
+	t.Helper()
+	for _, call := range calls {
+		if strings.Contains(call, want) {
+			return
+		}
+	}
+	t.Fatalf("calls = %#v, want one containing %q", calls, want)
+}
+
+func countCallsContaining(calls []string, fragment string) int {
+	count := 0
+	for _, call := range calls {
+		if strings.Contains(call, fragment) {
+			count++
+		}
+	}
+	return count
 }

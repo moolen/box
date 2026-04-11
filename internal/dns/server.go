@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,8 @@ type Config struct {
 	ListenAddr string
 	Upstreams  []string
 	OnQuery    func(hostname string)
+	AllowQuery func(hostname string) bool
+	OnResolved func(Resolution)
 }
 
 type Deps struct {
@@ -29,10 +32,18 @@ type Deps struct {
 type Server struct {
 	conn        net.PacketConn
 	upstreams   []string
+	mode        string
 	dialContext func(ctx context.Context, network, address string) (net.Conn, error)
 	onQuery     func(hostname string)
+	allowQuery  func(hostname string) bool
+	onResolved  func(Resolution)
 	closeOnce   sync.Once
 	wg          sync.WaitGroup
+}
+
+type Resolution struct {
+	Hostname string
+	IPs      []netip.Addr
 }
 
 func Start(ctx context.Context, cfg Config, deps Deps) (*Server, error) {
@@ -63,8 +74,11 @@ func Start(ctx context.Context, cfg Config, deps Deps) (*Server, error) {
 	s := &Server{
 		conn:        conn,
 		upstreams:   append([]string(nil), cfg.Upstreams...),
+		mode:        strings.ToLower(strings.TrimSpace(deps.Mode)),
 		dialContext: dialContext,
 		onQuery:     cfg.OnQuery,
+		allowQuery:  cfg.AllowQuery,
+		onResolved:  cfg.OnResolved,
 	}
 
 	s.wg.Add(1)
@@ -79,10 +93,10 @@ func ResolveListenAddr(bindAddr, mode, gatewayIP string) (string, error) {
 		bindAddr = "auto"
 	}
 
-	if strings.EqualFold(mode, "monitor") {
+	if strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce") {
 		gatewayIP = strings.TrimSpace(gatewayIP)
 		if gatewayIP == "" {
-			return "", errors.New("gateway ip is required in monitor mode")
+			return "", fmt.Errorf("gateway ip is required in %s mode", strings.ToLower(mode))
 		}
 		if strings.EqualFold(bindAddr, "auto") {
 			return net.JoinHostPort(gatewayIP, defaultDNSPort), nil
@@ -143,24 +157,49 @@ func (s *Server) serve(ctx context.Context) {
 		query := make([]byte, n)
 		copy(query, buf[:n])
 
-		if s.onQuery != nil {
-			if hostname, ok := parseQueryHostname(query); ok {
-				s.onQuery(hostname)
+		hostname, hostnameOK := parseQueryHostname(query)
+		if s.onQuery != nil && hostnameOK {
+			s.onQuery(hostname)
+		}
+		if s.allowQuery != nil {
+			allowed := false
+			if hostnameOK {
+				allowed = s.allowQuery(hostname)
+			}
+			if !allowed {
+				if response, ok := buildNXDOMAINResponse(query); ok {
+					_, _ = s.conn.WriteTo(response, clientAddr)
+				}
+				continue
+			}
+		}
+		if s.mode == "enforce" {
+			if qtype, ok := parseQueryType(query); ok && qtype == 28 {
+				if response, ok := buildEmptySuccessResponse(query); ok {
+					_, _ = s.conn.WriteTo(response, clientAddr)
+				}
+				continue
 			}
 		}
 
 		s.wg.Add(1)
-		go s.forwardOne(query, clientAddr)
+		go s.forwardOne(query, hostname, hostnameOK, clientAddr)
 	}
 }
 
-func (s *Server) forwardOne(query []byte, clientAddr net.Addr) {
+func (s *Server) forwardOne(query []byte, hostname string, hostnameOK bool, clientAddr net.Addr) {
 	defer s.wg.Done()
 
 	for _, upstream := range s.upstreams {
 		response, err := s.queryUpstream(upstream, query)
 		if err != nil {
 			continue
+		}
+		if s.onResolved != nil && hostnameOK {
+			s.onResolved(Resolution{
+				Hostname: hostname,
+				IPs:      parseResponseIPs(response),
+			})
 		}
 		_, _ = s.conn.WriteTo(response, clientAddr)
 		return
@@ -196,21 +235,31 @@ func (s *Server) queryUpstream(upstream string, query []byte) ([]byte, error) {
 }
 
 func parseQueryHostname(query []byte) (string, bool) {
+	hostname, _, ok := parseQueryQuestion(query)
+	return hostname, ok
+}
+
+func parseQueryType(query []byte) (uint16, bool) {
+	_, qtype, ok := parseQueryQuestion(query)
+	return qtype, ok
+}
+
+func parseQueryQuestion(query []byte) (string, uint16, bool) {
 	if len(query) < 12 {
-		return "", false
+		return "", 0, false
 	}
 	if binary.BigEndian.Uint16(query[4:6]) == 0 {
-		return "", false
+		return "", 0, false
 	}
 
 	hostname, next, ok := parseDNSName(query, 12, 0)
 	if !ok {
-		return "", false
+		return "", 0, false
 	}
 	if next+4 > len(query) {
-		return "", false
+		return "", 0, false
 	}
-	return hostname, true
+	return hostname, binary.BigEndian.Uint16(query[next : next+2]), true
 }
 
 func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
@@ -261,4 +310,81 @@ func parseDNSName(msg []byte, off, depth int) (string, int, bool) {
 		labels = append(labels, string(msg[curr:curr+labelLen]))
 		curr += labelLen
 	}
+}
+
+func buildNXDOMAINResponse(query []byte) ([]byte, bool) {
+	if len(query) < 12 {
+		return nil, false
+	}
+
+	response := append([]byte(nil), query...)
+	flags := binary.BigEndian.Uint16(response[2:4])
+	flags |= 0x8000
+	flags &^= 0x0200
+	flags &^= 0x000f
+	flags |= 0x0003
+	binary.BigEndian.PutUint16(response[2:4], flags)
+	binary.BigEndian.PutUint16(response[6:8], 0)
+	binary.BigEndian.PutUint16(response[8:10], 0)
+	binary.BigEndian.PutUint16(response[10:12], 0)
+	return response, true
+}
+
+func buildEmptySuccessResponse(query []byte) ([]byte, bool) {
+	if len(query) < 12 {
+		return nil, false
+	}
+
+	response := append([]byte(nil), query...)
+	flags := binary.BigEndian.Uint16(response[2:4])
+	flags |= 0x8000
+	flags &^= 0x0200
+	flags &^= 0x000f
+	binary.BigEndian.PutUint16(response[2:4], flags)
+	binary.BigEndian.PutUint16(response[6:8], 0)
+	binary.BigEndian.PutUint16(response[8:10], 0)
+	binary.BigEndian.PutUint16(response[10:12], 0)
+	return response, true
+}
+
+func parseResponseIPs(response []byte) []netip.Addr {
+	if len(response) < 12 {
+		return nil
+	}
+
+	questions := int(binary.BigEndian.Uint16(response[4:6]))
+	answers := int(binary.BigEndian.Uint16(response[6:8]))
+	offset := 12
+	for i := 0; i < questions; i++ {
+		_, next, ok := parseDNSName(response, offset, 0)
+		if !ok || next+4 > len(response) {
+			return nil
+		}
+		offset = next + 4
+	}
+
+	ips := make([]netip.Addr, 0, answers)
+	for i := 0; i < answers; i++ {
+		_, next, ok := parseDNSName(response, offset, 0)
+		if !ok || next+10 > len(response) {
+			return ips
+		}
+		recordType := binary.BigEndian.Uint16(response[next : next+2])
+		dataLen := int(binary.BigEndian.Uint16(response[next+8 : next+10]))
+		dataStart := next + 10
+		dataEnd := dataStart + dataLen
+		if dataEnd > len(response) {
+			return ips
+		}
+
+		switch recordType {
+		case 1, 28:
+			if addr, ok := netip.AddrFromSlice(response[dataStart:dataEnd]); ok {
+				ips = append(ips, addr.Unmap())
+			}
+		}
+
+		offset = dataEnd
+	}
+	return ips
 }

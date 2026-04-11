@@ -161,6 +161,49 @@ func TestBuildMonitorPlanRejectsZeroFWMark(t *testing.T) {
 	}
 }
 
+func TestEnforceModeRendersDNSRedirectForwardAllowsetAndMasquerade(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:         "box_deadbeef",
+		HostVeth:          "vethhdeadbeef",
+		SubnetCIDR:        "100.96.0.0/30",
+		DNSPort:           1053,
+		ExtraAllowedCIDRs: []string{"10.0.0.0/8", "192.168.0.0/16"},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error: %v", err)
+	}
+
+	wantFragments := []string{
+		"nft add set inet box_deadbeef allow_v4 { type ipv4_addr; flags interval; }",
+		"nft add chain inet box_deadbeef prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }",
+		"nft add chain inet box_deadbeef forward { type filter hook forward priority filter; policy drop; }",
+		"nft add chain inet box_deadbeef postrouting { type nat hook postrouting priority srcnat; policy accept; }",
+		"nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :1053",
+		"nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 tcp dport 53 redirect to :1053",
+		"nft add rule inet box_deadbeef forward ct state established,related accept",
+		"nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr @allow_v4 accept",
+		"nft add rule inet box_deadbeef postrouting ip saddr 100.96.0.0/30 masquerade",
+		"nft add element inet box_deadbeef allow_v4 { 10.0.0.0/8, 192.168.0.0/16 }",
+	}
+	for _, want := range wantFragments {
+		if !slices.Contains(plan.Commands, want) {
+			t.Fatalf("BuildEnforcePlan() commands missing %q\ncommands=%#v", want, plan.Commands)
+		}
+	}
+}
+
+func TestEnforceAllowIPCommandUsesRuntimeOwnedAllowset(t *testing.T) {
+	got, err := BuildEnforceAllowIPCommand("box_deadbeef", "93.184.216.34")
+	if err != nil {
+		t.Fatalf("BuildEnforceAllowIPCommand() error = %v", err)
+	}
+
+	want := "nft add element inet box_deadbeef allow_v4 { 93.184.216.34 }"
+	if got != want {
+		t.Fatalf("BuildEnforceAllowIPCommand() = %q, want %q", got, want)
+	}
+}
+
 func containsFragment(lines []string, fragment string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, fragment) {

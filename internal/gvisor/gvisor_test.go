@@ -236,6 +236,69 @@ func TestRunnerExecutesRunscInsideNamedNetworkNamespace(t *testing.T) {
 	}
 }
 
+func TestRunnerAddsDockerNetworkingFlagsWhenDockerEnabled(t *testing.T) {
+	fake := &fakeCommandRunner{}
+	runner := Runner{
+		Command: fake,
+	}
+
+	err := runner.Run(RunRequest{
+		BundleDir:     "/tmp/box-bundle",
+		ContainerID:   "box-123",
+		DockerEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	wantArgs := []string{
+		"--ignore-cgroups",
+		"--net-raw",
+		"--allow-packet-socket-write",
+		"run",
+		"--bundle",
+		"/tmp/box-bundle",
+		"box-123",
+	}
+	if !reflect.DeepEqual(fake.args, wantArgs) {
+		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
+	}
+}
+
+func TestBuildSandboxSpecAddsDockerCapabilities(t *testing.T) {
+	cfg := config.Config{
+		Sandbox: config.SandboxConfig{
+			CommandShell: "/bin/bash -lc",
+		},
+		Docker: config.DockerConfig{
+			Enabled: true,
+		},
+	}
+
+	spec, err := BuildSandboxSpec(BuildSpecRequest{
+		Config:  cfg,
+		Workdir: "/workspace",
+		Payload: "docker version",
+	})
+	if err != nil {
+		t.Fatalf("BuildSandboxSpec() error: %v", err)
+	}
+
+	for _, capability := range []string{
+		"CAP_NET_ADMIN",
+		"CAP_NET_RAW",
+		"CAP_SYS_ADMIN",
+		"CAP_SYS_CHROOT",
+	} {
+		if !containsCapability(spec.Process.Capabilities.Bounding, capability) {
+			t.Fatalf("Bounding capabilities = %#v, want %q", spec.Process.Capabilities.Bounding, capability)
+		}
+		if !containsCapability(spec.Process.Capabilities.Effective, capability) {
+			t.Fatalf("Effective capabilities = %#v, want %q", spec.Process.Capabilities.Effective, capability)
+		}
+	}
+}
+
 type fakeCommandRunner struct {
 	name string
 	args []string
@@ -302,4 +365,13 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func containsCapability(capabilities []string, capability string) bool {
+	for _, value := range capabilities {
+		if value == capability {
+			return true
+		}
+	}
+	return false
 }

@@ -31,9 +31,18 @@ box run -- <command...>
 
 In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end of the run.
 
+`box.yaml` now supports two network modes:
+
+- `monitor` for observation plus summary output
+- `enforce` for DNS-gated egress, dynamic IP allowlisting from allowed DNS answers, and
+  `policy.extra_allowed_cidrs` bootstrap exceptions
+
 Integration tests cover:
 
 - `pwd`
 - `env`
 - `getent hosts example.com`
 - `curl http://example.com`
+- enforce-mode blocked DNS resolution
+- enforce-mode nested Docker multi-stage builds on Linux hosts with `docker`, `dockerd`,
+  and `skopeo` available
