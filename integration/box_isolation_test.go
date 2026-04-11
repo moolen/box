@@ -42,7 +42,7 @@ func TestBoxDefaultSandboxCannotMountTmpfs(t *testing.T) {
 func runBox(t *testing.T, requireRoot bool, args ...string) (string, string, error) {
 	t.Helper()
 
-	requireLinuxAndPrivileges(t)
+	requireLinuxForIsolation(t)
 	if requireRoot {
 		requireRootIfNeededForIsolation(t)
 	}
@@ -51,7 +51,7 @@ func runBox(t *testing.T, requireRoot bool, args ...string) (string, string, err
 	return testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, requireRoot, args...)
 }
 
-func requireLinuxAndPrivileges(t *testing.T) {
+func requireLinuxForIsolation(t *testing.T) {
 	t.Helper()
 
 	if runtime.GOOS != "linux" {
