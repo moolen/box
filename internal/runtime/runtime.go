@@ -90,20 +90,21 @@ type Runtime struct {
 }
 
 type Manifest struct {
-	RuntimeID      string              `json:"runtime_id"`
-	CreatedAtUTC   string              `json:"created_at_utc"`
-	StateRoot      string              `json:"state_root"`
-	StateDir       string              `json:"state_dir"`
-	ManifestPath   string              `json:"manifest_path"`
-	EventLogPath   string              `json:"event_log_path"`
-	NetworkMode    string              `json:"network_mode"`
-	GatewayIP      string              `json:"gateway_ip"`
-	ResolvConf     string              `json:"resolv_conf"`
-	Docker         config.DockerConfig `json:"docker"`
-	Net            NetResources        `json:"net"`
-	StartedRunners []string            `json:"started_runners"`
-	TeardownCmds   []string            `json:"teardown_cmds"`
-	ManagedPaths   []ManagedPath       `json:"managed_paths"`
+	RuntimeID          string              `json:"runtime_id"`
+	CreatedAtUTC       string              `json:"created_at_utc"`
+	StateRoot          string              `json:"state_root"`
+	StateDir           string              `json:"state_dir"`
+	ManifestPath       string              `json:"manifest_path"`
+	EventLogPath       string              `json:"event_log_path"`
+	WorkdirMountSource string              `json:"workdir_mount_source,omitempty"`
+	NetworkMode        string              `json:"network_mode"`
+	GatewayIP          string              `json:"gateway_ip"`
+	ResolvConf         string              `json:"resolv_conf"`
+	Docker             config.DockerConfig `json:"docker"`
+	Net                NetResources        `json:"net"`
+	StartedRunners     []string            `json:"started_runners"`
+	TeardownCmds       []string            `json:"teardown_cmds"`
+	ManagedPaths       []ManagedPath       `json:"managed_paths"`
 }
 
 type NetResources struct {
@@ -227,6 +228,9 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		if err := monitorPreflightCheck(ctx, rt.Manifest, req.Config, deps); err != nil {
 			return nil, err
 		}
+	}
+	if err := prepareWorkdirOverlay(ctx, req.Config, &rt.Manifest, deps.CommandExec); err != nil {
+		return nil, err
 	}
 
 	if err := rt.startNetNSResources(ctx, req.Config, deps); err != nil {

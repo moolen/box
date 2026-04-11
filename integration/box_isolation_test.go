@@ -38,7 +38,7 @@ func TestBoxCanWriteTmp(t *testing.T) {
 	}
 }
 
-func TestBoxCanWriteSandboxWorkdir(t *testing.T) {
+func TestBoxDefaultWorkdirOverlayDoesNotWriteHostRepo(t *testing.T) {
 	requireLinuxForIsolation(t)
 	requireRootIfNeededForIsolation(t)
 
@@ -53,6 +53,42 @@ func TestBoxCanWriteSandboxWorkdir(t *testing.T) {
 
 	command := fmt.Sprintf("printf isolated >%q", sentinel)
 	configPath := filepath.Join(binary.ModuleRoot, "box.yaml")
+	args := []string{binary.BinaryPath, "--config", configPath, "--", "bash", "-lc", command}
+	if os.Geteuid() != 0 {
+		args = append([]string{"sudo", "-E"}, args...)
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = workdir
+
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		stderr := stderrBuf.String()
+		t.Fatalf("workdir write failed: %v stderr=%q", err, stderr)
+	}
+
+	if _, err := os.Stat(hostPath); !os.IsNotExist(err) {
+		t.Fatalf("host path %q exists after default overlay write; stat err=%v", hostPath, err)
+	}
+}
+
+func TestBoxCanDisableWorkdirOverlayForHostWriteThrough(t *testing.T) {
+	requireLinuxForIsolation(t)
+	requireRootIfNeededForIsolation(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	workdir := t.TempDir()
+	if err := os.Chmod(workdir, 0o777); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", workdir, err)
+	}
+
+	configPath := testenv.WriteWorkdirOverlayConfig(t, binary.ModuleRoot, false)
+	sentinel := fmt.Sprintf(".box-workdir-write-test.%d", time.Now().UnixNano())
+	hostPath := filepath.Join(workdir, sentinel)
+
+	command := fmt.Sprintf("printf isolated >%q", sentinel)
 	args := []string{binary.BinaryPath, "--config", configPath, "--", "bash", "-lc", command}
 	if os.Geteuid() != 0 {
 		args = append([]string{"sudo", "-E"}, args...)

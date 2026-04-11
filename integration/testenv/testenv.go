@@ -165,6 +165,108 @@ gvisor:
 	return path
 }
 
+func WriteWorkdirOverlayConfig(t *testing.T, moduleRoot string, enabled bool) string {
+	t.Helper()
+
+	sourcePath := filepath.Join(moduleRoot, "box.yaml")
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
+	}
+
+	content := string(data)
+	if strings.Contains(content, "workdir_overlay: true") {
+		if !enabled {
+			content = strings.Replace(content, "workdir_overlay: true", "workdir_overlay: false", 1)
+		}
+	} else if strings.Contains(content, "workdir_overlay: false") {
+		if enabled {
+			content = strings.Replace(content, "workdir_overlay: false", "workdir_overlay: true", 1)
+		}
+	} else if strings.Contains(content, "workdir: .") {
+		replacement := "workdir: .\n  workdir_overlay: false"
+		if enabled {
+			replacement = "workdir: .\n  workdir_overlay: true"
+		}
+		content = strings.Replace(content, "workdir: .", replacement, 1)
+	} else {
+		t.Fatalf("config template missing sandbox.workdir setting")
+	}
+
+	path := filepath.Join(t.TempDir(), "box-workdir-overlay.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string) string {
+	t.Helper()
+
+	hostBinDir = strings.TrimSpace(hostBinDir)
+	if hostBinDir == "" {
+		t.Fatal("hostBinDir is empty")
+	}
+	hostPath = strings.TrimSpace(hostPath)
+	if hostPath == "" {
+		t.Fatal("hostPath is empty")
+	}
+
+	content := fmt.Sprintf(`sandbox:
+  rootfs: host-overlay
+  rootfs_source: ""
+  hostname: box
+  workdir: .
+  workdir_overlay: true
+  inherit_env: true
+  env:
+    - TERM=xterm
+    - PATH=%s
+  command_shell: /bin/bash -lc
+network:
+  mode: monitor
+  subnet: 100.96.0.0/30
+  dns:
+    bind_addr: auto
+    upstream:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  transparent_proxy:
+    enabled: true
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+policy:
+  allow_domains: []
+  deny_domains: []
+  allow_cidrs: []
+  deny_cidrs: []
+  extra_allowed_cidrs: []
+  log_all_connects: true
+mounts:
+  extra_ro:
+    - %s
+  extra_rw: []
+docker:
+  enabled: false
+  data_root: /var/lib/docker
+  socket_path: /var/run/docker.sock
+  wait_for_socket: true
+  ready_timeout: 10s
+  host_network_nested_containers: true
+gvisor:
+  platform: systrap
+  network: sandbox
+  debug: false
+`, hostPath, hostBinDir)
+
+	path := filepath.Join(t.TempDir(), "box-opencode-monitor.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
 func buildPackage(pkgPath, output string) error {
 	moduleRoot, err := moduleRootFromWorkingDir()
 	if err != nil {

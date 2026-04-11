@@ -27,6 +27,9 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Sandbox.InheritEnv {
 		t.Fatalf("sandbox.inherit_env = %t, want false by default", got.Sandbox.InheritEnv)
 	}
+	if !got.Sandbox.WorkdirOverlayEnabled() {
+		t.Fatalf("sandbox.workdir_overlay = %v, want enabled by default", got.Sandbox.WorkdirOverlay)
+	}
 	if got.Network.Subnet != "100.96.0.0/30" {
 		t.Fatalf("subnet = %q, want %q", got.Network.Subnet, "100.96.0.0/30")
 	}
@@ -63,6 +66,53 @@ network:
 	want := filepath.Join(invocationDir, "rel/project")
 	if got.Sandbox.Workdir != want {
 		t.Fatalf("sandbox.workdir = %q, want %q", got.Sandbox.Workdir, want)
+	}
+}
+
+func TestLoadDefaultsWorkdirOverlayToTrueWhenOmitted(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !got.Sandbox.WorkdirOverlayEnabled() {
+		t.Fatalf("sandbox.workdir_overlay = %v, want default enabled when omitted", got.Sandbox.WorkdirOverlay)
+	}
+}
+
+func TestLoadHonorsExplicitDisabledWorkdirOverlay(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+  workdir_overlay: false
+network:
+  mode: monitor
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if got.Sandbox.WorkdirOverlayEnabled() {
+		t.Fatalf("sandbox.workdir_overlay = %v, want disabled when explicitly false", got.Sandbox.WorkdirOverlay)
 	}
 }
 

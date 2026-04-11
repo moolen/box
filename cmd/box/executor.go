@@ -129,9 +129,13 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	}
 
 	manifest := rt.RuntimeManifest()
+	repoPath := cwd
+	if strings.TrimSpace(manifest.WorkdirMountSource) != "" {
+		repoPath = strings.TrimSpace(manifest.WorkdirMountSource)
+	}
 	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
 		RootfsMode:       cfg.Sandbox.Rootfs,
-		RepoPath:         cwd,
+		RepoPath:         repoPath,
 		Workdir:          cfg.Sandbox.Workdir,
 		NetworkMode:      cfg.Network.Mode,
 		GatewayIP:        manifest.GatewayIP,

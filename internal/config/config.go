@@ -12,13 +12,14 @@ type Config struct {
 }
 
 type SandboxConfig struct {
-	Rootfs       string   `yaml:"rootfs"`
-	RootfsSource string   `yaml:"rootfs_source"`
-	Hostname     string   `yaml:"hostname"`
-	Workdir      string   `yaml:"workdir"`
-	InheritEnv   bool     `yaml:"inherit_env"`
-	Env          []string `yaml:"env"`
-	CommandShell string   `yaml:"command_shell"`
+	Rootfs         string   `yaml:"rootfs"`
+	RootfsSource   string   `yaml:"rootfs_source"`
+	Hostname       string   `yaml:"hostname"`
+	Workdir        string   `yaml:"workdir"`
+	WorkdirOverlay *bool    `yaml:"workdir_overlay"`
+	InheritEnv     bool     `yaml:"inherit_env"`
+	Env            []string `yaml:"env"`
+	CommandShell   string   `yaml:"command_shell"`
 }
 
 type NetworkConfig struct {
@@ -67,4 +68,11 @@ type GVisorConfig struct {
 	Platform string `yaml:"platform"`
 	Network  string `yaml:"network"`
 	Debug    bool   `yaml:"debug"`
+}
+
+func (cfg SandboxConfig) WorkdirOverlayEnabled() bool {
+	if cfg.WorkdirOverlay == nil {
+		return true
+	}
+	return *cfg.WorkdirOverlay
 }

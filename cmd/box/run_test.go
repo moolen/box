@@ -497,6 +497,122 @@ func TestRuntimeExecutorPassesRuntimeNetNSToSandboxRunner(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorUsesRuntimePreparedWorkdirMountSource(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID:          "runtime-workdir-overlay",
+			StateDir:           "/tmp/runtime-workdir-overlay",
+			WorkdirMountSource: "/tmp/runtime-workdir-overlay/workdir/merged",
+			Net: boxruntime.NetResources{
+				NetNS: "box-runtime-workdir-overlay",
+			},
+		},
+	}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace-src", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Sandbox: config.SandboxConfig{
+					Rootfs:  "host-overlay",
+					Workdir: "/workspace-src",
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(req rootfs.PlanRequest) (rootfs.Plan, error) {
+			if req.RepoPath != "/tmp/runtime-workdir-overlay/workdir/merged" {
+				t.Fatalf("RepoPath = %q, want runtime prepared merged mount", req.RepoPath)
+			}
+			if req.Workdir != "/workspace-src" {
+				t.Fatalf("Workdir = %q, want %q", req.Workdir, "/workspace-src")
+			}
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRuntimeExecutorFallsBackToHostWorkdirWhenOverlayDisabled(t *testing.T) {
+	t.Parallel()
+
+	overlayDisabled := false
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-workdir-bind",
+			StateDir:  "/tmp/runtime-workdir-bind",
+			Net: boxruntime.NetResources{
+				NetNS: "box-runtime-workdir-bind",
+			},
+		},
+	}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace-src", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Sandbox: config.SandboxConfig{
+					Rootfs:         "host-overlay",
+					Workdir:        "/workspace-src",
+					WorkdirOverlay: &overlayDisabled,
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(req rootfs.PlanRequest) (rootfs.Plan, error) {
+			if req.RepoPath != "/workspace-src" {
+				t.Fatalf("RepoPath = %q, want host workdir when overlay disabled", req.RepoPath)
+			}
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
 	t.Parallel()
 

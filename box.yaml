@@ -16,6 +16,10 @@ sandbox:
   # Relative paths are resolved against the invocation directory.
   workdir: .
 
+  # When true, the workdir is mounted through a copy-on-write overlay so
+  # sandbox writes do not modify the host checkout.
+  workdir_overlay: true
+
   # When true, start from the host process environment.
   # Entries in `env` still override inherited values.
   inherit_env: false

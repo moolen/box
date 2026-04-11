@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -135,12 +136,16 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 		"ip netns exec " + resources.NetNS + " ip link set " + resources.GuestVeth + " up",
 		"ip netns exec " + resources.NetNS + " ip route add default via 100.96.0.1 dev " + resources.GuestVeth,
 	}
-	if len(exec.calls) < len(wantSetupPrefix) {
+	setupStart := slices.Index(exec.calls, wantSetupPrefix[0])
+	if setupStart == -1 {
+		t.Fatalf("command exec calls = %#v, want netns setup command %q", exec.calls, wantSetupPrefix[0])
+	}
+	if len(exec.calls[setupStart:]) < len(wantSetupPrefix) {
 		t.Fatalf("command exec calls too short = %#v", exec.calls)
 	}
 	for i, want := range wantSetupPrefix {
-		if exec.calls[i] != want {
-			t.Fatalf("setup command %d = %q, want %q", i, exec.calls[i], want)
+		if exec.calls[setupStart+i] != want {
+			t.Fatalf("setup command %d = %q, want %q", i, exec.calls[setupStart+i], want)
 		}
 	}
 
@@ -185,6 +190,72 @@ func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
 
 	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip netns del "+resources.NetNS)
 	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip link del "+resources.HostVeth)
+}
+
+func TestRunPreparesWorkdirOverlayByDefaultAndRecordsOwnedUnmount(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	repoRoot := t.TempDir()
+	cfg := testConfig("enforce")
+	cfg.Sandbox.Workdir = repoRoot
+
+	exec := &recordingCommandExec{}
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: stateRoot,
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-overlay-default" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	wantMerged := filepath.Join(stateRoot, "runtime-overlay-default", "workdir", "merged")
+	if rt.Manifest.WorkdirMountSource != wantMerged {
+		t.Fatalf("Manifest.WorkdirMountSource = %q, want %q", rt.Manifest.WorkdirMountSource, wantMerged)
+	}
+	mustContainCall(t, exec.calls, "mount -t overlay overlay")
+	mustContainCall(t, exec.calls, "lowerdir="+repoRoot)
+	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "umount "+wantMerged)
+}
+
+func TestRunSkipsWorkdirOverlayWhenExplicitlyDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Sandbox.Workdir = t.TempDir()
+	cfg.Sandbox.WorkdirOverlay = boolPtr(false)
+
+	exec := &recordingCommandExec{}
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-overlay-disabled" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if rt.Manifest.WorkdirMountSource != "" {
+		t.Fatalf("Manifest.WorkdirMountSource = %q, want empty when overlay disabled", rt.Manifest.WorkdirMountSource)
+	}
+	for _, call := range exec.calls {
+		if strings.Contains(call, "mount -t overlay overlay") {
+			t.Fatalf("unexpected overlay mount command: %#v", exec.calls)
+		}
+	}
 }
 
 func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T) {
@@ -903,6 +974,10 @@ func testConfig(networkMode string) config.Config {
 		},
 		Policy: config.PolicyConfig{},
 	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func mustContain(t *testing.T, text, want string) {
