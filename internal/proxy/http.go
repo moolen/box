@@ -269,5 +269,5 @@ func parseHTTPMetadata(head []byte) (hostname, method, path string) {
 	if err != nil {
 		return "", "", ""
 	}
-	return req.Host, req.Method, req.RequestURI
+	return req.Host, req.Method, req.URL.Path
 }

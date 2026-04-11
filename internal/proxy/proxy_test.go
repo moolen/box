@@ -65,7 +65,7 @@ func TestHTTPProxyForwardsAndEmitsEvent(t *testing.T) {
 	}
 	defer client.Close()
 
-	req := "GET /hello HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	req := "GET /hello?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
 	if _, err := client.Write([]byte(req)); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
@@ -92,6 +92,9 @@ func TestHTTPProxyForwardsAndEmitsEvent(t *testing.T) {
 		}
 		if ev.Path != "/hello" {
 			t.Fatalf("Event.Path = %q, want %q", ev.Path, "/hello")
+		}
+		if ev.Host != "example.com" {
+			t.Fatalf("Event.Host = %q, want %q", ev.Host, "example.com")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for event")
@@ -181,6 +184,9 @@ func TestTLSPeekExtractsSNIAndForwardsClientHello(t *testing.T) {
 		}
 		if ev.Hostname != "example.com" {
 			t.Fatalf("Event.Hostname = %q, want %q", ev.Hostname, "example.com")
+		}
+		if ev.SNI != "example.com" {
+			t.Fatalf("Event.SNI = %q, want %q", ev.SNI, "example.com")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for event")
