@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -60,18 +61,87 @@ func TestBoxCanWriteSandboxWorkdir(t *testing.T) {
 }
 
 func TestBoxMountInfoShowsUsrReadOnlyAndTmpfsTmp(t *testing.T) {
-	_, _, _ = runBox(t, true, "--", "cat", "/proc/self/mountinfo")
-	t.Fatalf("TODO: implement assertion")
+	stdout, stderr, err := runBox(t, true, "--", "cat", "/proc/self/mountinfo")
+	if err != nil {
+		t.Fatalf("cat /proc/self/mountinfo failed: %v stderr=%q", err, stderr)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	var foundUsr bool
+	var foundTmp bool
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			continue
+		}
+
+		sep := slices.Index(fields, "-")
+		if sep == -1 || sep+3 > len(fields) {
+			continue
+		}
+
+		mountPoint := fields[4]
+		mountOptions := strings.Split(fields[5], ",")
+		fsType := fields[sep+1]
+
+		if mountPoint == "/usr" {
+			foundUsr = true
+			if !slices.Contains(mountOptions, "ro") {
+				t.Fatalf("expected /usr mount options to include ro, got line=%q", line)
+			}
+		}
+
+		if mountPoint == "/tmp" {
+			foundTmp = true
+			if fsType != "tmpfs" {
+				t.Fatalf("expected /tmp fs type tmpfs, got %q line=%q", fsType, line)
+			}
+			if !slices.Contains(mountOptions, "rw") {
+				t.Fatalf("expected /tmp mount options to include rw, got line=%q", line)
+			}
+		}
+	}
+
+	if !foundUsr {
+		t.Fatalf("did not find /usr mount in mountinfo")
+	}
+	if !foundTmp {
+		t.Fatalf("did not find /tmp mount in mountinfo")
+	}
 }
 
 func TestBoxDefaultPrivilegeSurfaceDoesNotLookDockerElevated(t *testing.T) {
-	_, _, _ = runBox(t, true, "--", "bash", "-lc", "id -u; capsh --print")
-	t.Fatalf("TODO: implement assertion")
+	stdout, stderr, err := runBox(t, true, "--", "bash", "-lc", "grep '^CapEff:' /proc/self/status")
+	if err != nil {
+		t.Fatalf("failed to read CapEff from /proc/self/status: %v stderr=%q", err, stderr)
+	}
+
+	capEffLine := strings.TrimSpace(stdout)
+	parts := strings.Fields(capEffLine)
+	if len(parts) != 2 || parts[0] != "CapEff:" {
+		t.Fatalf("unexpected CapEff line format: %q", capEffLine)
+	}
+
+	capEff := strings.TrimLeft(strings.ToLower(parts[1]), "0")
+	if capEff == "" {
+		capEff = "0"
+	}
+
+	// Docker's fully privileged default mask should never appear in the default sandbox.
+	if capEff == "3fffffffff" {
+		t.Fatalf("default sandbox looks fully Docker-privileged: CapEff=%q", parts[1])
+	}
 }
 
 func TestBoxDefaultSandboxCannotMountTmpfs(t *testing.T) {
-	_, _, _ = runBox(t, true, "--", "bash", "-lc", "mkdir -p /tmp/box-mount-test && mount -t tmpfs tmpfs /tmp/box-mount-test")
-	t.Fatalf("TODO: implement assertion")
+	_, stderr, err := runBox(t, true, "--", "bash", "-lc", "mkdir -p /tmp/box-mount-test && mount -t tmpfs tmpfs /tmp/box-mount-test")
+	if err == nil {
+		t.Fatalf("expected tmpfs mount to fail in default sandbox")
+	}
+	lowerStderr := strings.ToLower(stderr)
+	if !strings.Contains(lowerStderr, "operation not permitted") && !strings.Contains(lowerStderr, "permission denied") {
+		t.Fatalf("expected permission error when mounting tmpfs, got stderr=%q", stderr)
+	}
 }
 
 func runBox(t *testing.T, requireRoot bool, args ...string) (string, string, error) {
