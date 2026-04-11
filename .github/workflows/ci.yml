@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install Linux integration test host tooling
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            docker.io \
+            iproute2 \
+            nftables \
+            skopeo \
+            uidmap
+
+          if systemctl list-unit-files | grep -q '^docker\.service'; then
+            sudo systemctl start docker
+          fi
+
+          curl -fsSL -o /tmp/runsc https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc
+          curl -fsSL -o /tmp/containerd-shim-runsc-v1 https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/containerd-shim-runsc-v1
+          chmod +x /tmp/runsc /tmp/containerd-shim-runsc-v1
+          sudo install -m 0755 /tmp/runsc /usr/local/bin/runsc
+          sudo install -m 0755 /tmp/containerd-shim-runsc-v1 /usr/local/bin/containerd-shim-runsc-v1
+
+          runsc --version
+          docker --version
+          dockerd --version
+          skopeo --version
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build
+        run: make build
