@@ -46,27 +46,18 @@ func loadTrustedOrphanManifest(stateRoot, runtimeID string) (Manifest, bool) {
 		return Manifest{}, false
 	}
 
-	if !trustedOrphanManifest(manifest, stateRoot, runtimeID, stateDir, manifestPath) {
+	if !trustedOrphanManifest(manifest, runtimeID, stateDir, manifestPath) {
 		return Manifest{}, false
-	}
-	for _, path := range manifest.ManagedPaths {
-		if err := validateManagedPath(manifest, path); err != nil {
-			return Manifest{}, false
-		}
 	}
 
 	return manifest, true
 }
 
-func trustedOrphanManifest(manifest Manifest, stateRoot, runtimeID, stateDir, manifestPath string) bool {
+func trustedOrphanManifest(manifest Manifest, runtimeID, stateDir, manifestPath string) bool {
 	if manifest.RuntimeID != runtimeID {
 		return false
 	}
 
-	wantStateRoot, ok := cleanAbsPath(stateRoot)
-	if !ok {
-		return false
-	}
 	wantStateDir, ok := cleanAbsPath(stateDir)
 	if !ok {
 		return false
@@ -76,10 +67,6 @@ func trustedOrphanManifest(manifest Manifest, stateRoot, runtimeID, stateDir, ma
 		return false
 	}
 
-	gotStateRoot, ok := cleanAbsPath(manifest.StateRoot)
-	if !ok {
-		return false
-	}
 	gotStateDir, ok := cleanAbsPath(manifest.StateDir)
 	if !ok {
 		return false
@@ -89,8 +76,7 @@ func trustedOrphanManifest(manifest Manifest, stateRoot, runtimeID, stateDir, ma
 		return false
 	}
 
-	return gotStateRoot == wantStateRoot &&
-		gotStateDir == wantStateDir &&
+	return gotStateDir == wantStateDir &&
 		gotManifestPath == wantManifestPath
 }
 
