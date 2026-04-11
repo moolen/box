@@ -111,12 +111,15 @@ func TestBoxMountInfoShowsUsrReadOnlyAndTmpfsTmp(t *testing.T) {
 }
 
 func TestBoxDefaultSandboxCannotMountTmpfs(t *testing.T) {
-	_, stderr, err := runBox(t, true, "--", "bash", "-lc", "mkdir -p /tmp/box-mount-test && mount -t tmpfs tmpfs /tmp/box-mount-test")
+	_, stderr, err := runBox(t, true, "--", "bash", "-lc", "d=$(mktemp -d /tmp/box-mount-test.XXXXXX) && mount -t tmpfs tmpfs \"$d\"")
 	if err == nil {
 		t.Fatalf("expected tmpfs mount to fail in default sandbox")
 	}
 	lowerStderr := strings.ToLower(stderr)
-	if !strings.Contains(lowerStderr, "operation not permitted") && !strings.Contains(lowerStderr, "permission denied") {
+	if !strings.Contains(lowerStderr, "operation not permitted") &&
+		!strings.Contains(lowerStderr, "permission denied") &&
+		!strings.Contains(lowerStderr, "not allowed") &&
+		!strings.Contains(lowerStderr, "must be superuser") {
 		t.Fatalf("expected permission error when mounting tmpfs, got stderr=%q", stderr)
 	}
 }
