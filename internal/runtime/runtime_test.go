@@ -122,6 +122,26 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 		t.Fatalf("ResourcesForRuntimeID() error = %v", err)
 	}
 
+	wantSetupPrefix := []string{
+		"ip netns add " + resources.NetNS,
+		"ip link add " + resources.HostVeth + " type veth peer name " + resources.GuestVeth,
+		"ip link set " + resources.GuestVeth + " netns " + resources.NetNS,
+		"ip addr add 100.96.0.1/30 dev " + resources.HostVeth,
+		"ip link set " + resources.HostVeth + " up",
+		"ip netns exec " + resources.NetNS + " ip addr add 100.96.0.2/30 dev " + resources.GuestVeth,
+		"ip netns exec " + resources.NetNS + " ip link set " + resources.GuestVeth + " up",
+		"ip netns exec " + resources.NetNS + " ip link set lo up",
+		"ip netns exec " + resources.NetNS + " ip route add default via 100.96.0.1",
+	}
+	if len(exec.calls) < len(wantSetupPrefix) {
+		t.Fatalf("command exec calls too short = %#v", exec.calls)
+	}
+	for i, want := range wantSetupPrefix {
+		if exec.calls[i] != want {
+			t.Fatalf("setup command %d = %q, want %q", i, exec.calls[i], want)
+		}
+	}
+
 	if !exec.contains("nft add table inet " + resources.TableName) {
 		t.Fatalf("firewall setup commands = %#v, want nft table scoped to runtime", exec.calls)
 	}
@@ -131,6 +151,38 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	if !exec.contains("ip rule add fwmark") || !exec.contains("lookup") {
 		t.Fatalf("routing setup commands = %#v, want policy routing setup", exec.calls)
 	}
+}
+
+func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	exec := &recordingCommandExec{}
+	resources, err := netns.ResourcesForRuntimeID("runtime-monitor-teardown")
+	if err != nil {
+		t.Fatalf("ResourcesForRuntimeID() error = %v", err)
+	}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-teardown" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip netns del "+resources.NetNS)
+	mustContain(t, strings.Join(rt.Manifest.TeardownCmds, "\n"), "ip link del "+resources.HostVeth)
 }
 
 func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T) {

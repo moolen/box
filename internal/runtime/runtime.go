@@ -254,6 +254,13 @@ func (rt *Runtime) MonitorSummary() string {
 	return monitor.RenderSummary(rt.monitor.Snapshot())
 }
 
+func (rt *Runtime) PayloadNetNS() string {
+	if rt == nil || !strings.EqualFold(rt.Manifest.NetworkMode, "monitor") {
+		return ""
+	}
+	return strings.TrimSpace(rt.Manifest.Net.NetNS)
+}
+
 func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config, deps Deps) error {
 	if deps.MonitorPreflight == nil {
 		return conflictError(errors.New("monitor preflight conflict/ownership check is required"))
@@ -265,6 +272,12 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		Net:       rt.Manifest.Net,
 	}); err != nil {
 		return conflictError(fmt.Errorf("monitor preflight: %w", err))
+	}
+
+	recordedTeardown, err := rt.setupMonitorNetwork(ctx, cfg.Network.Subnet, deps.CommandExec)
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("setup monitor network: %w", err)
 	}
 
 	if deps.DNS != nil {
@@ -305,7 +318,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		return fmt.Errorf("build firewall monitor plan: %w", err)
 	}
 	monitorTeardown := fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName)
-	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
+	recordedTeardown, err = runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
 		0: monitorTeardown,
 	}))
 	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
@@ -343,6 +356,104 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 
 	return nil
+}
+
+func (rt *Runtime) setupMonitorNetwork(ctx context.Context, subnet string, execer CommandExec) ([]string, error) {
+	if rt == nil {
+		return nil, nil
+	}
+
+	gatewayCIDR, guestCIDR, gatewayIP, err := monitorInterfaceCIDRs(subnet)
+	if err != nil {
+		return nil, err
+	}
+
+	commands := []ownedCommand{
+		{
+			Apply:    fmt.Sprintf("ip netns add %s", rt.Manifest.Net.NetNS),
+			Teardown: fmt.Sprintf("ip netns del %s", rt.Manifest.Net.NetNS),
+		},
+		{
+			Apply:    fmt.Sprintf("ip link add %s type veth peer name %s", rt.Manifest.Net.HostVeth, rt.Manifest.Net.GuestVeth),
+			Teardown: fmt.Sprintf("ip link del %s", rt.Manifest.Net.HostVeth),
+		},
+		{
+			Apply: fmt.Sprintf("ip link set %s netns %s", rt.Manifest.Net.GuestVeth, rt.Manifest.Net.NetNS),
+		},
+		{
+			Apply: fmt.Sprintf("ip addr add %s dev %s", gatewayCIDR, rt.Manifest.Net.HostVeth),
+		},
+		{
+			Apply: fmt.Sprintf("ip link set %s up", rt.Manifest.Net.HostVeth),
+		},
+		{
+			Apply: fmt.Sprintf("ip netns exec %s ip addr add %s dev %s", rt.Manifest.Net.NetNS, guestCIDR, rt.Manifest.Net.GuestVeth),
+		},
+		{
+			Apply: fmt.Sprintf("ip netns exec %s ip link set %s up", rt.Manifest.Net.NetNS, rt.Manifest.Net.GuestVeth),
+		},
+		{
+			Apply: fmt.Sprintf("ip netns exec %s ip link set lo up", rt.Manifest.Net.NetNS),
+		},
+		{
+			Apply: fmt.Sprintf("ip netns exec %s ip route add default via %s", rt.Manifest.Net.NetNS, gatewayIP),
+		},
+	}
+
+	if execer == nil {
+		return nil, nil
+	}
+
+	var teardown []string
+	for _, command := range commands {
+		if strings.TrimSpace(command.Apply) == "" {
+			continue
+		}
+		fields := strings.Fields(command.Apply)
+		if len(fields) == 0 {
+			continue
+		}
+		if err := execer.Run(ctx, fields[0], fields[1:]...); err != nil {
+			return teardown, fmt.Errorf("run %q: %w", command.Apply, err)
+		}
+		if td := strings.TrimSpace(command.Teardown); td != "" {
+			teardown = append([]string{td}, teardown...)
+		}
+	}
+
+	return teardown, nil
+}
+
+func monitorInterfaceCIDRs(subnet string) (gatewayCIDR string, guestCIDR string, gatewayIP string, err error) {
+	trimmed := strings.TrimSpace(subnet)
+	if trimmed == "" {
+		return "", "", "", errors.New("network subnet is required")
+	}
+
+	prefix, err := netip.ParsePrefix(trimmed)
+	if err != nil {
+		return "", "", "", fmt.Errorf("parse subnet %q: %w", trimmed, err)
+	}
+
+	base := prefix.Masked().Addr()
+	if !base.Is4() {
+		return "", "", "", fmt.Errorf("subnet %q must be ipv4", trimmed)
+	}
+
+	gateway := base.Next()
+	if !prefix.Contains(gateway) {
+		return "", "", "", fmt.Errorf("subnet %q has no usable gateway ip", trimmed)
+	}
+
+	guest := gateway.Next()
+	if !prefix.Contains(guest) {
+		return "", "", "", fmt.Errorf("subnet %q has no usable guest ip", trimmed)
+	}
+
+	return fmt.Sprintf("%s/%d", gateway.String(), prefix.Bits()),
+		fmt.Sprintf("%s/%d", guest.String(), prefix.Bits()),
+		gateway.String(),
+		nil
 }
 
 func (rt *Runtime) monitorDNSCallback() func(hostname string) {

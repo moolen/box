@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -11,8 +12,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/proxy"
@@ -352,6 +355,45 @@ func TestRuntimeExecutorPrintsMonitorSummaryWhenPayloadFails(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorRunsPayloadInMonitorNamespace(t *testing.T) {
+	t.Parallel()
+
+	rt := &fakeRuntimeHandle{
+		netns: "box-deadbeef",
+	}
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		runPayload: func(context.Context, []string) error {
+			t.Fatalf("host payload path was used for monitor namespace execution")
+			return nil
+		},
+		runPayloadInNetNS: func(_ context.Context, payload []string, netnsName string) error {
+			if got, want := payload, []string{"/bin/true"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("payload = %#v, want %#v", got, want)
+			}
+			if netnsName != "box-deadbeef" {
+				t.Fatalf("netns = %q, want %q", netnsName, "box-deadbeef")
+			}
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestRuntimeExecutorSuppliesMonitorDNSAndProxyFactories(t *testing.T) {
 	t.Parallel()
 
@@ -494,6 +536,34 @@ func TestStartTransparentProxyInvokesCallbackAndStopsBothListeners(t *testing.T)
 	}
 }
 
+func TestDecodeSockaddrPortReadsNetworkByteOrder(t *testing.T) {
+	t.Parallel()
+
+	var port uint16
+	raw := (*[2]byte)(unsafe.Pointer(&port))
+	binary.BigEndian.PutUint16(raw[:], 8080)
+
+	if got := decodeSockaddrPort(port); got != 8080 {
+		t.Fatalf("decodeSockaddrPort() = %d, want %d", got, 8080)
+	}
+}
+
+func TestOriginalDstIPv4DecodesPortFromSockaddrBytes(t *testing.T) {
+	t.Parallel()
+
+	var raw syscall.RawSockaddrInet4
+	raw.Addr = [4]byte{203, 0, 113, 7}
+	binary.BigEndian.PutUint16((*[2]byte)(unsafe.Pointer(&raw.Port))[:], 8443)
+
+	addr := tcpAddrFromSockaddrIPv4(raw)
+	if addr.Port != 8443 {
+		t.Fatalf("tcpAddrFromSockaddrIPv4().Port = %d, want %d", addr.Port, 8443)
+	}
+	if got := addr.IP.String(); got != "203.0.113.7" {
+		t.Fatalf("tcpAddrFromSockaddrIPv4().IP = %q, want %q", got, "203.0.113.7")
+	}
+}
+
 type preflightCommandResult struct {
 	output string
 	err    error
@@ -513,6 +583,7 @@ func fakePreflightRunner(results map[string]preflightCommandResult) preflightCom
 type fakeRuntimeHandle struct {
 	summary string
 	cleaned bool
+	netns   string
 }
 
 func (f *fakeRuntimeHandle) Cleanup(context.Context, boxruntime.Deps) error {
@@ -522,4 +593,8 @@ func (f *fakeRuntimeHandle) Cleanup(context.Context, boxruntime.Deps) error {
 
 func (f *fakeRuntimeHandle) MonitorSummary() string {
 	return f.summary
+}
+
+func (f *fakeRuntimeHandle) PayloadNetNS() string {
+	return f.netns
 }

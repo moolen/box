@@ -3,10 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math/bits"
 	"net"
 	"os"
 	"os/exec"
@@ -28,6 +28,8 @@ import (
 const (
 	envInitShimPath     = "BOX_INIT_SHIM_PATH"
 	defaultInitShimPath = "/usr/local/libexec/box-initshim"
+	ipTransparent       = 19
+	ipv6Transparent     = 75
 )
 
 type ttyState struct {
@@ -109,14 +111,16 @@ func runPayload(d deps, configPath string, payload []string) error {
 type runtimeHandle interface {
 	Cleanup(context.Context, boxruntime.Deps) error
 	MonitorSummary() string
+	PayloadNetNS() string
 }
 
 type runtimeExecutor struct {
-	stderr       io.Writer
-	getwd        func() (string, error)
-	loadConfig   func(path, cwd string) (config.Config, error)
-	startRuntime func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
-	runPayload   func(context.Context, []string) error
+	stderr            io.Writer
+	getwd             func() (string, error)
+	loadConfig        func(path, cwd string) (config.Config, error)
+	startRuntime      func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
+	runPayload        func(context.Context, []string) error
+	runPayloadInNetNS func(context.Context, []string, string) error
 }
 
 func (e runtimeExecutor) Run(req runRequest) error {
@@ -142,6 +146,11 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	runPayload := e.runPayload
 	if runPayload == nil {
 		runPayload = runPayloadCommand
+	}
+
+	runPayloadInNetNS := e.runPayloadInNetNS
+	if runPayloadInNetNS == nil {
+		runPayloadInNetNS = runPayloadInNetNSCommand
 	}
 
 	stderr := e.stderr
@@ -171,7 +180,12 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		return err
 	}
 
-	payloadErr := runPayload(ctx, req.Payload)
+	var payloadErr error
+	if netnsName := rt.PayloadNetNS(); strings.TrimSpace(netnsName) != "" {
+		payloadErr = runPayloadInNetNS(ctx, req.Payload, netnsName)
+	} else {
+		payloadErr = runPayload(ctx, req.Payload)
+	}
 	cleanupErr := rt.Cleanup(ctx, deps)
 	summaryErr := writeMonitorSummary(stderr, rt.MonitorSummary())
 	return errors.Join(payloadErr, cleanupErr, summaryErr)
@@ -189,6 +203,15 @@ func (hostCommandExec) Run(ctx context.Context, name string, args ...string) err
 
 func runPayloadCommand(ctx context.Context, payload []string) error {
 	cmd := exec.CommandContext(ctx, payload[0], payload[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func runPayloadInNetNSCommand(ctx context.Context, payload []string, netnsName string) error {
+	args := append([]string{"netns", "exec", netnsName, payload[0]}, payload[1:]...)
+	cmd := exec.CommandContext(ctx, "ip", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -233,7 +256,9 @@ type proxyFactoryDeps struct {
 }
 
 func startTransparentProxy(ctx context.Context, req boxruntime.ProxyStartRequest) (boxruntime.Runner, error) {
-	return startTransparentProxyWithDeps(ctx, req, proxyFactoryDeps{})
+	return startTransparentProxyWithDeps(ctx, req, proxyFactoryDeps{
+		listen: transparentListen,
+	})
 }
 
 func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStartRequest, deps proxyFactoryDeps) (boxruntime.Runner, error) {
@@ -312,6 +337,30 @@ func consumeListener(listener net.Listener) func(network, address string) (net.L
 	}
 }
 
+func transparentListen(network, address string) (net.Listener, error) {
+	var lc net.ListenConfig
+	lc.Control = func(_, _ string, c syscall.RawConn) error {
+		var controlErr error
+		if err := c.Control(func(fd uintptr) {
+			controlErr = errors.Join(
+				setSockoptBestEffort(int(fd), syscall.SOL_IP, ipTransparent, 1),
+				setSockoptBestEffort(int(fd), syscall.SOL_IPV6, ipv6Transparent, 1),
+			)
+		}); err != nil {
+			return err
+		}
+		return controlErr
+	}
+	return lc.Listen(context.Background(), network, address)
+}
+
+func setSockoptBestEffort(fd int, level int, opt int, value int) error {
+	if err := syscall.SetsockoptInt(fd, level, opt, value); err != nil && !errors.Is(err, syscall.ENOPROTOOPT) {
+		return err
+	}
+	return nil
+}
+
 const soOriginalDst = 80
 
 func resolveOriginalDst(conn net.Conn) (string, error) {
@@ -353,10 +402,7 @@ func originalDstIPv4(fd int) (*net.TCPAddr, error) {
 	if errno := getSockoptRaw(fd, syscall.IPPROTO_IP, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
 		return nil, fmt.Errorf("get ipv4 original dst: %w", errno)
 	}
-	return &net.TCPAddr{
-		IP:   net.IP(raw.Addr[:]),
-		Port: int(bits.ReverseBytes16(raw.Port)),
-	}, nil
+	return tcpAddrFromSockaddrIPv4(raw), nil
 }
 
 func originalDstIPv6(fd int) (*net.TCPAddr, error) {
@@ -365,14 +411,29 @@ func originalDstIPv6(fd int) (*net.TCPAddr, error) {
 	if errno := getSockoptRaw(fd, syscall.IPPROTO_IPV6, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
 		return nil, fmt.Errorf("get ipv6 original dst: %w", errno)
 	}
+	return tcpAddrFromSockaddrIPv6(raw), nil
+}
+
+func tcpAddrFromSockaddrIPv4(raw syscall.RawSockaddrInet4) *net.TCPAddr {
+	return &net.TCPAddr{
+		IP:   net.IP(raw.Addr[:]),
+		Port: decodeSockaddrPort(raw.Port),
+	}
+}
+
+func tcpAddrFromSockaddrIPv6(raw syscall.RawSockaddrInet6) *net.TCPAddr {
 	addr := &net.TCPAddr{
 		IP:   net.IP(raw.Addr[:]),
-		Port: int(bits.ReverseBytes16(raw.Port)),
+		Port: decodeSockaddrPort(raw.Port),
 	}
 	if raw.Scope_id != 0 {
 		addr.Zone = strconv.FormatUint(uint64(raw.Scope_id), 10)
 	}
-	return addr, nil
+	return addr
+}
+
+func decodeSockaddrPort(port uint16) int {
+	return int(binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&port))[:]))
 }
 
 func getSockoptRaw(fd int, level int, opt int, value unsafe.Pointer, size unsafe.Pointer) syscall.Errno {
