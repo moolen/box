@@ -65,7 +65,10 @@ func (p Policy) EvaluateNormalized(host string) Verdict {
 		return VerdictDeny
 	}
 	if host == "" {
-		return VerdictDeny
+		if len(p.allow) > 0 {
+			return VerdictDeny
+		}
+		return VerdictAllow
 	}
 	if matchesAny(host, p.deny) {
 		return VerdictDeny

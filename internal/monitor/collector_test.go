@@ -69,6 +69,36 @@ func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
 	}
 }
 
+func TestUnknownHostnameVerdictDefaultsToAllowWithoutAllowlist(t *testing.T) {
+	policy := config.PolicyConfig{}
+
+	got := EvaluateHostname(policy, "")
+	if got != VerdictAllow {
+		t.Fatalf("EvaluateHostname(empty) = %q, want %q with empty allowlist", got, VerdictAllow)
+	}
+
+	got = EvaluateHostname(policy, "bad host")
+	if got != VerdictAllow {
+		t.Fatalf("EvaluateHostname(malformed) = %q, want %q with empty allowlist", got, VerdictAllow)
+	}
+}
+
+func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
+	policy := config.PolicyConfig{
+		AllowDomains: []string{"example.com"},
+	}
+
+	got := EvaluateHostname(policy, "")
+	if got != VerdictDeny {
+		t.Fatalf("EvaluateHostname(empty) = %q, want %q with non-empty allowlist", got, VerdictDeny)
+	}
+
+	got = EvaluateHostname(policy, "bad host")
+	if got != VerdictDeny {
+		t.Fatalf("EvaluateHostname(malformed) = %q, want %q with non-empty allowlist", got, VerdictDeny)
+	}
+}
+
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector := NewCollector(config.PolicyConfig{
 		AllowDomains: []string{"example.com"},
@@ -171,8 +201,8 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 	mustContain(t, summary, "GET example.com")
 	mustContain(t, summary, "TLS")
 	mustContain(t, summary, UnknownHostname)
-	mustContain(t, summary, string(VerdictAllow))
-	mustContain(t, summary, string(VerdictDeny))
+	mustContain(t, summary, "ALLOW")
+	mustContain(t, summary, "DENY")
 	mustContain(t, summary, "Total events: 6")
 
 	dnsOnly := RenderSummary(Snapshot{
@@ -190,6 +220,13 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 	if strings.Contains(dnsOnly, "TLS") {
 		t.Fatalf("RenderSummary() unexpectedly included TLS section: %q", dnsOnly)
 	}
+}
+
+func TestRenderSummaryEmptySnapshotShowsNoTrafficMessage(t *testing.T) {
+	summary := RenderSummary(Snapshot{})
+	mustContain(t, summary, "Monitor summary")
+	mustContain(t, summary, "no traffic captured")
+	mustContain(t, summary, "Total events: 0")
 }
 
 func mustContain(t *testing.T, got string, want string) {
