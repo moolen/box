@@ -186,6 +186,58 @@ func TestBoxEnforceBlocksDisallowedTraffic(t *testing.T) {
 	}
 }
 
+func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	opencodePath, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Skipf("opencode not available on host PATH: %v", err)
+	}
+	opencodePath, err = filepath.Abs(opencodePath)
+	if err != nil {
+		t.Fatalf("filepath.Abs(%q) error = %v", opencodePath, err)
+	}
+	hostBinDir := filepath.Dir(opencodePath)
+	for _, root := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/snap", "/nix"} {
+		if hostBinDir == root || strings.HasPrefix(hostBinDir, root+"/") {
+			t.Skipf("opencode resolved under default host-overlay bind root %q (bin dir %q); need non-default mounted bin dir", root, hostBinDir)
+		}
+	}
+	hostPath := os.Getenv("PATH")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteOpenCodeMonitorConfig(t, hostBinDir, hostPath)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "opencode", "run", "hi")
+	if err == nil {
+		t.Fatalf("expected opencode run to fail in smoke test; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if strings.Contains(stderr, `listen udp 100.96.0.1:53: bind: address already in use`) {
+		t.Skipf("host DNS bind address already in use for monitor mode: %q", stderr)
+	}
+
+	lowerStderr := strings.ToLower(stderr)
+	if strings.Contains(lowerStderr, "command not found") {
+		t.Fatalf("opencode resolution failed in sandbox; stderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "Monitor summary") {
+		t.Fatalf("stderr missing monitor summary: %q", stderr)
+	}
+	if !strings.Contains(stderr, "models.dev") {
+		t.Fatalf("stderr missing OpenCode host evidence: %q", stderr)
+	}
+	if !strings.Contains(stderr, "DNS:") {
+		t.Fatalf("stderr missing DNS monitor output: %q", stderr)
+	}
+	if !strings.Contains(stderr, "TLS:") && !strings.Contains(stderr, "HTTP:") {
+		t.Fatalf("stderr missing TLS/HTTP monitor output: %q", stderr)
+	}
+}
+
 func runBoxSmoke(t *testing.T, payload ...string) string {
 	t.Helper()
 

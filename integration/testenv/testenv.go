@@ -207,6 +207,9 @@ func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string
 	if hostBinDir == "" {
 		t.Fatal("hostBinDir is empty")
 	}
+	if !filepath.IsAbs(hostBinDir) {
+		t.Fatalf("hostBinDir must be absolute, got %q", hostBinDir)
+	}
 	hostPath = strings.TrimSpace(hostPath)
 	if hostPath == "" {
 		t.Fatal("hostPath is empty")

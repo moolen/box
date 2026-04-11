@@ -81,6 +81,27 @@ jobs:
           dockerd --version
           skopeo --version
 
+      - name: Set up Node.js for OpenCode
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install OpenCode in custom prefix
+        run: |
+          set -euxo pipefail
+          OPENCODE_PREFIX="${RUNNER_TEMP}/opencode-prefix"
+          npm install --global --prefix "${OPENCODE_PREFIX}" opencode-ai@1.4.3
+          echo "${OPENCODE_PREFIX}/bin" >> "${GITHUB_PATH}"
+          OPENCODE_BIN="${OPENCODE_PREFIX}/bin/opencode"
+          echo "OpenCode bin: ${OPENCODE_BIN}"
+          "${OPENCODE_BIN}" --version
+
+      - name: Verify OpenCode on PATH
+        run: |
+          set -euxo pipefail
+          command -v opencode
+          opencode --version
+
       - name: Test
         run: go test ./... -count=1
 
