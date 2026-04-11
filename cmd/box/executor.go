@@ -29,9 +29,11 @@ const (
 	ipTransparent       = 19
 	ipv6Transparent     = 75
 	envDockerEnabled    = "BOX_DOCKER_ENABLED"
+	envDockerConfig     = "DOCKER_CONFIG"
 	envDockerSocketPath = "BOX_DOCKER_SOCKET_PATH"
 	envDockerWait       = "BOX_DOCKER_WAIT_FOR_SOCKET"
 	envDockerReady      = "BOX_DOCKER_READY_TIMEOUT"
+	dockerConfigDir     = "/etc/docker"
 	defaultNoProxy      = "127.0.0.1,localhost"
 	soOriginalDst       = 80
 )
@@ -271,6 +273,7 @@ func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStar
 	httpServer, err := deps.startHTTP(ctx, proxy.ProxyConfig{
 		Listen:          consumeListener(httpListener),
 		ResolveUpstream: deps.resolveUpstream,
+		AllowHostname:   req.AllowHostname,
 		OnEvent:         onEvent,
 	})
 	if err != nil {
@@ -282,6 +285,7 @@ func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStar
 	tlsServer, err := deps.startTLS(ctx, proxy.ProxyConfig{
 		Listen:          consumeListener(tlsListener),
 		ResolveUpstream: deps.resolveUpstream,
+		AllowHostname:   req.AllowHostname,
 		OnEvent:         onEvent,
 	})
 	if err != nil {
@@ -638,6 +642,10 @@ func sandboxProxyAndDockerEnv(gatewayIP string, cfg config.Config) []string {
 		return env
 	}
 
+	if dockerUsesProxy(cfg) {
+		env = append(env, envDockerConfig+"="+dockerConfigDir)
+	}
+
 	socketPath := strings.TrimSpace(cfg.Docker.SocketPath)
 	if socketPath == "" {
 		socketPath = "/var/run/docker.sock"
@@ -660,17 +668,23 @@ func modeUsesProxy(cfg config.Config) bool {
 }
 
 func dockerProxyValue(gatewayIP string, cfg config.Config) string {
-	if !modeUsesProxy(cfg) {
+	if !dockerUsesProxy(cfg) {
 		return ""
 	}
 	return proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
 }
 
 func dockerNoProxyValue(cfg config.Config) string {
-	if !modeUsesProxy(cfg) {
+	if !dockerUsesProxy(cfg) {
 		return ""
 	}
 	return defaultNoProxy
+}
+
+func dockerUsesProxy(cfg config.Config) bool {
+	return modeUsesProxy(cfg) || (strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
+		cfg.Docker.Enabled &&
+		cfg.Docker.HostNetworkNestedContainers)
 }
 
 func boolString(value bool) string {

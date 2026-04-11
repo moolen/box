@@ -160,6 +160,9 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 
 	if req.DockerEnabled {
 		files = append(files, dockerDaemonConfigFile(req))
+		if dockerClientProxyConfigured(req) {
+			files = append(files, dockerClientConfigFile(req))
+		}
 	}
 
 	return files
@@ -202,6 +205,35 @@ func dockerDaemonConfigFile(req PlanRequest) GeneratedFile {
 	content = append(content, '\n')
 	return GeneratedFile{
 		Path:    "/etc/docker/daemon.json",
+		Content: string(content),
+		Mode:    0o644,
+	}
+}
+
+func dockerClientProxyConfigured(req PlanRequest) bool {
+	return strings.TrimSpace(req.DockerHTTPProxy) != "" ||
+		strings.TrimSpace(req.DockerHTTPSProxy) != "" ||
+		strings.TrimSpace(req.DockerNoProxy) != ""
+}
+
+func dockerClientConfigFile(req PlanRequest) GeneratedFile {
+	config := map[string]any{
+		"proxies": map[string]any{
+			"default": map[string]string{
+				"httpProxy":  strings.TrimSpace(req.DockerHTTPProxy),
+				"httpsProxy": strings.TrimSpace(req.DockerHTTPSProxy),
+				"noProxy":    strings.TrimSpace(req.DockerNoProxy),
+			},
+		},
+	}
+
+	content, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		panic(fmt.Sprintf("marshal docker client config: %v", err))
+	}
+	content = append(content, '\n')
+	return GeneratedFile{
+		Path:    "/etc/docker/config.json",
 		Content: string(content),
 		Mode:    0o644,
 	}

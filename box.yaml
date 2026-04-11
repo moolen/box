@@ -96,7 +96,7 @@ docker:
   # Timeout used when waiting for dockerd readiness.
   ready_timeout: 10s
 
-  # Intended future behavior for nested containers; currently kept for config shape.
+  # Route nested Docker `--network=host` traffic through the host-process proxy in enforce mode.
   host_network_nested_containers: true
 
 gvisor:

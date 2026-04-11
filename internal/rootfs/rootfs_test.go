@@ -186,6 +186,55 @@ func TestBuildPlanGeneratesDockerDaemonConfigWithProxySettings(t *testing.T) {
 	}
 }
 
+func TestBuildPlanGeneratesDockerClientConfigWithProxySettings(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:       "host-overlay",
+		DockerEnabled:    true,
+		DockerHTTPProxy:  "http://100.96.0.1:18080",
+		DockerHTTPSProxy: "http://100.96.0.1:18080",
+		DockerNoProxy:    "127.0.0.1,localhost",
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	var client GeneratedFile
+	var found bool
+	for _, file := range plan.GeneratedFiles {
+		if file.Path == "/etc/docker/config.json" {
+			client = file
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("generated docker client config missing; files=%#v", plan.GeneratedFiles)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(client.Content), &parsed); err != nil {
+		t.Fatalf("config.json decode error: %v\ncontent=%s", err, client.Content)
+	}
+
+	proxies, ok := parsed["proxies"].(map[string]any)
+	if !ok {
+		t.Fatalf("proxies = %#v, want object", parsed["proxies"])
+	}
+	defaults, ok := proxies["default"].(map[string]any)
+	if !ok {
+		t.Fatalf("proxies.default = %#v, want object", proxies["default"])
+	}
+	if got := defaults["httpProxy"]; got != "http://100.96.0.1:18080" {
+		t.Fatalf("httpProxy = %#v, want host proxy URL", got)
+	}
+	if got := defaults["httpsProxy"]; got != "http://100.96.0.1:18080" {
+		t.Fatalf("httpsProxy = %#v, want host proxy URL", got)
+	}
+	if got := defaults["noProxy"]; got != "127.0.0.1,localhost" {
+		t.Fatalf("noProxy = %#v, want localhost bypass list", got)
+	}
+}
+
 func TestResolveInitShimCopiesSiblingBinaryIntoBundle(t *testing.T) {
 	temp := t.TempDir()
 	exePath := filepath.Join(temp, "bin", "box")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +117,7 @@ func TestHTTPProxySupportsCONNECTTunneling(t *testing.T) {
 	}
 	defer upstream.Close()
 
+	dialedAddr := make(chan string, 1)
 	upstreamDone := make(chan struct{})
 	go func() {
 		defer close(upstreamDone)
@@ -143,11 +145,16 @@ func TestHTTPProxySupportsCONNECTTunneling(t *testing.T) {
 	events := make(chan Event, 1)
 	srv, err := StartHTTP(ctx, ProxyConfig{
 		ListenAddr: "127.0.0.1:0",
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			select {
+			case dialedAddr <- address:
+			default:
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, upstream.Addr().String())
+		},
 		OnEvent: func(ev Event) {
 			events <- ev
-		},
-		ResolveUpstream: func(net.Conn) (string, error) {
-			return upstream.Addr().String(), nil
 		},
 	})
 	if err != nil {
@@ -200,7 +207,172 @@ func TestHTTPProxySupportsCONNECTTunneling(t *testing.T) {
 		t.Fatalf("timed out waiting for CONNECT event")
 	}
 
+	select {
+	case addr := <-dialedAddr:
+		if addr != "example.com:443" {
+			t.Fatalf("DialContext() address = %q, want %q", addr, "example.com:443")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for CONNECT dial")
+	}
+
 	<-upstreamDone
+}
+
+func TestHTTPProxyUsesRequestHostForExplicitHTTPRequest(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	dialedAddr := make(chan string, 1)
+	upstreamReq := make(chan []byte, 1)
+	go func() {
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		upstreamReq <- append([]byte(nil), buf[:n]...)
+
+		_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, err := StartHTTP(ctx, ProxyConfig{
+		ListenAddr: "127.0.0.1:0",
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			select {
+			case dialedAddr <- address:
+			default:
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, upstream.Addr().String())
+		},
+		ResolveUpstream: func(net.Conn) (string, error) {
+			return "127.0.0.1:1", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartHTTP() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	req := "GET http://example.com/hello?q=1 HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+	if _, err := client.Write([]byte(req)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if !bytes.Contains(resp, []byte("\r\n\r\nok")) {
+		t.Fatalf("response = %q, want body %q", string(resp), "ok")
+	}
+
+	select {
+	case addr := <-dialedAddr:
+		if addr != "example.com:80" {
+			t.Fatalf("DialContext() address = %q, want %q", addr, "example.com:80")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for explicit HTTP dial")
+	}
+
+	select {
+	case forwarded := <-upstreamReq:
+		if !bytes.HasPrefix(forwarded, []byte("GET /hello?q=1 HTTP/1.1\r\n")) {
+			t.Fatalf("forwarded request line = %q, want origin-form path", string(bytes.SplitN(forwarded, []byte("\r\n"), 2)[0]))
+		}
+		if !bytes.Contains(forwarded, []byte("Host: example.com")) {
+			t.Fatalf("forwarded request = %q, want Host header", string(forwarded))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for forwarded explicit HTTP request")
+	}
+}
+
+func TestHTTPProxyRejectsDisallowedHTTPRequest(t *testing.T) {
+	t.Parallel()
+
+	server, err := StartHTTP(context.Background(), ProxyConfig{
+		ListenAddr: "127.0.0.1:0",
+		AllowHostname: func(host string) bool {
+			return host == "allowed.example.com"
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartHTTP() error = %v", err)
+	}
+	defer func() {
+		_ = server.Close()
+	}()
+
+	conn, err := net.Dial("tcp", server.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, "GET http://blocked.example.com/ HTTP/1.1\r\nHost: blocked.example.com\r\n\r\n"); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if !strings.Contains(string(response), "403 Forbidden") {
+		t.Fatalf("proxy response = %q, want 403 Forbidden", string(response))
+	}
+}
+
+func TestHTTPProxyRejectsDisallowedCONNECTRequest(t *testing.T) {
+	t.Parallel()
+
+	server, err := StartHTTP(context.Background(), ProxyConfig{
+		ListenAddr: "127.0.0.1:0",
+		AllowHostname: func(host string) bool {
+			return host == "allowed.example.com"
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartHTTP() error = %v", err)
+	}
+	defer func() {
+		_ = server.Close()
+	}()
+
+	conn, err := net.Dial("tcp", server.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, "CONNECT blocked.example.com:443 HTTP/1.1\r\nHost: blocked.example.com:443\r\n\r\n"); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if !strings.Contains(string(response), "403 Forbidden") {
+		t.Fatalf("proxy response = %q, want 403 Forbidden", string(response))
+	}
 }
 
 func TestTLSPeekExtractsSNIAndForwardsClientHello(t *testing.T) {

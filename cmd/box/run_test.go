@@ -232,6 +232,51 @@ func TestSandboxProxyAndDockerEnvOmitsProxyVariablesInEnforceMode(t *testing.T) 
 	}
 }
 
+func TestDockerProxyValueUsesProxyForEnforceNestedHostNetwork(t *testing.T) {
+	cfg := config.Config{
+		Network: config.NetworkConfig{
+			Mode: "enforce",
+			TransparentProxy: config.TransparentProxyConfig{
+				Enabled:  false,
+				HTTPPort: 18080,
+			},
+		},
+		Docker: config.DockerConfig{
+			Enabled:                     true,
+			HostNetworkNestedContainers: true,
+		},
+	}
+
+	got := dockerProxyValue("100.96.0.1", cfg)
+	want := "http://100.96.0.1:18080"
+	if got != want {
+		t.Fatalf("dockerProxyValue() = %q, want %q", got, want)
+	}
+	if got := dockerNoProxyValue(cfg); got != defaultNoProxy {
+		t.Fatalf("dockerNoProxyValue() = %q, want %q", got, defaultNoProxy)
+	}
+}
+
+func TestSandboxProxyAndDockerEnvSetsDockerConfigWhenDockerProxyEnabled(t *testing.T) {
+	cfg := config.Config{
+		Network: config.NetworkConfig{
+			Mode: "enforce",
+			TransparentProxy: config.TransparentProxyConfig{
+				HTTPPort: 18080,
+			},
+		},
+		Docker: config.DockerConfig{
+			Enabled:                     true,
+			HostNetworkNestedContainers: true,
+		},
+	}
+
+	env := sandboxProxyAndDockerEnv("100.96.0.1", cfg)
+	if !containsString(env, "DOCKER_CONFIG=/etc/docker") {
+		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want DOCKER_CONFIG override", env)
+	}
+}
+
 func TestCheckMonitorOwnershipDetectsNftTableConflict(t *testing.T) {
 	t.Parallel()
 

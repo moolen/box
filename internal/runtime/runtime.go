@@ -66,9 +66,10 @@ type DNSStartRequest struct {
 }
 
 type ProxyStartRequest struct {
-	Mode    string
-	Config  config.TransparentProxyConfig
-	OnEvent func(proxy.Event)
+	Mode          string
+	Config        config.TransparentProxyConfig
+	OnEvent       func(proxy.Event)
+	AllowHostname func(string) bool
 }
 
 type MonitorPreflightRequest struct {
@@ -357,9 +358,10 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
 		onEvent := rt.monitorProxyCallback()
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:    cfg.Network.TransparentProxy.Mode,
-			Config:  cfg.Network.TransparentProxy,
-			OnEvent: onEvent,
+			Mode:          cfg.Network.TransparentProxy.Mode,
+			Config:        cfg.Network.TransparentProxy,
+			OnEvent:       onEvent,
+			AllowHostname: nil,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -395,6 +397,21 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		if dnsRunner != nil {
 			rt.runners["dns"] = dnsRunner
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "dns")
+		}
+	}
+
+	if usesNestedDockerHostNetworkProxy(cfg) && deps.Proxy != nil {
+		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
+			Mode:          cfg.Network.TransparentProxy.Mode,
+			Config:        cfg.Network.TransparentProxy,
+			AllowHostname: rt.enforceAllowQuery(cfg.Policy),
+		})
+		if err != nil {
+			return fmt.Errorf("start proxy: %w", err)
+		}
+		if proxyRunner != nil {
+			rt.runners["proxy"] = proxyRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
 		}
 	}
 
@@ -666,6 +683,12 @@ func resolveGatewayDNSPort(bindAddr, gatewayIP string) (int, error) {
 func usesManagedNetworkPolicy(mode string) bool {
 	mode = strings.TrimSpace(mode)
 	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
+}
+
+func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
+		cfg.Docker.Enabled &&
+		cfg.Docker.HostNetworkNestedContainers
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {

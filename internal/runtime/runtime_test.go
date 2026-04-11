@@ -668,6 +668,61 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	}
 }
 
+func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Docker = config.DockerConfig{
+		Enabled:                     true,
+		DataRoot:                    "/var/lib/docker",
+		SocketPath:                  "/var/run/docker.sock",
+		WaitForSocket:               true,
+		ReadyTimeout:                10 * time.Second,
+		HostNetworkNestedContainers: true,
+	}
+
+	var proxyCalled bool
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce-proxy" },
+		CommandExec: noopCommandExec{},
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
+			proxyCalled = true
+			if req.AllowHostname == nil {
+				t.Fatalf("ProxyStartRequest.AllowHostname = nil, want callback")
+			}
+			if req.AllowHostname("blocked.example.com") {
+				t.Fatalf("AllowHostname(blocked.example.com) = true, want false")
+			}
+			if !req.AllowHostname("allowed.example.com") {
+				t.Fatalf("AllowHostname(allowed.example.com) = false, want true")
+			}
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer func() {
+		_ = rt.Cleanup(context.Background(), Deps{CommandExec: noopCommandExec{}})
+	}()
+
+	if !proxyCalled {
+		t.Fatalf("proxy factory was not called in enforce mode for nested docker host networking")
+	}
+}
+
 func TestCleanupOnlyDeletesManifestOwnedPaths(t *testing.T) {
 	t.Parallel()
 

@@ -33,6 +33,7 @@ type ProxyConfig struct {
 	Listen          func(network, address string) (net.Listener, error)
 	DialContext     func(ctx context.Context, network, address string) (net.Conn, error)
 	ResolveUpstream func(client net.Conn) (string, error)
+	AllowHostname   func(host string) bool
 	OnEvent         func(Event)
 }
 
@@ -42,6 +43,7 @@ type Server struct {
 	dialCtx         context.Context
 	dialCancel      context.CancelFunc
 	resolveUpstream func(client net.Conn) (string, error)
+	allowHostname   func(host string) bool
 	onEvent         func(Event)
 	handleConn      func(*Server, net.Conn)
 
@@ -77,7 +79,12 @@ func StartHTTP(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			})
 		}
 
-		upstreamAddr, err := s.resolveUpstreamAddr(client, host, defaultHTTPPort(req))
+		if s.allowHostname != nil && !s.allowHostname(host) {
+			writeHTTPForbidden(client)
+			return
+		}
+
+		upstreamAddr, err := s.resolveHTTPUpstreamAddr(client, req)
 		if err != nil {
 			return
 		}
@@ -152,6 +159,7 @@ func start(ctx context.Context, cfg ProxyConfig, handler func(*Server, net.Conn)
 		dialCtx:         context.Background(),
 		dialCancel:      func() {},
 		resolveUpstream: cfg.ResolveUpstream,
+		allowHostname:   cfg.AllowHostname,
 		onEvent:         cfg.OnEvent,
 		handleConn:      handler,
 		conns:           make(map[net.Conn]struct{}),
@@ -255,7 +263,19 @@ func (s *Server) resolveUpstreamAddr(client net.Conn, fallbackHost, defaultPort 
 	if s.resolveUpstream != nil {
 		return s.resolveUpstream(client)
 	}
+	return s.resolveRequestHostAddr(fallbackHost, defaultPort)
+}
 
+func (s *Server) resolveHTTPUpstreamAddr(client net.Conn, req *http.Request) (string, error) {
+	host := httpRequestHost(req)
+	port := defaultHTTPPort(req)
+	if isExplicitProxyRequest(req) {
+		return s.resolveRequestHostAddr(host, port)
+	}
+	return s.resolveUpstreamAddr(client, host, port)
+}
+
+func (s *Server) resolveRequestHostAddr(fallbackHost, defaultPort string) (string, error) {
 	host := strings.TrimSpace(fallbackHost)
 	if host == "" {
 		return "", errors.New("upstream host is required")
@@ -264,6 +284,10 @@ func (s *Server) resolveUpstreamAddr(client net.Conn, fallbackHost, defaultPort 
 		return host, nil
 	}
 	return net.JoinHostPort(host, defaultPort), nil
+}
+
+func writeHTTPForbidden(conn net.Conn) {
+	_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
 }
 
 func copyHalf(dst io.Writer, src io.Reader, done chan<- struct{}) {
@@ -333,6 +357,16 @@ func httpRequestPath(req *http.Request) string {
 		return req.URL.Path
 	}
 	return req.URL.Opaque
+}
+
+func isExplicitProxyRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	if strings.EqualFold(req.Method, http.MethodConnect) {
+		return true
+	}
+	return req.URL != nil && strings.TrimSpace(req.URL.Host) != ""
 }
 
 func defaultHTTPPort(req *http.Request) string {

@@ -119,17 +119,15 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	testenv.RequireCommands(t, "docker", "dockerd", "skopeo")
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteEnforceConfig(t, nil, nil)
+	configPath := testenv.WriteEnforceConfig(t, []string{"example.com"}, nil)
 
 	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-build.")
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
 	alpineArchivePath := filepath.Join(contextDir, "alpine.tar")
 	debianArchivePath := filepath.Join(contextDir, "debian.tar")
-	// Keep this multistage build offline. External package mirrors made the
-	// smoke test flaky in CI, and enforce-mode egress is covered elsewhere.
 	dockerfile := strings.TrimSpace(`
 FROM alpine:3.20 AS alpine-stage
-RUN printf '%s\n' 'alpine stage' >/build-artifact.txt
+RUN wget -qO /build-artifact.txt http://example.com && grep -q 'Example Domain' /build-artifact.txt
 
 FROM debian:bookworm-slim AS debian-stage
 WORKDIR /tmp/app
