@@ -46,3 +46,27 @@ Integration tests cover:
 - enforce-mode blocked DNS resolution
 - enforce-mode nested Docker multi-stage builds on Linux hosts with `docker`, `dockerd`,
   and `skopeo` available
+
+## Repository Automation
+
+GitHub Actions automation is wired for the `main` branch:
+
+- CI runs on pull requests targeting `main` and on pushes to `main`
+- CI installs missing Linux integration-test host tooling as needed, reusing preinstalled
+  Docker/daemon when available, and installs a pinned `runsc` release with checksum verification
+  before running `go test ./... -count=1` and `make build`
+- release automation runs on pushes to `main` and creates one deterministic commit-based tag
+  per commit in the format `v0.0.0-<commit-timestamp>-<short-sha>`
+- rerunning the release workflow reuses the existing tag and updates the existing GitHub Release
+  for that commit instead of failing
+
+Published release assets are:
+
+- `box_linux_amd64.tar.gz`
+- `box_linux_arm64.tar.gz`
+- `SHA256SUMS`
+
+Each archive contains:
+
+- `box`
+- `box-initshim`
