@@ -73,6 +73,46 @@ func RunBinary(moduleRoot, binaryPath string, requireRoot bool, args ...string) 
 	return out, errOut, nil
 }
 
+func RequireCommands(t *testing.T, names ...string) {
+	t.Helper()
+
+	for _, name := range names {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Skipf("%s not available: %v", name, err)
+		}
+	}
+}
+
+func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
+	t.Helper()
+
+	sourcePath := filepath.Join(moduleRoot, "box.yaml")
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
+	}
+
+	content := string(data)
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{"enabled: false", "enabled: true"},
+	}
+	for _, replacement := range replacements {
+		if !strings.Contains(content, replacement.old) {
+			t.Fatalf("config template missing %q", replacement.old)
+		}
+		content = strings.Replace(content, replacement.old, replacement.new, 1)
+	}
+
+	path := filepath.Join(t.TempDir(), "box-docker.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
 func buildPackage(pkgPath, output string) error {
 	moduleRoot, err := moduleRootFromWorkingDir()
 	if err != nil {

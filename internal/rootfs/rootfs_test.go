@@ -1,6 +1,7 @@
 package rootfs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,6 +97,60 @@ func TestGeneratedEtcFilesUseGatewayDNSInMonitorMode(t *testing.T) {
 	}
 	if strings.Contains(resolv, "127.0.0.1") {
 		t.Fatalf("resolv.conf = %q, must not use localhost nameserver in monitor mode", resolv)
+	}
+}
+
+func TestBuildPlanGeneratesDockerDaemonConfigWithProxySettings(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:       "host-overlay",
+		DockerEnabled:    true,
+		DockerDataRoot:   "/var/lib/docker",
+		DockerSocketPath: "/var/run/docker.sock",
+		DockerHTTPProxy:  "http://100.96.0.1:18080",
+		DockerHTTPSProxy: "http://100.96.0.1:18080",
+		DockerNoProxy:    "127.0.0.1,localhost",
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	var daemon GeneratedFile
+	var found bool
+	for _, file := range plan.GeneratedFiles {
+		if file.Path == "/etc/docker/daemon.json" {
+			daemon = file
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("generated docker daemon config missing; files=%#v", plan.GeneratedFiles)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(daemon.Content), &parsed); err != nil {
+		t.Fatalf("daemon.json decode error: %v\ncontent=%s", err, daemon.Content)
+	}
+
+	if got := parsed["data-root"]; got != "/var/lib/docker" {
+		t.Fatalf("data-root = %#v, want %q", got, "/var/lib/docker")
+	}
+	hosts, ok := parsed["hosts"].([]any)
+	if !ok || len(hosts) != 1 || hosts[0] != "unix:///var/run/docker.sock" {
+		t.Fatalf("hosts = %#v, want unix socket host", parsed["hosts"])
+	}
+	proxies, ok := parsed["proxies"].(map[string]any)
+	if !ok {
+		t.Fatalf("proxies = %#v, want object", parsed["proxies"])
+	}
+	if got := proxies["http-proxy"]; got != "http://100.96.0.1:18080" {
+		t.Fatalf("http-proxy = %#v, want host proxy URL", got)
+	}
+	if got := proxies["https-proxy"]; got != "http://100.96.0.1:18080" {
+		t.Fatalf("https-proxy = %#v, want host proxy URL", got)
+	}
+	if got := proxies["no-proxy"]; got != "127.0.0.1,localhost" {
+		t.Fatalf("no-proxy = %#v, want localhost bypass list", got)
 	}
 }
 

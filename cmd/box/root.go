@@ -27,6 +27,11 @@ import (
 const (
 	envInitShimPath     = "BOX_INIT_SHIM_PATH"
 	defaultInitShimPath = "/usr/local/libexec/box-initshim"
+	envDockerEnabled    = "BOX_DOCKER_ENABLED"
+	envDockerSocketPath = "BOX_DOCKER_SOCKET_PATH"
+	envDockerWait       = "BOX_DOCKER_WAIT_FOR_SOCKET"
+	envDockerReady      = "BOX_DOCKER_READY_TIMEOUT"
+	defaultNoProxy      = "127.0.0.1,localhost"
 )
 
 type ttyState struct {
@@ -134,16 +139,20 @@ func (runtimeExecutor) Run(req runRequest) error {
 	}
 
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
-		RootfsMode:     cfg.Sandbox.Rootfs,
-		RepoPath:       cwd,
-		Workdir:        cfg.Sandbox.Workdir,
-		NetworkMode:    cfg.Network.Mode,
-		GatewayIP:      rt.Manifest.GatewayIP,
-		SandboxHostn:   cfg.Sandbox.Hostname,
-		DockerEnabled:  cfg.Docker.Enabled,
-		DockerDataRoot: cfg.Docker.DataRoot,
-		ExtraRO:        cfg.Mounts.ExtraRO,
-		ExtraRW:        cfg.Mounts.ExtraRW,
+		RootfsMode:       cfg.Sandbox.Rootfs,
+		RepoPath:         cwd,
+		Workdir:          cfg.Sandbox.Workdir,
+		NetworkMode:      cfg.Network.Mode,
+		GatewayIP:        rt.Manifest.GatewayIP,
+		SandboxHostn:     cfg.Sandbox.Hostname,
+		DockerEnabled:    cfg.Docker.Enabled,
+		DockerDataRoot:   cfg.Docker.DataRoot,
+		DockerSocketPath: cfg.Docker.SocketPath,
+		DockerHTTPProxy:  proxyURL(rt.Manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
+		DockerHTTPSProxy: proxyURL(rt.Manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
+		DockerNoProxy:    defaultNoProxy,
+		ExtraRO:          cfg.Mounts.ExtraRO,
+		ExtraRW:          cfg.Mounts.ExtraRW,
 	})
 	if err != nil {
 		_ = rt.Cleanup(ctx, deps)
@@ -165,6 +174,7 @@ func (runtimeExecutor) Run(req runRequest) error {
 		Config:               cfg,
 		Workdir:              cfg.Sandbox.Workdir,
 		Payload:              req.ShellCommand,
+		ExtraEnv:             sandboxProxyAndDockerEnv(rt.Manifest.GatewayIP, cfg),
 		RootfsPlan:           rootfsPlan,
 		NetworkNamespacePath: filepath.Join("/run/netns", rt.Manifest.Net.NetNS),
 	})
@@ -495,6 +505,41 @@ func startHTTPProxyRunner(ctx context.Context, req boxruntime.ProxyStartRequest)
 		return nil, err
 	}
 	return stopFunc(server.Close), nil
+}
+
+func sandboxProxyAndDockerEnv(gatewayIP string, cfg config.Config) []string {
+	proxy := proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
+	env := []string{
+		"HTTP_PROXY=" + proxy,
+		"HTTPS_PROXY=" + proxy,
+		"NO_PROXY=" + defaultNoProxy,
+	}
+	if !cfg.Docker.Enabled {
+		return env
+	}
+
+	socketPath := strings.TrimSpace(cfg.Docker.SocketPath)
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
+
+	return append(env,
+		envDockerEnabled+"=1",
+		envDockerSocketPath+"="+socketPath,
+		envDockerWait+"="+boolString(cfg.Docker.WaitForSocket),
+		envDockerReady+"="+cfg.Docker.ReadyTimeout.String(),
+	)
+}
+
+func proxyURL(host string, port int) string {
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func boolString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
 }
 
 type stopFunc func() error

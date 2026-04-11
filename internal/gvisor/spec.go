@@ -51,6 +51,7 @@ type BuildSpecRequest struct {
 	Config               config.Config
 	Workdir              string
 	Payload              string
+	ExtraEnv             []string
 	RootfsPlan           rootfs.Plan
 	NetworkNamespacePath string
 }
@@ -91,7 +92,7 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 		Process: ProcessSpec{
 			Args: args,
 			Cwd:  cwd,
-			Env:  ensureDefaultEnv(cfg.Sandbox.Env),
+			Env:  ensureDefaultEnv(cfg.Sandbox.Env, req.ExtraEnv),
 		},
 		Root: RootSpec{
 			Path:     "rootfs",
@@ -115,6 +116,20 @@ func buildMounts(plan rootfs.Plan) []MountSpec {
 			Source:      "sysfs",
 			Options:     []string{"nosuid", "noexec", "nodev", "ro"},
 		},
+		{
+			Destination: "/sys/fs/cgroup",
+			Type:        "cgroup",
+			Source:      "cgroup",
+			Options:     []string{"nosuid", "noexec", "nodev", "ro"},
+		},
+	}
+	for _, dir := range plan.WritableDirs {
+		mounts = append(mounts, MountSpec{
+			Destination: dir,
+			Type:        "tmpfs",
+			Source:      "tmpfs",
+			Options:     tmpfsOptionsForPath(dir),
+		})
 	}
 	for _, bind := range plan.Binds {
 		options := []string{"rbind"}
@@ -133,6 +148,16 @@ func buildMounts(plan rootfs.Plan) []MountSpec {
 	return mounts
 }
 
+func tmpfsOptionsForPath(path string) []string {
+	options := []string{"nosuid", "nodev"}
+	switch path {
+	case "/tmp", "/var/tmp":
+		return append(options, "mode=1777")
+	default:
+		return append(options, "mode=0755")
+	}
+}
+
 func buildNamespaces(networkNamespacePath string) []LinuxNamespace {
 	namespaces := []LinuxNamespace{
 		{Type: "pid"},
@@ -148,14 +173,39 @@ func buildNamespaces(networkNamespacePath string) []LinuxNamespace {
 	return namespaces
 }
 
-func ensureDefaultEnv(env []string) []string {
-	out := append([]string(nil), env...)
+func ensureDefaultEnv(env []string, forced []string) []string {
+	out := mergeEnv(env, forced)
 	for _, entry := range out {
 		if strings.HasPrefix(entry, "PATH=") {
 			return out
 		}
 	}
 	return append(out, defaultPATH)
+}
+
+func mergeEnv(base []string, overrides []string) []string {
+	out := append([]string(nil), base...)
+	indexByKey := make(map[string]int, len(out))
+	for i, entry := range out {
+		indexByKey[envKey(entry)] = i
+	}
+	for _, entry := range overrides {
+		key := envKey(entry)
+		if index, ok := indexByKey[key]; ok {
+			out[index] = entry
+			continue
+		}
+		indexByKey[key] = len(out)
+		out = append(out, entry)
+	}
+	return out
+}
+
+func envKey(entry string) string {
+	if idx := strings.IndexByte(entry, '='); idx >= 0 {
+		return entry[:idx]
+	}
+	return entry
 }
 
 func splitShellWords(input string) ([]string, error) {

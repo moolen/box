@@ -146,6 +146,49 @@ func TestBuildSandboxSpecIncludesBindsAndNetworkNamespace(t *testing.T) {
 	}
 }
 
+func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
+	cfg := config.Config{
+		Sandbox: config.SandboxConfig{
+			Env:          []string{"HTTP_PROXY=http://bypass.invalid:3128", "TERM=xterm"},
+			CommandShell: "/bin/bash -lc",
+		},
+	}
+
+	spec, err := BuildSandboxSpec(BuildSpecRequest{
+		Config:  cfg,
+		Workdir: "/workspace",
+		Payload: "env",
+		ExtraEnv: []string{
+			"HTTP_PROXY=http://100.96.0.1:18080",
+			"HTTPS_PROXY=http://100.96.0.1:18080",
+			"NO_PROXY=127.0.0.1,localhost",
+			"BOX_DOCKER_ENABLED=1",
+			"BOX_DOCKER_SOCKET_PATH=/var/run/docker.sock",
+			"BOX_DOCKER_WAIT_FOR_SOCKET=1",
+			"BOX_DOCKER_READY_TIMEOUT=10s",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildSandboxSpec() error: %v", err)
+	}
+
+	if value := envValue(spec.Process.Env, "HTTP_PROXY"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("HTTP_PROXY = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("HTTPS_PROXY = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
+		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
+	}
+	if value := envValue(spec.Process.Env, "BOX_DOCKER_SOCKET_PATH"); value != "/var/run/docker.sock" {
+		t.Fatalf("BOX_DOCKER_SOCKET_PATH = %q, want configured socket path", value)
+	}
+	if value := envValue(spec.Process.Env, "BOX_DOCKER_READY_TIMEOUT"); value != "10s" {
+		t.Fatalf("BOX_DOCKER_READY_TIMEOUT = %q, want configured timeout", value)
+	}
+}
+
 func TestRunnerInvokesRunscWithExpectedArgs(t *testing.T) {
 	fake := &fakeCommandRunner{}
 	runner := Runner{
@@ -249,4 +292,14 @@ func containsEnv(env []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }
