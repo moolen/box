@@ -1,6 +1,7 @@
 package rootfs
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,16 +16,20 @@ var (
 )
 
 type PlanRequest struct {
-	RootfsMode     string
-	RepoPath       string
-	Workdir        string
-	NetworkMode    string
-	GatewayIP      string
-	SandboxHostn   string
-	DockerEnabled  bool
-	DockerDataRoot string
-	ExtraRO        []string
-	ExtraRW        []string
+	RootfsMode       string
+	RepoPath         string
+	Workdir          string
+	NetworkMode      string
+	GatewayIP        string
+	SandboxHostn     string
+	DockerEnabled    bool
+	DockerDataRoot   string
+	DockerSocketPath string
+	DockerHTTPProxy  string
+	DockerHTTPSProxy string
+	DockerNoProxy    string
+	ExtraRO          []string
+	ExtraRW          []string
 }
 
 type Bind struct {
@@ -125,7 +130,7 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 		nameserver = strings.TrimSpace(req.GatewayIP)
 	}
 
-	return []GeneratedFile{
+	files := []GeneratedFile{
 		{
 			Path:    "/etc/resolv.conf",
 			Content: "nameserver " + nameserver + "\noptions ndots:0\n",
@@ -151,5 +156,48 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 			Content: "root:x:0:\n",
 			Mode:    0o644,
 		},
+	}
+
+	if req.DockerEnabled {
+		files = append(files, dockerDaemonConfigFile(req))
+	}
+
+	return files
+}
+
+func dockerDaemonConfigFile(req PlanRequest) GeneratedFile {
+	socketPath := strings.TrimSpace(req.DockerSocketPath)
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
+
+	config := map[string]any{
+		"bridge":         "none",
+		"features":       map[string]bool{"containerd-snapshotter": false},
+		"hosts":          []string{"unix://" + socketPath},
+		"ip-forward":     false,
+		"ip6tables":      false,
+		"ip-masq":        false,
+		"iptables":       false,
+		"storage-driver": "vfs",
+		"proxies": map[string]string{
+			"http-proxy":  strings.TrimSpace(req.DockerHTTPProxy),
+			"https-proxy": strings.TrimSpace(req.DockerHTTPSProxy),
+			"no-proxy":    strings.TrimSpace(req.DockerNoProxy),
+		},
+	}
+	if dataRoot := strings.TrimSpace(req.DockerDataRoot); dataRoot != "" {
+		config["data-root"] = dataRoot
+	}
+
+	content, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		panic(fmt.Sprintf("marshal docker daemon config: %v", err))
+	}
+	content = append(content, '\n')
+	return GeneratedFile{
+		Path:    "/etc/docker/daemon.json",
+		Content: string(content),
+		Mode:    0o644,
 	}
 }

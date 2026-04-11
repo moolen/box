@@ -33,6 +33,11 @@ const (
 	defaultInitShimPath = "/usr/local/libexec/box-initshim"
 	ipTransparent       = 19
 	ipv6Transparent     = 75
+	envDockerEnabled    = "BOX_DOCKER_ENABLED"
+	envDockerSocketPath = "BOX_DOCKER_SOCKET_PATH"
+	envDockerWait       = "BOX_DOCKER_WAIT_FOR_SOCKET"
+	envDockerReady      = "BOX_DOCKER_READY_TIMEOUT"
+	defaultNoProxy      = "127.0.0.1,localhost"
 )
 
 type ttyState struct {
@@ -205,16 +210,20 @@ func (e runtimeExecutor) Run(req runRequest) error {
 
 	manifest := rt.RuntimeManifest()
 	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
-		RootfsMode:     cfg.Sandbox.Rootfs,
-		RepoPath:       cwd,
-		Workdir:        cfg.Sandbox.Workdir,
-		NetworkMode:    cfg.Network.Mode,
-		GatewayIP:      manifest.GatewayIP,
-		SandboxHostn:   cfg.Sandbox.Hostname,
-		DockerEnabled:  cfg.Docker.Enabled,
-		DockerDataRoot: cfg.Docker.DataRoot,
-		ExtraRO:        cfg.Mounts.ExtraRO,
-		ExtraRW:        cfg.Mounts.ExtraRW,
+		RootfsMode:       cfg.Sandbox.Rootfs,
+		RepoPath:         cwd,
+		Workdir:          cfg.Sandbox.Workdir,
+		NetworkMode:      cfg.Network.Mode,
+		GatewayIP:        manifest.GatewayIP,
+		SandboxHostn:     cfg.Sandbox.Hostname,
+		DockerEnabled:    cfg.Docker.Enabled,
+		DockerDataRoot:   cfg.Docker.DataRoot,
+		DockerSocketPath: cfg.Docker.SocketPath,
+		DockerHTTPProxy:  proxyURL(manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
+		DockerHTTPSProxy: proxyURL(manifest.GatewayIP, cfg.Network.TransparentProxy.HTTPPort),
+		DockerNoProxy:    defaultNoProxy,
+		ExtraRO:          cfg.Mounts.ExtraRO,
+		ExtraRW:          cfg.Mounts.ExtraRW,
 	})
 	if err != nil {
 		_ = rt.Cleanup(ctx, deps)
@@ -236,6 +245,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		Config:               cfg,
 		Workdir:              cfg.Sandbox.Workdir,
 		Payload:              req.ShellCommand,
+		ExtraEnv:             sandboxProxyAndDockerEnv(manifest.GatewayIP, cfg),
 		RootfsPlan:           rootfsPlan,
 		NetworkNamespacePath: filepath.Join("/run/netns", manifest.Net.NetNS),
 	})
@@ -492,6 +502,7 @@ func getSockoptRaw(fd int, level int, opt int, value unsafe.Pointer, size unsafe
 	)
 	return errno
 }
+
 type preflightCommandRunner func(ctx context.Context, name string, args ...string) (string, error)
 
 func monitorPreflight(ctx context.Context, req boxruntime.MonitorPreflightRequest) error {
@@ -766,6 +777,41 @@ func commandShellForTTY(commandShell string, tty ttyState) string {
 		return strings.Join(fields, " ")
 	}
 	return commandShell
+}
+
+func sandboxProxyAndDockerEnv(gatewayIP string, cfg config.Config) []string {
+	proxy := proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
+	env := []string{
+		"HTTP_PROXY=" + proxy,
+		"HTTPS_PROXY=" + proxy,
+		"NO_PROXY=" + defaultNoProxy,
+	}
+	if !cfg.Docker.Enabled {
+		return env
+	}
+
+	socketPath := strings.TrimSpace(cfg.Docker.SocketPath)
+	if socketPath == "" {
+		socketPath = "/var/run/docker.sock"
+	}
+
+	return append(env,
+		envDockerEnabled+"=1",
+		envDockerSocketPath+"="+socketPath,
+		envDockerWait+"="+boolString(cfg.Docker.WaitForSocket),
+		envDockerReady+"="+cfg.Docker.ReadyTimeout.String(),
+	)
+}
+
+func proxyURL(host string, port int) string {
+	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func boolString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
 }
 
 type stopFunc func() error

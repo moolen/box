@@ -101,9 +101,106 @@ func TestHTTPProxyForwardsAndEmitsEvent(t *testing.T) {
 	}
 
 	<-acceptDone
+	if !bytes.HasPrefix(upstreamReq, []byte("GET /hello?q=1 HTTP/1.1\r\n")) {
+		t.Fatalf("forwarded request line = %q, want origin-form path", string(bytes.SplitN(upstreamReq, []byte("\r\n"), 2)[0]))
+	}
 	if !bytes.Contains(upstreamReq, []byte("Host: example.com")) {
 		t.Fatalf("forwarded request = %q, want Host header", string(upstreamReq))
 	}
+}
+
+func TestHTTPProxySupportsCONNECTTunneling(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return
+		}
+		if string(buf) != "ping" {
+			t.Errorf("upstream payload = %q, want %q", string(buf), "ping")
+			return
+		}
+		_, _ = conn.Write([]byte("pong"))
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := make(chan Event, 1)
+	srv, err := StartHTTP(ctx, ProxyConfig{
+		ListenAddr: "127.0.0.1:0",
+		OnEvent: func(ev Event) {
+			events <- ev
+		},
+		ResolveUpstream: func(net.Conn) (string, error) {
+			return upstream.Addr().String(), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartHTTP() error = %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	client, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	connectReq := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+	if _, err := client.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp := make([]byte, 128)
+	n, err := client.Read(resp)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !bytes.Contains(resp[:n], []byte("200 Connection Established")) {
+		t.Fatalf("CONNECT response = %q, want 200 Connection Established", string(resp[:n]))
+	}
+
+	if _, err := client.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write(tunnel) error = %v", err)
+	}
+
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(client, buf); err != nil {
+		t.Fatalf("ReadFull(tunnel) error = %v", err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("tunnel response = %q, want %q", string(buf), "pong")
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Protocol != "http" {
+			t.Fatalf("Event.Protocol = %q, want %q", ev.Protocol, "http")
+		}
+		if ev.Host != "example.com:443" {
+			t.Fatalf("Event.Host = %q, want %q", ev.Host, "example.com:443")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for CONNECT event")
+	}
+
+	<-upstreamDone
 }
 
 func TestTLSPeekExtractsSNIAndForwardsClientHello(t *testing.T) {

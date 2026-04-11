@@ -25,6 +25,12 @@ func TestBoxRunsEnv(t *testing.T) {
 	if !strings.Contains(output, "PATH=") {
 		t.Fatalf("env output = %q, want PATH entry", output)
 	}
+	if !strings.Contains(output, "HTTP_PROXY=http://100.96.0.1:18080") {
+		t.Fatalf("env output = %q, want HTTP_PROXY host intercept env", output)
+	}
+	if !strings.Contains(output, "HTTPS_PROXY=http://100.96.0.1:18080") {
+		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
+	}
 }
 
 func TestBoxResolvesExampleDotComWithGetent(t *testing.T) {
@@ -78,6 +84,26 @@ func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	}
 	if stdout == string(hostIPOutput) {
 		t.Fatalf("sandbox ip output matched host network view exactly; stdout=%q", stdout)
+	}
+}
+
+func TestBoxStartsSandboxDockerDaemon(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "docker", "dockerd")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteDockerEnabledConfig(t, binary.ModuleRoot)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "docker", "version", "--format", "{{.Server.Version}}")
+	if err != nil {
+		t.Fatalf("run box docker version error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if strings.TrimSpace(stdout) == "" {
+		t.Fatalf("docker version output is empty; stderr=%q", stderr)
 	}
 }
 

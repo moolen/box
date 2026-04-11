@@ -24,8 +24,8 @@ type Event struct {
 	Method   string
 	Path     string
 
-	Host     string
-	SNI      string
+	Host string
+	SNI  string
 }
 
 type ProxyConfig struct {
@@ -60,23 +60,38 @@ func StartHTTP(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			return
 		}
 
-		hostname, method, path := parseHTTPMetadata(head)
-		if s.onEvent != nil {
-			s.onEvent(Event{
-				Protocol: "http",
-				Hostname: hostname,
-				Method:   method,
-				Path:     path,
-				Host:     hostname,
-			})
-		}
-
-		upstreamAddr, err := s.resolveUpstreamAddr(client, hostname, "80")
+		req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
 		if err != nil {
 			return
 		}
 
-		s.forward(client, io.MultiReader(bytes.NewReader(head), reader), upstreamAddr)
+		host := httpRequestHost(req)
+
+		if s.onEvent != nil {
+			s.onEvent(Event{
+				Protocol: "http",
+				Hostname: host,
+				Method:   req.Method,
+				Path:     httpRequestPath(req),
+				Host:     host,
+			})
+		}
+
+		upstreamAddr, err := s.resolveUpstreamAddr(client, host, defaultHTTPPort(req))
+		if err != nil {
+			return
+		}
+
+		if strings.EqualFold(req.Method, http.MethodConnect) {
+			s.tunnelHTTPConnect(client, reader, upstreamAddr)
+			return
+		}
+
+		rewrittenHead, err := rewriteHTTPRequestHead(req)
+		if err != nil {
+			return
+		}
+		s.forward(client, io.MultiReader(bytes.NewReader(rewrittenHead), reader), upstreamAddr)
 	})
 }
 
@@ -214,6 +229,28 @@ func (s *Server) forward(client net.Conn, clientReader io.Reader, upstreamAddr s
 	<-copyDone
 }
 
+func (s *Server) tunnelHTTPConnect(client net.Conn, clientReader io.Reader, upstreamAddr string) {
+	upstream, err := s.dialContext(s.dialCtx, "tcp", upstreamAddr)
+	if err != nil {
+		return
+	}
+	s.trackConn(upstream)
+	defer s.untrackAndClose(upstream)
+
+	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+
+	copyDone := make(chan struct{}, 2)
+	go copyHalf(upstream, clientReader, copyDone)
+	go copyHalf(client, upstream, copyDone)
+
+	<-copyDone
+	_ = client.Close()
+	_ = upstream.Close()
+	<-copyDone
+}
+
 func (s *Server) resolveUpstreamAddr(client net.Conn, fallbackHost, defaultPort string) (string, error) {
 	if s.resolveUpstream != nil {
 		return s.resolveUpstream(client)
@@ -275,10 +312,55 @@ func readHTTPHead(r *bufio.Reader) ([]byte, error) {
 	return nil, errors.New("http header too large")
 }
 
-func parseHTTPMetadata(head []byte) (hostname, method, path string) {
-	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
-	if err != nil {
-		return "", "", ""
+func httpRequestHost(req *http.Request) string {
+	if req == nil {
+		return ""
 	}
-	return req.Host, req.Method, req.URL.Path
+	if strings.TrimSpace(req.Host) != "" {
+		return req.Host
+	}
+	if req.URL != nil {
+		return req.URL.Host
+	}
+	return ""
+}
+
+func httpRequestPath(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	if req.URL.Path != "" {
+		return req.URL.Path
+	}
+	return req.URL.Opaque
+}
+
+func defaultHTTPPort(req *http.Request) string {
+	if req != nil && strings.EqualFold(req.Method, http.MethodConnect) {
+		return "443"
+	}
+	return "80"
+}
+
+func rewriteHTTPRequestHead(req *http.Request) ([]byte, error) {
+	if req == nil {
+		return nil, errors.New("http request is required")
+	}
+
+	clone := new(http.Request)
+	*clone = *req
+	if req.URL != nil {
+		urlCopy := *req.URL
+		urlCopy.Scheme = ""
+		urlCopy.Host = ""
+		clone.URL = &urlCopy
+	}
+	clone.RequestURI = ""
+	clone.Close = false
+
+	var buf bytes.Buffer
+	if err := clone.Write(&buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
