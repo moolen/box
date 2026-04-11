@@ -38,12 +38,15 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector.AddDNS("Example.COM.")
 	collector.AddDNS("example.com")
 	collector.AddDNS("")
+	collector.AddDNS("bad host")
 	collector.AddTLS("api.Example.com.")
 	collector.AddTLS("   ")
+	collector.AddTLS("https://api.example.com")
 	collector.AddHTTP("GET", "example.com")
 	collector.AddHTTP("get", "example.com.")
 	collector.AddHTTP("", "example.com")
 	collector.AddHTTP("POST", "")
+	collector.AddHTTP("PUT", "bad/host")
 
 	snapshot := collector.Snapshot()
 
@@ -53,8 +56,8 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	if got := snapshot.DNS["example.com"]; got.Verdict != VerdictAllow {
 		t.Fatalf("DNS[example.com].Verdict = %q, want %q", got.Verdict, VerdictAllow)
 	}
-	if got := snapshot.DNS[UnknownHostname]; got.Count != 1 {
-		t.Fatalf("DNS[%q].Count = %d, want 1", UnknownHostname, got.Count)
+	if got := snapshot.DNS[UnknownHostname]; got.Count != 2 {
+		t.Fatalf("DNS[%q].Count = %d, want 2", UnknownHostname, got.Count)
 	}
 	if got := snapshot.DNS[UnknownHostname]; got.Verdict != VerdictDeny {
 		t.Fatalf("DNS[%q].Verdict = %q, want %q", UnknownHostname, got.Verdict, VerdictDeny)
@@ -66,8 +69,8 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	if got := snapshot.TLS["api.example.com"]; got.Verdict != VerdictAllow {
 		t.Fatalf("TLS[api.example.com].Verdict = %q, want %q", got.Verdict, VerdictAllow)
 	}
-	if got := snapshot.TLS[UnknownHostname]; got.Count != 1 {
-		t.Fatalf("TLS[%q].Count = %d, want 1", UnknownHostname, got.Count)
+	if got := snapshot.TLS[UnknownHostname]; got.Count != 2 {
+		t.Fatalf("TLS[%q].Count = %d, want 2", UnknownHostname, got.Count)
 	}
 	if got := snapshot.TLS[UnknownHostname]; got.Verdict != VerdictDeny {
 		t.Fatalf("TLS[%q].Verdict = %q, want %q", UnknownHostname, got.Verdict, VerdictDeny)
@@ -90,6 +93,12 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	}
 	if got := snapshot.HTTP[HTTPKey{Method: "POST", Hostname: UnknownHostname}]; got.Verdict != VerdictDeny {
 		t.Fatalf("HTTP[POST %q].Verdict = %q, want %q", UnknownHostname, got.Verdict, VerdictDeny)
+	}
+	if got := snapshot.HTTP[HTTPKey{Method: "PUT", Hostname: UnknownHostname}]; got.Count != 1 {
+		t.Fatalf("HTTP[PUT %q].Count = %d, want 1", UnknownHostname, got.Count)
+	}
+	if got := snapshot.HTTP[HTTPKey{Method: "PUT", Hostname: UnknownHostname}]; got.Verdict != VerdictDeny {
+		t.Fatalf("HTTP[PUT %q].Verdict = %q, want %q", UnknownHostname, got.Verdict, VerdictDeny)
 	}
 }
 
