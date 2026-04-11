@@ -2,6 +2,7 @@ package gvisor
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"unicode"
 
@@ -60,6 +61,7 @@ type BuildSpecRequest struct {
 	Config               config.Config
 	Workdir              string
 	Payload              string
+	HostEnv              []string
 	ExtraEnv             []string
 	RootfsPlan           rootfs.Plan
 	NetworkNamespacePath string
@@ -70,6 +72,7 @@ func BuildSpec(cfg config.Config, workdir, payload string) (Spec, error) {
 		Config:  cfg,
 		Workdir: workdir,
 		Payload: payload,
+		HostEnv: os.Environ(),
 	})
 }
 
@@ -101,7 +104,7 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 		Process: ProcessSpec{
 			Args:         args,
 			Cwd:          cwd,
-			Env:          ensureDefaultEnv(cfg.Sandbox.Env, req.ExtraEnv),
+			Env:          ensureDefaultEnv(baseProcessEnv(cfg, req.HostEnv), cfg.Sandbox.Env, req.ExtraEnv),
 			Capabilities: dockerSandboxCapabilities(cfg),
 		},
 		Root: RootSpec{
@@ -114,6 +117,13 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 			Namespaces: buildNamespaces(req.NetworkNamespacePath),
 		},
 	}, nil
+}
+
+func baseProcessEnv(cfg config.Config, hostEnv []string) []string {
+	if !cfg.Sandbox.InheritEnv {
+		return nil
+	}
+	return append([]string(nil), hostEnv...)
 }
 
 func dockerSandboxCapabilities(cfg config.Config) *LinuxCapabilitiesSpec {
@@ -218,8 +228,9 @@ func buildNamespaces(networkNamespacePath string) []LinuxNamespace {
 	return namespaces
 }
 
-func ensureDefaultEnv(env []string, forced []string) []string {
-	out := mergeEnv(env, forced)
+func ensureDefaultEnv(base []string, env []string, forced []string) []string {
+	out := mergeEnv(base, env)
+	out = mergeEnv(out, forced)
 	for _, entry := range out {
 		if strings.HasPrefix(entry, "PATH=") {
 			return out

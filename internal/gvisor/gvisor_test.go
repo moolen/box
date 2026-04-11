@@ -189,6 +189,47 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 	}
 }
 
+func TestBuildSandboxSpecInheritsHostEnvWhenEnabled(t *testing.T) {
+	cfg := config.Config{
+		Sandbox: config.SandboxConfig{
+			InheritEnv:   true,
+			Env:          []string{"A=config", "HTTP_PROXY=http://config.invalid:8080"},
+			CommandShell: "/bin/bash -lc",
+		},
+	}
+
+	spec, err := BuildSandboxSpec(BuildSpecRequest{
+		Config:  cfg,
+		Workdir: "/workspace",
+		Payload: "env",
+		HostEnv: []string{
+			"A=host",
+			"B=host-only",
+			"HTTP_PROXY=http://host.invalid:3128",
+		},
+		ExtraEnv: []string{
+			"HTTP_PROXY=http://forced.invalid:18080",
+			"NO_PROXY=127.0.0.1,localhost",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildSandboxSpec() error: %v", err)
+	}
+
+	if value := envValue(spec.Process.Env, "A"); value != "config" {
+		t.Fatalf("A = %q, want config override", value)
+	}
+	if value := envValue(spec.Process.Env, "B"); value != "host-only" {
+		t.Fatalf("B = %q, want inherited host env", value)
+	}
+	if value := envValue(spec.Process.Env, "HTTP_PROXY"); value != "http://forced.invalid:18080" {
+		t.Fatalf("HTTP_PROXY = %q, want forced override", value)
+	}
+	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
+		t.Fatalf("NO_PROXY = %q, want forced env present", value)
+	}
+}
+
 func TestRunnerInvokesRunscWithExpectedArgs(t *testing.T) {
 	fake := &fakeCommandRunner{}
 	runner := Runner{

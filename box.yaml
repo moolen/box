@@ -16,6 +16,10 @@ sandbox:
   # Relative paths are resolved against the invocation directory.
   workdir: .
 
+  # When true, start from the host process environment.
+  # Entries in `env` still override inherited values.
+  inherit_env: false
+
   # Extra environment variables injected into the sandbox process.
   env:
     - "PS1=box# "

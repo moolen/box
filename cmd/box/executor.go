@@ -165,6 +165,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		Config:               cfg,
 		Workdir:              cfg.Sandbox.Workdir,
 		Payload:              req.ShellCommand,
+		HostEnv:              os.Environ(),
 		ExtraEnv:             sandboxProxyAndDockerEnv(manifest.GatewayIP, cfg),
 		RootfsPlan:           rootfsPlan,
 		NetworkNamespacePath: filepath.Join("/run/netns", manifest.Net.NetNS),

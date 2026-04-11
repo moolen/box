@@ -16,6 +16,7 @@ type SandboxConfig struct {
 	RootfsSource string   `yaml:"rootfs_source"`
 	Hostname     string   `yaml:"hostname"`
 	Workdir      string   `yaml:"workdir"`
+	InheritEnv   bool     `yaml:"inherit_env"`
 	Env          []string `yaml:"env"`
 	CommandShell string   `yaml:"command_shell"`
 }

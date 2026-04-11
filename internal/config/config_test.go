@@ -24,6 +24,9 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Sandbox.Hostname != "box" {
 		t.Fatalf("sandbox.hostname = %q, want %q", got.Sandbox.Hostname, "box")
 	}
+	if got.Sandbox.InheritEnv {
+		t.Fatalf("sandbox.inherit_env = %t, want false by default", got.Sandbox.InheritEnv)
+	}
 	if got.Network.Subnet != "100.96.0.0/30" {
 		t.Fatalf("subnet = %q, want %q", got.Network.Subnet, "100.96.0.0/30")
 	}
