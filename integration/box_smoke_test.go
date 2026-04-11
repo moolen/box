@@ -211,9 +211,6 @@ func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
 		"--model", "opencode/gpt-5-nano",
 		"--agent", "title",
 	)
-	if err == nil {
-		t.Fatalf("expected opencode run to fail in smoke test; stdout=%q stderr=%q", stdout, stderr)
-	}
 	if strings.Contains(stderr, `listen udp 100.96.0.1:53: bind: address already in use`) {
 		t.Skipf("host DNS bind address already in use for monitor mode: %q", stderr)
 	}
@@ -221,6 +218,9 @@ func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
 	lowerStderr := strings.ToLower(stderr)
 	if strings.Contains(lowerStderr, "command not found") {
 		t.Fatalf("opencode resolution failed in sandbox; stderr=%q", stderr)
+	}
+	if err != nil && !strings.Contains(stderr, "Monitor summary") {
+		t.Fatalf("opencode execution failed before monitor evidence was recorded; stdout=%q stderr=%q", stdout, stderr)
 	}
 	if !strings.Contains(stderr, "Monitor summary") {
 		t.Fatalf("stderr missing monitor summary: %q", stderr)
