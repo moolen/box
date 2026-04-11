@@ -64,15 +64,14 @@ jobs:
             sha256sum box_linux_amd64.tar.gz box_linux_arm64.tar.gz > SHA256SUMS
           )
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Publish or update GitHub release
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          generate_release_notes: true
-          append_body: false
-          files: |
-            dist/box_linux_amd64.tar.gz
-            dist/box_linux_arm64.tar.gz
-            dist/SHA256SUMS
+          commit: ${{ github.sha }}
+          generateReleaseNotes: true
+          allowUpdates: true
+          updateOnlyUnreleased: false
+          replacesArtifacts: true
+          artifacts: dist/box_linux_amd64.tar.gz,dist/box_linux_arm64.tar.gz,dist/SHA256SUMS

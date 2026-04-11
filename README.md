@@ -52,11 +52,13 @@ Integration tests cover:
 GitHub Actions automation is wired for the `main` branch:
 
 - CI runs on pull requests targeting `main` and on pushes to `main`
-- CI installs Linux integration-test host tooling (`runsc`, `docker`, `dockerd`, `skopeo`,
-  and related packages) before running `go test ./... -count=1` and `make build`
+- CI installs missing Linux integration-test host tooling as needed, reusing preinstalled
+  Docker/daemon when available, and installs a pinned `runsc` release with checksum verification
+  before running `go test ./... -count=1` and `make build`
 - release automation runs on pushes to `main` and creates one deterministic commit-based tag
   per commit in the format `v0.0.0-<commit-timestamp>-<short-sha>`
-- rerunning the release workflow reuses the existing tag for that commit instead of failing
+- rerunning the release workflow reuses the existing tag and updates the existing GitHub Release
+  for that commit instead of failing
 
 Published release assets are:
 
