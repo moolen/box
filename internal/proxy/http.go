@@ -20,6 +20,10 @@ const maxHTTPHeaderBytes = 64 * 1024
 
 type Event struct {
 	Protocol string
+	Hostname string
+	Method   string
+	Path     string
+
 	Host     string
 	SNI      string
 }
@@ -56,10 +60,14 @@ func StartHTTP(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			return
 		}
 
+		hostname, method, path := parseHTTPMetadata(head)
 		if s.onEvent != nil {
 			s.onEvent(Event{
 				Protocol: "http",
-				Host:     parseHTTPHost(head),
+				Hostname: hostname,
+				Method:   method,
+				Path:     path,
+				Host:     hostname,
 			})
 		}
 
@@ -256,10 +264,10 @@ func readHTTPHead(r *bufio.Reader) ([]byte, error) {
 	return nil, errors.New("http header too large")
 }
 
-func parseHTTPHost(head []byte) string {
+func parseHTTPMetadata(head []byte) (hostname, method, path string) {
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(head)))
 	if err != nil {
-		return ""
+		return "", "", ""
 	}
-	return req.Host
+	return req.Host, req.Method, req.RequestURI
 }
