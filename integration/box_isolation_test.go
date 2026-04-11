@@ -14,14 +14,17 @@ import (
 )
 
 func TestBoxCannotWriteReadOnlyUsr(t *testing.T) {
+	const sentinel = "/usr/.box-write-test"
+
 	_, stderr, err := runBox(t, true, "--", "bash", "-lc", "printf x >/usr/.box-write-test")
 	if err == nil {
+		_ = os.Remove(sentinel)
 		t.Fatalf("expected write to /usr to fail; stderr=%q", stderr)
 	}
 }
 
 func TestBoxCanWriteTmp(t *testing.T) {
-	stdout, stderr, err := runBox(t, true, "--", "bash", "-lc", "p=$(mktemp /tmp/box.XXXXXX) && printf isolated >\"$p\" && cat \"$p\"")
+	stdout, stderr, err := runBox(t, true, "--", "bash", "-lc", "p=$(mktemp /tmp/box.XXXXXX) && printf isolated >\"$p\" && cat \"$p\" && rm -f \"$p\"")
 	if err != nil {
 		t.Fatalf("tmp write failed: %v stderr=%q", err, stderr)
 	}
