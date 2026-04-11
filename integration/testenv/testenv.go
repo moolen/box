@@ -225,6 +225,11 @@ func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string
   env:
     - TERM=xterm
     - PATH=%s
+    - HOME=/tmp/opencode-home
+    - XDG_CONFIG_HOME=/tmp/opencode-config
+    - XDG_DATA_HOME=/tmp/opencode-data
+    - XDG_CACHE_HOME=/tmp/opencode-cache
+    - NODE_EXTRA_CA_CERTS=
   command_shell: /bin/bash -lc
 network:
   mode: monitor

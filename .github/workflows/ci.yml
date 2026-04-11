@@ -91,9 +91,14 @@ jobs:
           set -euxo pipefail
           OPENCODE_PREFIX="${RUNNER_TEMP}/opencode-prefix"
           npm install --global --prefix "${OPENCODE_PREFIX}" opencode-ai@1.4.3
+          OPENCODE_REAL_BIN="$(find "${OPENCODE_PREFIX}/lib/node_modules/opencode-ai/node_modules" -path '*/bin/opencode' -type f | head -n1)"
+          test -n "${OPENCODE_REAL_BIN}"
+          cp "${OPENCODE_REAL_BIN}" "${OPENCODE_PREFIX}/bin/opencode"
+          chmod +x "${OPENCODE_PREFIX}/bin/opencode"
           echo "${OPENCODE_PREFIX}/bin" >> "${GITHUB_PATH}"
           OPENCODE_BIN="${OPENCODE_PREFIX}/bin/opencode"
           echo "OpenCode bin: ${OPENCODE_BIN}"
+          file "${OPENCODE_BIN}"
           "${OPENCODE_BIN}" --version
 
       - name: Verify OpenCode on PATH

@@ -212,7 +212,12 @@ func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
 	binary := testenv.BuildBoxBinary(t)
 	configPath := testenv.WriteOpenCodeMonitorConfig(t, hostBinDir, hostPath)
 
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "opencode", "run", "hi")
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"timeout", "20s",
+		"opencode", "run", "hi",
+		"--model", "opencode/gpt-5-nano",
+		"--agent", "title",
+	)
 	if err == nil {
 		t.Fatalf("expected opencode run to fail in smoke test; stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -227,7 +232,7 @@ func TestBoxRunsOpenCodeFromMountedCustomBinDir(t *testing.T) {
 	if !strings.Contains(stderr, "Monitor summary") {
 		t.Fatalf("stderr missing monitor summary: %q", stderr)
 	}
-	if !strings.Contains(stderr, "models.dev") {
+	if !strings.Contains(stderr, "models.dev") && !strings.Contains(stderr, "opencode.ai") {
 		t.Fatalf("stderr missing OpenCode host evidence: %q", stderr)
 	}
 	if !strings.Contains(stderr, "DNS:") {

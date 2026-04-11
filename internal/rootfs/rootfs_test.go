@@ -228,6 +228,40 @@ func TestResolveInitShimCopiesSiblingBinaryIntoBundle(t *testing.T) {
 	}
 }
 
+func TestApplyCreatesBindTargetDirectoriesInBundle(t *testing.T) {
+	temp := t.TempDir()
+	shim := filepath.Join(temp, "box-initshim")
+	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
+		t.Fatalf("WriteFile(shim): %v", err)
+	}
+
+	bundleDir := filepath.Join(temp, "bundle")
+	_, err := Apply(ApplyRequest{
+		BundleDir:    bundleDir,
+		InitShimPath: shim,
+		Plan: Plan{
+			Binds: []Bind{
+				{Source: "/opt/tools/bin", Target: "/tmp/opencode-prefix/bin", ReadOnly: true},
+				{Source: "/repo", Target: "/workspace", ReadOnly: false},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply() error: %v", err)
+	}
+
+	for _, target := range []string{"/tmp/opencode-prefix/bin", "/workspace"} {
+		staged := filepath.Join(bundleDir, "rootfs", strings.TrimPrefix(filepath.Clean(target), "/"))
+		info, err := os.Stat(staged)
+		if err != nil {
+			t.Fatalf("Stat(%q): %v", staged, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("staged bind target %q is not a directory", staged)
+		}
+	}
+}
+
 func TestBuildPlanRejectsUnknownRootfsMode(t *testing.T) {
 	_, err := BuildPlan(PlanRequest{
 		RootfsMode: "mystery",

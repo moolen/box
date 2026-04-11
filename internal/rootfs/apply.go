@@ -49,6 +49,11 @@ func Apply(req ApplyRequest) (ApplyResult, error) {
 			return ApplyResult{}, err
 		}
 	}
+	for _, bind := range req.Plan.Binds {
+		if err := writeBindTargetDir(rootfsDir, bind.Target); err != nil {
+			return ApplyResult{}, err
+		}
+	}
 
 	shimSource := resolveInitShimPath(req.InitShimPath, req.ExecutablePath)
 	bundleShimPath := filepath.Join(rootfsDir, "box-initshim")
@@ -107,6 +112,19 @@ func writeWritableDir(rootfsDir, dir string) error {
 	path := filepath.Join(rootfsDir, rel)
 	if !pathWithinRootfs(rootfsDir, path) {
 		return fmt.Errorf("writable dir path %q escapes rootfs", dir)
+	}
+	return os.MkdirAll(path, 0o755)
+}
+
+func writeBindTargetDir(rootfsDir, target string) error {
+	clean := filepath.Clean(target)
+	rel := strings.TrimPrefix(clean, "/")
+	if rel == "." || rel == "" {
+		return fmt.Errorf("invalid bind target path %q", target)
+	}
+	path := filepath.Join(rootfsDir, rel)
+	if !pathWithinRootfs(rootfsDir, path) {
+		return fmt.Errorf("bind target path %q escapes rootfs", target)
 	}
 	return os.MkdirAll(path, 0o755)
 }
