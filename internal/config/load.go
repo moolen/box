@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -31,7 +32,9 @@ func Load(path, cwd string) (Config, error) {
 		return Config{}, fmt.Errorf("read config %q: %w", configPath, err)
 	}
 
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config %q: %w", configPath, err)
 	}
 

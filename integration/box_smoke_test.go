@@ -2,6 +2,9 @@ package integration
 
 import (
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -119,26 +122,28 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	testenv.RequireCommands(t, "docker", "dockerd", "skopeo")
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteEnforceConfig(t, []string{"example.com"}, nil)
+	fixtureURL, allowedCIDR := startAllowedEgressHTTPFixture(t)
+	configPath := testenv.WriteEnforceConfig(t, nil, []string{allowedCIDR})
 
 	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-build.")
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
 	alpineArchivePath := filepath.Join(contextDir, "alpine.tar")
 	debianArchivePath := filepath.Join(contextDir, "debian.tar")
-	dockerfile := strings.TrimSpace(`
+	dockerfile := strings.TrimSpace(fmt.Sprintf(`
 FROM alpine:3.20 AS alpine-stage
-RUN wget -qO /build-artifact.txt http://example.com && grep -q 'Example Domain' /build-artifact.txt
+RUN wget -qO /build-artifact.txt %s && \
+    grep -q 'Example Domain' /build-artifact.txt
 
 FROM debian:bookworm-slim AS debian-stage
 WORKDIR /tmp/app
-RUN printf '%s\n' '{"name":"box-enforce-test"}' >/tmp/app/package.json
+RUN printf '%%s\n' '{"name":"box-enforce-test"}' >/tmp/app/package.json
 
 FROM debian:bookworm-slim
 COPY --from=alpine-stage /build-artifact.txt /build-artifact.txt
 COPY --from=debian-stage /tmp/app/package.json /package.json
 RUN test -s /build-artifact.txt && test -s /package.json
 CMD ["cat", "/build-artifact.txt"]
-`) + "\n"
+`, shellSingleQuote(fixtureURL))) + "\n"
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
 	}
@@ -293,6 +298,53 @@ func relPath(t *testing.T, base string, target string) string {
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func startAllowedEgressHTTPFixture(t *testing.T) (string, string) {
+	t.Helper()
+
+	hostIP := discoverHostIPv4(t)
+	listener, err := net.Listen("tcp4", net.JoinHostPort(hostIP, "0"))
+	if err != nil {
+		t.Fatalf("Listen(%q) error = %v", hostIP, err)
+	}
+
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := io.WriteString(w, "Example Domain\n"); err != nil {
+				t.Logf("fixture response write error: %v", err)
+			}
+		}),
+	}
+
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			t.Logf("fixture server error: %v", err)
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+
+	addr := listener.Addr().String()
+	return "http://" + addr + "/", hostIP + "/32"
+}
+
+func discoverHostIPv4(t *testing.T) string {
+	t.Helper()
+
+	conn, err := net.Dial("udp4", "1.1.1.1:53")
+	if err != nil {
+		t.Fatalf("Dial udp4 for host IP discovery error = %v", err)
+	}
+	defer conn.Close()
+
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil {
+		t.Fatalf("unexpected local address for host IP discovery: %T %v", conn.LocalAddr(), conn.LocalAddr())
+	}
+	return addr.IP.String()
 }
 
 func copyDockerArchive(t *testing.T, sourceRef string, archivePath string, imageRef string) {

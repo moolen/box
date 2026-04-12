@@ -44,10 +44,7 @@ type TransparentProxyConfig struct {
 type PolicyConfig struct {
 	AllowDomains      []string `yaml:"allow_domains"`
 	DenyDomains       []string `yaml:"deny_domains"`
-	AllowCIDRs        []string `yaml:"allow_cidrs"`
-	DenyCIDRs         []string `yaml:"deny_cidrs"`
 	ExtraAllowedCIDRs []string `yaml:"extra_allowed_cidrs"`
-	LogAllConnects    bool     `yaml:"log_all_connects"`
 }
 
 type MountsConfig struct {

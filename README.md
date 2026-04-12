@@ -31,9 +31,9 @@ box run -- <command...>
 
 In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end of the run.
 
-`box.yaml` now supports two network modes:
+`box.yaml` supports two network modes:
 
-- `monitor` for observation plus summary output
+- `monitor` for observation plus summary output; it does not restrict general egress
 - `enforce` for DNS-gated egress, dynamic IP allowlisting from allowed DNS answers, and
   `policy.extra_allowed_cidrs` bootstrap exceptions
 

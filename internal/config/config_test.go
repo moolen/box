@@ -92,6 +92,30 @@ network:
 	}
 }
 
+func TestLoadRejectsUnknownPolicyKeys(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+policy:
+  allow_cidrs: []
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for unknown policy key")
+	}
+	if !strings.Contains(err.Error(), "allow_cidrs") {
+		t.Fatalf("Load() error = %q, want mention of unknown key allow_cidrs", err)
+	}
+}
+
 func TestLoadHonorsExplicitDisabledWorkdirOverlay(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `

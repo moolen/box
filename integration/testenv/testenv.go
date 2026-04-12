@@ -137,11 +137,8 @@ policy:
   allow_domains:
 %s
   deny_domains: []
-  allow_cidrs: []
-  deny_cidrs: []
   extra_allowed_cidrs:
 %s
-  log_all_connects: false
 mounts:
   extra_ro: []
   extra_rw: []
@@ -247,10 +244,7 @@ network:
 policy:
   allow_domains: []
   deny_domains: []
-  allow_cidrs: []
-  deny_cidrs: []
   extra_allowed_cidrs: []
-  log_all_connects: true
 mounts:
   extra_ro:
     - %s
