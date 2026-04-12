@@ -149,6 +149,45 @@ policy:
 	if len(got.Policy.Egress) != 2 {
 		t.Fatalf("policy.egress len = %d, want 2", len(got.Policy.Egress))
 	}
+	if got.Policy.Egress[0].Hostname != "example.com" {
+		t.Fatalf("policy.egress[0].hostname = %q, want %q", got.Policy.Egress[0].Hostname, "example.com")
+	}
+	if got.Policy.Egress[0].CIDR != "" {
+		t.Fatalf("policy.egress[0].cidr = %q, want empty", got.Policy.Egress[0].CIDR)
+	}
+	if len(got.Policy.Egress[0].Transport) != 1 {
+		t.Fatalf("policy.egress[0].transport len = %d, want 1", len(got.Policy.Egress[0].Transport))
+	}
+	if got.Policy.Egress[0].Transport[0].Protocol != "tcp" {
+		t.Fatalf("policy.egress[0].transport[0].protocol = %q, want %q", got.Policy.Egress[0].Transport[0].Protocol, "tcp")
+	}
+	if len(got.Policy.Egress[0].Transport[0].Ports) != 1 || got.Policy.Egress[0].Transport[0].Ports[0] != 443 {
+		t.Fatalf("policy.egress[0].transport[0].ports = %v, want [443]", got.Policy.Egress[0].Transport[0].Ports)
+	}
+	if len(got.Policy.Egress[0].ICMP) != 1 {
+		t.Fatalf("policy.egress[0].icmp len = %d, want 1", len(got.Policy.Egress[0].ICMP))
+	}
+	if got.Policy.Egress[0].ICMP[0].Type != 8 || got.Policy.Egress[0].ICMP[0].Code != 0 {
+		t.Fatalf("policy.egress[0].icmp[0] = (%d,%d), want (8,0)", got.Policy.Egress[0].ICMP[0].Type, got.Policy.Egress[0].ICMP[0].Code)
+	}
+	if got.Policy.Egress[1].CIDR != "93.184.216.0/24" {
+		t.Fatalf("policy.egress[1].cidr = %q, want %q", got.Policy.Egress[1].CIDR, "93.184.216.0/24")
+	}
+	if got.Policy.Egress[1].Hostname != "" {
+		t.Fatalf("policy.egress[1].hostname = %q, want empty", got.Policy.Egress[1].Hostname)
+	}
+	if len(got.Policy.Egress[1].Transport) != 1 {
+		t.Fatalf("policy.egress[1].transport len = %d, want 1", len(got.Policy.Egress[1].Transport))
+	}
+	if got.Policy.Egress[1].Transport[0].Protocol != "udp" {
+		t.Fatalf("policy.egress[1].transport[0].protocol = %q, want %q", got.Policy.Egress[1].Transport[0].Protocol, "udp")
+	}
+	if len(got.Policy.Egress[1].Transport[0].Ports) != 1 || got.Policy.Egress[1].Transport[0].Ports[0] != 443 {
+		t.Fatalf("policy.egress[1].transport[0].ports = %v, want [443]", got.Policy.Egress[1].Transport[0].Ports)
+	}
+	if len(got.Policy.Egress[1].ICMP) != 0 {
+		t.Fatalf("policy.egress[1].icmp len = %d, want 0", len(got.Policy.Egress[1].ICMP))
+	}
 }
 
 func TestValidateRejectsEgressRuleWithHostnameAndCIDR(t *testing.T) {
@@ -167,31 +206,48 @@ func TestValidateRejectsEgressRuleWithHostnameAndCIDR(t *testing.T) {
 	if err == nil {
 		t.Fatal("ValidateRuntime() error = nil, want selector rejection")
 	}
+	if !strings.Contains(strings.ToLower(err.Error()), "hostname") || !strings.Contains(strings.ToLower(err.Error()), "cidr") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of hostname/cidr exclusivity", err)
+	}
 }
 
-func TestValidateRejectsEgressRuleWithInvalidProtocolAndICMPData(t *testing.T) {
+func TestValidateRejectsEgressRuleWithInvalidProtocol(t *testing.T) {
 	cfg := Config{}
 	cfg.Network.Mode = "enforce"
-	cfg.Policy.Egress = []EgressRule{
-		{
-			Hostname: "example.com",
-			Transport: []TransportRule{{
-				Protocol: "sctp",
-				Ports:    []int{443},
-			}},
-		},
-		{
-			CIDR: "93.184.216.0/24",
-			ICMP: []ICMPRule{{
-				Type: 300,
-				Code: -1,
-			}},
-		},
-	}
+	cfg.Policy.Egress = []EgressRule{{
+		Hostname: "example.com",
+		Transport: []TransportRule{{
+			Protocol: "sctp",
+			Ports:    []int{443},
+		}},
+	}}
 
 	err := ValidateRuntime(cfg)
 	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want invalid protocol/icmp rejection")
+		t.Fatal("ValidateRuntime() error = nil, want invalid transport protocol rejection")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "protocol") && !strings.Contains(strings.ToLower(err.Error()), "transport") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of transport protocol issue", err)
+	}
+}
+
+func TestValidateRejectsEgressRuleWithInvalidICMPTuple(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Policy.Egress = []EgressRule{{
+		CIDR: "93.184.216.0/24",
+		ICMP: []ICMPRule{{
+			Type: 300,
+			Code: -1,
+		}},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want invalid icmp tuple rejection")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "icmp") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of icmp tuple issue", err)
 	}
 }
 
