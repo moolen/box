@@ -494,17 +494,45 @@ network:
 		t.Fatalf("network.policy len = %d, want 2", len(got.Network.Policy))
 	}
 
-	// Fail-closed bridge: if the new policy contains wildcard hostnames, the
-	// legacy representation must not become more permissive.
-	foundFailClosedMarker := false
-	for _, d := range got.Policy.AllowDomains {
-		if d == "*" {
-			foundFailClosedMarker = true
-			break
-		}
+	const wantSentinel = "deny-all://legacy-shim"
+	if len(got.Policy.Egress) != 0 {
+		t.Fatalf("legacy policy egress = %#v, want empty for fail-closed shim", got.Policy.Egress)
 	}
-	if !foundFailClosedMarker {
-		t.Fatalf("legacy policy allow_domains = %#v, want fail-closed marker \"*\" present", got.Policy.AllowDomains)
+	if len(got.Policy.AllowDomains) != 1 || got.Policy.AllowDomains[0] != wantSentinel {
+		t.Fatalf("legacy policy allow_domains = %#v, want [%q] for fail-closed shim", got.Policy.AllowDomains, wantSentinel)
+	}
+}
+
+func TestLoadLegacyPolicyShimFailsClosedOnCIDRRules(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: enforce
+  policy:
+    - cidr: 93.184.216.0/24
+      ports: [443]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got.Network.Policy) != 1 {
+		t.Fatalf("network.policy len = %d, want 1", len(got.Network.Policy))
+	}
+
+	const wantSentinel = "deny-all://legacy-shim"
+	if len(got.Policy.Egress) != 0 {
+		t.Fatalf("legacy policy egress = %#v, want empty for fail-closed shim", got.Policy.Egress)
+	}
+	if len(got.Policy.AllowDomains) != 1 || got.Policy.AllowDomains[0] != wantSentinel {
+		t.Fatalf("legacy policy allow_domains = %#v, want [%q] for fail-closed shim", got.Policy.AllowDomains, wantSentinel)
 	}
 }
 
@@ -549,6 +577,23 @@ func TestValidateRejectsOverlongHostnameLikeLegacyEvaluator(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOverlongWildcardHostnameSelector(t *testing.T) {
+	l63 := strings.Repeat("a", 63)
+	l61 := strings.Repeat("a", 61)
+	base := l63 + "." + l63 + "." + l63 + "." + l61 // len=253
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Network.Policy = []NetworkPolicyRule{{
+		Hostname: "*." + base,
+		Ports:    []int{443},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want overlong wildcard hostname rejection")
+	}
+}
+
 func TestValidateRejectsInvalidEnvoyPorts(t *testing.T) {
 	cfg := Config{}
 	cfg.Network.Mode = "monitor"
@@ -561,5 +606,28 @@ func TestValidateRejectsInvalidEnvoyPorts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network.envoy.http_port") {
 		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
+	}
+}
+
+func TestLoadDefaultsNetworkModeToMonitorWhenOmitted(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  dns:
+    bind_addr: auto
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Network.Mode != "monitor" {
+		t.Fatalf("network.mode = %q, want %q", got.Network.Mode, "monitor")
 	}
 }

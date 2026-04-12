@@ -13,6 +13,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const legacyFailClosedSentinelHostname = "deny-all://legacy-shim"
+
 func Load(path, cwd string) (Config, error) {
 	var cfg Config
 
@@ -42,6 +44,12 @@ func Load(path, cwd string) (Config, error) {
 
 	if cfg.Sandbox.Workdir != "" && !filepath.IsAbs(cfg.Sandbox.Workdir) {
 		cfg.Sandbox.Workdir = filepath.Join(cwd, cfg.Sandbox.Workdir)
+	}
+	mode := strings.TrimSpace(cfg.Network.Mode)
+	if mode == "" {
+		cfg.Network.Mode = "monitor"
+	} else {
+		cfg.Network.Mode = mode
 	}
 
 	// Transitional compatibility shims: keep the new YAML contract
@@ -89,17 +97,18 @@ func deriveLegacyPolicy(rules []NetworkPolicyRule) PolicyConfig {
 		// config, but not in the legacy policy evaluator. If present, force the
 		// legacy policy into an "invalid" state so legacy callers deny by default.
 		if strings.Contains(rule.Hostname, "*") {
-			return PolicyConfig{AllowDomains: []string{"*"}}
+			return PolicyConfig{AllowDomains: []string{legacyFailClosedSentinelHostname}}
+		}
+		// CIDR rules are representable in the new config, but not in the legacy
+		// hostname policy evaluation path. Fail closed to avoid widening behavior.
+		if strings.TrimSpace(rule.CIDR) != "" {
+			return PolicyConfig{AllowDomains: []string{legacyFailClosedSentinelHostname}}
 		}
 		if h := strings.TrimSpace(rule.Hostname); h != "" {
 			out.AllowDomains = append(out.AllowDomains, h)
 		}
-		if c := strings.TrimSpace(rule.CIDR); c != "" {
-			out.ExtraAllowedCIDRs = append(out.ExtraAllowedCIDRs, c)
-		}
 		out.Egress = append(out.Egress, EgressRule{
 			Hostname: strings.TrimSpace(rule.Hostname),
-			CIDR:     strings.TrimSpace(rule.CIDR),
 			Transport: []TransportRule{{
 				Protocol: "tcp",
 				Ports:    append([]int(nil), rule.Ports...),
@@ -155,8 +164,13 @@ func validateNetworkPolicyRule(rule NetworkPolicyRule) error {
 
 func validateHostnameSelector(hostname string) error {
 	host := strings.TrimSpace(hostname)
+	host = strings.TrimSuffix(host, ".")
+	host = strings.ToLower(host)
 	if host == "" {
 		return errors.New("must be non-empty")
+	}
+	if len(host) > 253 {
+		return fmt.Errorf("hostname %q is too long", hostname)
 	}
 	if strings.HasPrefix(host, "*.") {
 		base := strings.TrimPrefix(host, "*.")
