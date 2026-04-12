@@ -468,7 +468,7 @@ network:
 	}
 }
 
-func TestLoadLegacyPolicyShimIgnoresWildcardHostnameRules(t *testing.T) {
+func TestLoadLegacyPolicyShimFailsClosedOnWildcardHostnameRules(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `
 sandbox:
@@ -494,24 +494,72 @@ network:
 		t.Fatalf("network.policy len = %d, want 2", len(got.Network.Policy))
 	}
 
+	// Fail-closed bridge: if the new policy contains wildcard hostnames, the
+	// legacy representation must not become more permissive.
+	foundFailClosedMarker := false
 	for _, d := range got.Policy.AllowDomains {
-		if strings.Contains(d, "*") {
-			t.Fatalf("legacy policy allow_domains contains wildcard %q; want wildcard rules ignored in shim", d)
-		}
-	}
-	for _, rule := range got.Policy.Egress {
-		if strings.Contains(rule.Hostname, "*") {
-			t.Fatalf("legacy policy egress contains wildcard hostname %q; want wildcard rules ignored in shim", rule.Hostname)
-		}
-	}
-	foundExample := false
-	for _, d := range got.Policy.AllowDomains {
-		if d == "example.com" {
-			foundExample = true
+		if d == "*" {
+			foundFailClosedMarker = true
 			break
 		}
 	}
-	if !foundExample {
-		t.Fatalf("legacy policy allow_domains = %#v, want example.com present", got.Policy.AllowDomains)
+	if !foundFailClosedMarker {
+		t.Fatalf("legacy policy allow_domains = %#v, want fail-closed marker \"*\" present", got.Policy.AllowDomains)
+	}
+}
+
+func TestLoadRejectsLegacyNestedTransparentProxy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+  transparent_proxy:
+    enabled: true
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want legacy transparent_proxy rejection")
+	}
+	if !strings.Contains(err.Error(), "transparent_proxy") {
+		t.Fatalf("Load() error = %q, want mention of transparent_proxy", err)
+	}
+}
+
+func TestValidateRejectsOverlongHostnameLikeLegacyEvaluator(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Network.Policy = []NetworkPolicyRule{{
+		Hostname: strings.Repeat("a", 64) + ".example.com",
+		Ports:    []int{443},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want overlong hostname rejection")
+	}
+}
+
+func TestValidateRejectsInvalidEnvoyPorts(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "monitor"
+	cfg.Network.Envoy.Enabled = true
+	cfg.Network.Envoy.HTTPPort = 70000
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want invalid envoy port rejection")
+	}
+	if !strings.Contains(err.Error(), "network.envoy.http_port") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
 	}
 }

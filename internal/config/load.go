@@ -65,6 +65,12 @@ func ValidateRuntime(cfg Config) error {
 	if !strings.EqualFold(mode, "monitor") && !strings.EqualFold(mode, "enforce") {
 		return fmt.Errorf("network.mode=%q is unsupported; allowed values are monitor and enforce", cfg.Network.Mode)
 	}
+	if cfg.Network.Envoy.HTTPPort != 0 && (cfg.Network.Envoy.HTTPPort < 1 || cfg.Network.Envoy.HTTPPort > 65535) {
+		return fmt.Errorf("network.envoy.http_port=%d is invalid; must be between 1 and 65535", cfg.Network.Envoy.HTTPPort)
+	}
+	if cfg.Network.Envoy.TLSPort != 0 && (cfg.Network.Envoy.TLSPort < 1 || cfg.Network.Envoy.TLSPort > 65535) {
+		return fmt.Errorf("network.envoy.tls_port=%d is invalid; must be between 1 and 65535", cfg.Network.Envoy.TLSPort)
+	}
 	if strings.EqualFold(cfg.Network.Envoy.Mode, "mitm") || strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
 		return errors.New("network.envoy.mode=mitm (aka network.transparent_proxy.mode=mitm) is not supported by runtime yet")
 	}
@@ -79,11 +85,11 @@ func ValidateRuntime(cfg Config) error {
 func deriveLegacyPolicy(rules []NetworkPolicyRule) PolicyConfig {
 	var out PolicyConfig
 	for _, rule := range rules {
-		// The legacy policy format cannot represent wildcard hostname rules safely.
-		// If we forward them, older pipelines may treat the entire policy as invalid
-		// and effectively deny all. Skip these rules in the compatibility shim.
+		// Fail-closed bridge: wildcard hostname rules are representable in the new
+		// config, but not in the legacy policy evaluator. If present, force the
+		// legacy policy into an "invalid" state so legacy callers deny by default.
 		if strings.Contains(rule.Hostname, "*") {
-			continue
+			return PolicyConfig{AllowDomains: []string{"*"}}
 		}
 		if h := strings.TrimSpace(rule.Hostname); h != "" {
 			out.AllowDomains = append(out.AllowDomains, h)
@@ -177,8 +183,16 @@ func normalizeHostname(hostname string) string {
 	if host == "" {
 		return ""
 	}
+	// Match legacy evaluator constraints: total hostname length <= 253 and each
+	// label length <= 63.
+	if len(host) > 253 {
+		return ""
+	}
 	for _, label := range strings.Split(host, ".") {
 		if label == "" {
+			return ""
+		}
+		if len(label) > 63 {
 			return ""
 		}
 		for _, r := range label {
