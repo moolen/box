@@ -99,7 +99,28 @@ func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs [
 	t.Helper()
 	subnet := uniqueTestSubnet(t)
 
-content := fmt.Sprintf(`sandbox:
+	policySection := "  policy: []"
+	if len(allowDomains) > 0 || len(extraAllowedCIDRs) > 0 {
+		var b strings.Builder
+		b.WriteString("  policy:\n")
+		for _, domain := range allowDomains {
+			domain = strings.TrimSpace(domain)
+			if domain == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "    - hostname: %s\n      ports: [80, 443]\n", domain)
+		}
+		for _, cidr := range extraAllowedCIDRs {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "    - cidr: %s\n      ports: [80, 443]\n", cidr)
+		}
+		policySection = strings.TrimRight(b.String(), "\n")
+	}
+
+	content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
   rootfs_source: ""
   hostname: box
@@ -116,16 +137,11 @@ network:
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
-  transparent_proxy:
+  envoy:
     enabled: true
     mode: peek
     http_port: 18080
     tls_port: 18443
-policy:
-  allow_domains:
-%s
-  deny_domains: []
-  extra_allowed_cidrs:
 %s
 mounts:
   extra_ro: []
@@ -134,7 +150,7 @@ gvisor:
   platform: systrap
   network: sandbox
   debug: false
-`, subnet, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
+`, subnet, policySection)
 
 	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -218,15 +234,12 @@ network:
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
-  transparent_proxy:
+  envoy:
     enabled: true
     mode: peek
     http_port: 18080
     tls_port: 18443
-policy:
-  allow_domains: []
-  deny_domains: []
-  extra_allowed_cidrs: []
+  policy: []
 mounts:
   extra_ro:
     - %s

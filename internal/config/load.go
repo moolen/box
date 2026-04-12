@@ -79,6 +79,12 @@ func ValidateRuntime(cfg Config) error {
 func deriveLegacyPolicy(rules []NetworkPolicyRule) PolicyConfig {
 	var out PolicyConfig
 	for _, rule := range rules {
+		// The legacy policy format cannot represent wildcard hostname rules safely.
+		// If we forward them, older pipelines may treat the entire policy as invalid
+		// and effectively deny all. Skip these rules in the compatibility shim.
+		if strings.Contains(rule.Hostname, "*") {
+			continue
+		}
 		if h := strings.TrimSpace(rule.Hostname); h != "" {
 			out.AllowDomains = append(out.AllowDomains, h)
 		}

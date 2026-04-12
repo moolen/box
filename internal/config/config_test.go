@@ -436,3 +436,82 @@ func TestValidateAcceptsValidWildcardHostname(t *testing.T) {
 		t.Fatalf("ValidateRuntime() error = %v, want nil", err)
 	}
 }
+
+func TestLoadPopulatesLegacyTransparentProxyFromNetworkEnvoy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+  envoy:
+    enabled: true
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if got.Network.TransparentProxy.Enabled != got.Network.Envoy.Enabled ||
+		got.Network.TransparentProxy.Mode != got.Network.Envoy.Mode ||
+		got.Network.TransparentProxy.HTTPPort != got.Network.Envoy.HTTPPort ||
+		got.Network.TransparentProxy.TLSPort != got.Network.Envoy.TLSPort {
+		t.Fatalf("legacy transparent proxy shim did not mirror network.envoy: got=%#v envoy=%#v", got.Network.TransparentProxy, got.Network.Envoy)
+	}
+}
+
+func TestLoadLegacyPolicyShimIgnoresWildcardHostnameRules(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: enforce
+  policy:
+    - hostname: "*.example.com"
+      ports: [443]
+    - hostname: example.com
+      ports: [443]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got.Network.Policy) != 2 {
+		t.Fatalf("network.policy len = %d, want 2", len(got.Network.Policy))
+	}
+
+	for _, d := range got.Policy.AllowDomains {
+		if strings.Contains(d, "*") {
+			t.Fatalf("legacy policy allow_domains contains wildcard %q; want wildcard rules ignored in shim", d)
+		}
+	}
+	for _, rule := range got.Policy.Egress {
+		if strings.Contains(rule.Hostname, "*") {
+			t.Fatalf("legacy policy egress contains wildcard hostname %q; want wildcard rules ignored in shim", rule.Hostname)
+		}
+	}
+	foundExample := false
+	for _, d := range got.Policy.AllowDomains {
+		if d == "example.com" {
+			foundExample = true
+			break
+		}
+	}
+	if !foundExample {
+		t.Fatalf("legacy policy allow_domains = %#v, want example.com present", got.Policy.AllowDomains)
+	}
+}
