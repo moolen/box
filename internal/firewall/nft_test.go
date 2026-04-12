@@ -227,6 +227,61 @@ func TestEnforceModeRendersPerRuleSetsAndProtocolAwareAcceptRules(t *testing.T) 
 	)
 }
 
+func TestEnforceModeDoesNotRenderLegacySharedAllowSet(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:  "box_deadbeef",
+		HostVeth:   "vethhdeadbeef",
+		SubnetCIDR: "100.96.0.0/30",
+		DNSPort:    1053,
+		Rules: []EnforceRule{
+			{
+				SetName: "egress_0_v4",
+				Transport: []TransportMatch{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error = %v", err)
+	}
+
+	for _, cmd := range plan.Commands {
+		if strings.Contains(cmd, "allow_v4") {
+			t.Fatalf("legacy allow_v4 reference must not be rendered: %q", cmd)
+		}
+	}
+}
+
+func TestEnforceModeRendersMultiPortTransportMatch(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:  "box_deadbeef",
+		HostVeth:   "vethhdeadbeef",
+		SubnetCIDR: "100.96.0.0/30",
+		DNSPort:    1053,
+		Rules: []EnforceRule{
+			{
+				SetName: "egress_0_v4",
+				Transport: []TransportMatch{{
+					Protocol: "tcp",
+					Ports:    []int{80, 443},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error = %v", err)
+	}
+
+	mustContainCommandFragments(t, plan.Commands,
+		"nft add rule inet box_deadbeef forward",
+		"ip daddr @egress_0_v4",
+		"tcp dport { 80, 443 }",
+		"accept",
+	)
+}
+
 func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
 	plan, err := BuildEnforcePlan(EnforcePlanInput{
 		TableName:  "box_deadbeef",
@@ -261,6 +316,65 @@ func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
 
 	if containsFragment(plan.Commands, "nft add element inet box_deadbeef egress_0_v4") {
 		t.Fatalf("hostname-backed set must not be pre-populated.\ncommands=%#v", plan.Commands)
+	}
+}
+
+func TestBuildEnforcePlanRejectsInvalidRuleInputs(t *testing.T) {
+	tests := []struct {
+		name        string
+		rules       []EnforceRule
+		wantErrFrag string
+	}{
+		{
+			name: "invalid protocol",
+			rules: []EnforceRule{{
+				SetName: "egress_0_v4",
+				Transport: []TransportMatch{{
+					Protocol: "sctp",
+					Ports:    []int{443},
+				}},
+			}},
+			wantErrFrag: "protocol",
+		},
+		{
+			name: "missing set name",
+			rules: []EnforceRule{{
+				Transport: []TransportMatch{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+			}},
+			wantErrFrag: "rule set name is required",
+		},
+		{
+			name: "invalid icmp tuple",
+			rules: []EnforceRule{{
+				SetName: "egress_0_v4",
+				ICMP: []ICMPMatch{{
+					Type: 8,
+					Code: 300,
+				}},
+			}},
+			wantErrFrag: "icmp code",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := BuildEnforcePlan(EnforcePlanInput{
+				TableName:  "box_deadbeef",
+				HostVeth:   "vethhdeadbeef",
+				SubnetCIDR: "100.96.0.0/30",
+				DNSPort:    1053,
+				Rules:      tt.rules,
+			})
+			if err == nil {
+				t.Fatalf("BuildEnforcePlan() error = nil, want non-nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErrFrag) {
+				t.Fatalf("BuildEnforcePlan() error = %q, want contains %q", err.Error(), tt.wantErrFrag)
+			}
+		})
 	}
 }
 

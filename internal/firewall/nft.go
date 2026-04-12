@@ -150,9 +150,12 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 		}
 
 		for _, match := range rule.Transport {
-			protocol := strings.ToLower(strings.TrimSpace(match.Protocol))
+			protocol := strings.TrimSpace(match.Protocol)
 			if protocol == "" {
 				return EnforcePlan{}, fmt.Errorf("transport protocol is required for set %q", setName)
+			}
+			if protocol != "tcp" && protocol != "udp" {
+				return EnforcePlan{}, fmt.Errorf("transport protocol %q for set %q must be tcp or udp", protocol, setName)
 			}
 			if len(match.Ports) == 0 {
 				return EnforcePlan{}, fmt.Errorf("transport ports are required for set %q", setName)
