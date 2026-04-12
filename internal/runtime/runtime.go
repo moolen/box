@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,6 +89,14 @@ type Runtime struct {
 	eventMu  sync.Mutex
 	allowMu  sync.Mutex
 	allowIPs map[string]struct{}
+}
+
+type compiledEgressRule struct {
+	SetName   string
+	Hostname  string
+	CIDR      string
+	Transport []firewall.TransportMatch
+	ICMP      []firewall.ICMPMatch
 }
 
 type Manifest struct {
@@ -382,9 +391,11 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 }
 
 func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config, deps Deps) error {
+	compiledRules := compileRuntimeEgress(cfg.Policy)
+	allowQuery := rt.enforceAllowQuery(compiledRules)
+	onResolved := rt.enforceResolvedCallback(ctx, deps, compiledRules)
+
 	if deps.DNS != nil {
-		allowQuery := rt.enforceAllowQuery(cfg.Policy)
-		onResolved := rt.enforceResolvedCallback(ctx, deps)
 		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
 			Mode:      cfg.Network.Mode,
 			GatewayIP: rt.Manifest.GatewayIP,
@@ -410,7 +421,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
 			Mode:          cfg.Network.TransparentProxy.Mode,
 			Config:        cfg.Network.TransparentProxy,
-			AllowHostname: rt.enforceAllowQuery(cfg.Policy),
+			AllowHostname: allowQuery,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -431,11 +442,11 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 
 	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
-		TableName:         rt.Manifest.Net.TableName,
-		HostVeth:          rt.Manifest.Net.HostVeth,
-		SubnetCIDR:        cfg.Network.Subnet,
-		DNSPort:           dnsPort,
-		ExtraAllowedCIDRs: egressCIDRs(cfg.Policy),
+		TableName:  rt.Manifest.Net.TableName,
+		HostVeth:   rt.Manifest.Net.HostVeth,
+		SubnetCIDR: cfg.Network.Subnet,
+		DNSPort:    dnsPort,
+		Rules:      buildEnforceRules(compiledRules),
 	})
 	if err != nil {
 		return fmt.Errorf("build firewall enforce plan: %w", err)
@@ -535,42 +546,49 @@ func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
 	}
 }
 
-func (rt *Runtime) enforceAllowQuery(policyCfg config.PolicyConfig) func(hostname string) bool {
-	policy := monitor.CompilePolicy(policyCfg)
+func (rt *Runtime) enforceAllowQuery(compiled []compiledEgressRule) func(hostname string) bool {
 	return func(hostname string) bool {
-		return policy.Evaluate(hostname) == monitor.VerdictAllow
+		return anyHostnameRuleMatches(compiled, hostname)
 	}
 }
 
-func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps) func(dns.Resolution) {
+func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps, compiled []compiledEgressRule) func(dns.Resolution) {
 	return func(event dns.Resolution) {
 		if rt == nil {
 			return
 		}
-		for _, addr := range event.IPs {
-			if err := rt.allowResolvedIP(ctx, deps.CommandExec, addr); err != nil {
-				continue
+		for _, setName := range matchingHostnameRuleSetNames(compiled, event.Hostname) {
+			for _, addr := range event.IPs {
+				if err := rt.allowResolvedIP(ctx, deps.CommandExec, setName, addr); err != nil {
+					continue
+				}
 			}
 		}
 	}
 }
 
-func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, addr netip.Addr) error {
+func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, setName string, addr netip.Addr) error {
 	if rt == nil || execer == nil || !addr.Is4() {
 		return nil
 	}
 
+	setName = strings.TrimSpace(setName)
+	if setName == "" {
+		return nil
+	}
+
 	ip := addr.Unmap().String()
+	key := setName + "|" + ip
 
 	rt.allowMu.Lock()
-	if _, exists := rt.allowIPs[ip]; exists {
+	if _, exists := rt.allowIPs[key]; exists {
 		rt.allowMu.Unlock()
 		return nil
 	}
-	rt.allowIPs[ip] = struct{}{}
+	rt.allowIPs[key] = struct{}{}
 	rt.allowMu.Unlock()
 
-	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, ip)
+	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, setName, ip)
 	if err != nil {
 		return err
 	}
@@ -580,7 +598,7 @@ func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, addr
 	}
 	if err := execer.Run(ctx, fields[0], fields[1:]...); err != nil {
 		rt.allowMu.Lock()
-		delete(rt.allowIPs, ip)
+		delete(rt.allowIPs, key)
 		rt.allowMu.Unlock()
 		return fmt.Errorf("allow resolved ip %q: %w", ip, err)
 	}
@@ -697,14 +715,200 @@ func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
 		cfg.Docker.HostNetworkNestedContainers
 }
 
-func egressCIDRs(policy config.PolicyConfig) []string {
-	cidrs := make([]string, 0, len(policy.Egress))
+func compileRuntimeEgress(policy config.PolicyConfig) []compiledEgressRule {
+	compiled := make([]compiledEgressRule, 0, len(policy.Egress))
 	for _, rule := range policy.Egress {
-		if cidr := strings.TrimSpace(rule.CIDR); cidr != "" {
-			cidrs = append(cidrs, cidr)
+		entry := compiledEgressRule{
+			Hostname:  normalizeRuntimeRuleHostname(rule.Hostname),
+			CIDR:      normalizeRuntimeRuleCIDR(rule.CIDR),
+			Transport: normalizeRuntimeRuleTransport(rule.Transport),
+			ICMP:      normalizeRuntimeRuleICMP(rule.ICMP),
+		}
+		compiled = append(compiled, entry)
+	}
+
+	sort.Slice(compiled, func(i, j int) bool {
+		return runtimeRuleSortKey(compiled[i]) < runtimeRuleSortKey(compiled[j])
+	})
+
+	for idx := range compiled {
+		compiled[idx].SetName = fmt.Sprintf("egress_%d_v4", idx)
+	}
+	return compiled
+}
+
+func normalizeRuntimeRuleHostname(hostname string) string {
+	return config.NormalizeHostname(hostname)
+}
+
+func normalizeRuntimeRuleCIDR(cidr string) string {
+	trimmed := strings.TrimSpace(cidr)
+	if trimmed == "" {
+		return ""
+	}
+	prefix, err := netip.ParsePrefix(trimmed)
+	if err != nil || !prefix.Addr().Is4() {
+		return trimmed
+	}
+	return prefix.String()
+}
+
+func normalizeRuntimeRuleTransport(rules []config.TransportRule) []firewall.TransportMatch {
+	out := make([]firewall.TransportMatch, 0, len(rules))
+	for _, rule := range rules {
+		ports := append([]int(nil), rule.Ports...)
+		sort.Ints(ports)
+		out = append(out, firewall.TransportMatch{
+			Protocol: strings.ToLower(strings.TrimSpace(rule.Protocol)),
+			Ports:    ports,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ik := out[i].Protocol + "|" + joinIntList(out[i].Ports)
+		jk := out[j].Protocol + "|" + joinIntList(out[j].Ports)
+		return ik < jk
+	})
+	return out
+}
+
+func normalizeRuntimeRuleICMP(rules []config.ICMPRule) []firewall.ICMPMatch {
+	out := make([]firewall.ICMPMatch, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, firewall.ICMPMatch{
+			Type: rule.Type,
+			Code: rule.Code,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		return out[i].Code < out[j].Code
+	})
+	return out
+}
+
+func runtimeRuleSortKey(rule compiledEgressRule) string {
+	selectorKind := "cidr"
+	selector := rule.CIDR
+	if rule.Hostname != "" {
+		selectorKind = "hostname"
+		selector = rule.Hostname
+	}
+	return selectorKind + "|" + selector + "|" + transportSortKey(rule.Transport) + "|" + icmpSortKey(rule.ICMP)
+}
+
+func transportSortKey(matches []firewall.TransportMatch) string {
+	parts := make([]string, 0, len(matches))
+	for _, match := range matches {
+		parts = append(parts, match.Protocol+":"+joinIntList(match.Ports))
+	}
+	return strings.Join(parts, ";")
+}
+
+func icmpSortKey(matches []firewall.ICMPMatch) string {
+	parts := make([]string, 0, len(matches))
+	for _, match := range matches {
+		parts = append(parts, fmt.Sprintf("%d:%d", match.Type, match.Code))
+	}
+	return strings.Join(parts, ";")
+}
+
+func joinIntList(values []int) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func buildEnforceRules(compiled []compiledEgressRule) []firewall.EnforceRule {
+	rules := make([]firewall.EnforceRule, 0, len(compiled))
+	for _, rule := range compiled {
+		cidrs := []string(nil)
+		if rule.CIDR != "" {
+			cidrs = []string{rule.CIDR}
+		}
+		rules = append(rules, firewall.EnforceRule{
+			SetName:   rule.SetName,
+			CIDRs:     cidrs,
+			Transport: cloneTransportMatches(rule.Transport),
+			ICMP:      cloneICMPMatches(rule.ICMP),
+		})
+	}
+	return rules
+}
+
+func cloneTransportMatches(in []firewall.TransportMatch) []firewall.TransportMatch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]firewall.TransportMatch, 0, len(in))
+	for _, match := range in {
+		out = append(out, firewall.TransportMatch{
+			Protocol: match.Protocol,
+			Ports:    append([]int(nil), match.Ports...),
+		})
+	}
+	return out
+}
+
+func cloneICMPMatches(in []firewall.ICMPMatch) []firewall.ICMPMatch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]firewall.ICMPMatch, 0, len(in))
+	for _, match := range in {
+		out = append(out, firewall.ICMPMatch{
+			Type: match.Type,
+			Code: match.Code,
+		})
+	}
+	return out
+}
+
+func anyHostnameRuleMatches(compiled []compiledEgressRule, hostname string) bool {
+	normalizedHost := config.NormalizeHostname(hostname)
+	if normalizedHost == "" {
+		return false
+	}
+	for _, rule := range compiled {
+		if rule.Hostname == "" {
+			continue
+		}
+		if matchesRuntimeHostnameRule(normalizedHost, rule.Hostname) {
+			return true
 		}
 	}
-	return cidrs
+	return false
+}
+
+func matchingHostnameRuleSetNames(compiled []compiledEgressRule, hostname string) []string {
+	normalizedHost := config.NormalizeHostname(hostname)
+	if normalizedHost == "" {
+		return nil
+	}
+	setNames := make([]string, 0, len(compiled))
+	for _, rule := range compiled {
+		if rule.Hostname == "" || !matchesRuntimeHostnameRule(normalizedHost, rule.Hostname) {
+			continue
+		}
+		setNames = append(setNames, rule.SetName)
+	}
+	return setNames
+}
+
+func matchesRuntimeHostnameRule(host, rule string) bool {
+	if host == "" || rule == "" {
+		return false
+	}
+	if host == rule {
+		return true
+	}
+	return strings.HasSuffix(host, "."+rule)
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {
