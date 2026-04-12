@@ -9,13 +9,18 @@ import (
 
 func TestVerdictDenyWinsOverAllow(t *testing.T) {
 	policy := config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
-		DenyDomains:  []string{"blocked.example.com"},
+		Egress: []config.EgressRule{{
+			Hostname: "example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
 	}
 
-	got := EvaluateHostname(policy, "blocked.example.com")
+	got := EvaluateHostname(policy, "blocked.test")
 	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname() = %q, want %q", got, VerdictDeny)
+		t.Fatalf("EvaluateHostname() = %q, want %q for hostname outside allowlist", got, VerdictDeny)
 	}
 
 	got = EvaluateHostname(policy, "api.example.com")
@@ -38,22 +43,48 @@ func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
 		{
 			name: "malformed allow rule",
 			policy: config.PolicyConfig{
-				AllowDomains: []string{"bad rule"},
+				Egress: []config.EgressRule{{
+					Hostname: "bad rule",
+					Transport: []config.TransportRule{{
+						Protocol: "tcp",
+						Ports:    []int{443},
+					}},
+				}},
 			},
 			host: "example.com",
 		},
 		{
 			name: "malformed deny rule",
 			policy: config.PolicyConfig{
-				DenyDomains: []string{"https://blocked.example.com"},
+				Egress: []config.EgressRule{{
+					Hostname: "https://blocked.example.com",
+					Transport: []config.TransportRule{{
+						Protocol: "tcp",
+						Ports:    []int{443},
+					}},
+				}},
 			},
 			host: "example.com",
 		},
 		{
 			name: "mixed valid and malformed rules",
 			policy: config.PolicyConfig{
-				AllowDomains: []string{"example.com"},
-				DenyDomains:  []string{"bad/deny"},
+				Egress: []config.EgressRule{
+					{
+						Hostname: "example.com",
+						Transport: []config.TransportRule{{
+							Protocol: "tcp",
+							Ports:    []int{443},
+						}},
+					},
+					{
+						Hostname: "bad/deny",
+						Transport: []config.TransportRule{{
+							Protocol: "tcp",
+							Ports:    []int{443},
+						}},
+					},
+				},
 			},
 			host: "example.com",
 		},
@@ -85,7 +116,13 @@ func TestUnknownHostnameVerdictDefaultsToAllowWithoutAllowlist(t *testing.T) {
 
 func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
 	policy := config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
+		Egress: []config.EgressRule{{
+			Hostname: "example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
 	}
 
 	got := EvaluateHostname(policy, "")
@@ -101,8 +138,6 @@ func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
 
 func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 	policy := config.PolicyConfig{
-		AllowDomains: []string{"legacy-only.example.com"},
-		DenyDomains:  []string{"example.com"},
 		Egress: []config.EgressRule{
 			{
 				Hostname: "example.com",
@@ -128,8 +163,13 @@ func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector := NewCollector(config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
-		DenyDomains:  []string{"blocked.example.com"},
+		Egress: []config.EgressRule{{
+			Hostname: "example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
 	})
 
 	collector.AddDNS("Example.COM.")

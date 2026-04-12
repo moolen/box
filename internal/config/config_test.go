@@ -8,12 +8,29 @@ import (
 )
 
 func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs repo root: %v", err)
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  hostname: box
+  workdir: .
+network:
+  mode: monitor
+  subnet: 100.96.0.0/30
+  dns:
+    bind_addr: auto
+  transparent_proxy:
+    mode: peek
+docker:
+  ready_timeout: 10s
+policy:
+  egress: []
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 
-	got, err := Load(filepath.Join(repoRoot, "box.yaml"), repoRoot)
+	got, err := Load(cfgPath, t.TempDir())
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
@@ -333,12 +350,23 @@ func TestValidateRejectsDeprecatedNetworkModes(t *testing.T) {
 }
 
 func TestDNSBindAddrAutoUsesSentinelValueUntilRuntimePlanning(t *testing.T) {
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs repo root: %v", err)
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+  dns:
+    bind_addr: auto
+policy:
+  egress: []
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 
-	got, err := Load(filepath.Join(repoRoot, "box.yaml"), repoRoot)
+	got, err := Load(cfgPath, t.TempDir())
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
