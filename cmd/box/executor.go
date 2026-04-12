@@ -273,7 +273,7 @@ func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStar
 	httpServer, err := deps.startHTTP(ctx, proxy.ProxyConfig{
 		Listen:          consumeListener(httpListener),
 		ResolveUpstream: deps.resolveUpstream,
-		AllowHostname:   req.AllowHostname,
+		AllowTarget:     req.AllowTarget,
 		OnEvent:         onEvent,
 	})
 	if err != nil {
@@ -285,7 +285,7 @@ func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStar
 	tlsServer, err := deps.startTLS(ctx, proxy.ProxyConfig{
 		Listen:          consumeListener(tlsListener),
 		ResolveUpstream: deps.resolveUpstream,
-		AllowHostname:   req.AllowHostname,
+		AllowTarget:     req.AllowTarget,
 		OnEvent:         onEvent,
 	})
 	if err != nil {

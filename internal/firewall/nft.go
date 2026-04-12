@@ -26,6 +26,7 @@ type EnforcePlanInput struct {
 	HostVeth   string
 	SubnetCIDR string
 	DNSPort    int
+	ProxyPort  int
 	Rules      []EnforceRule
 }
 
@@ -113,11 +114,19 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 		fmt.Sprintf("nft add table inet %s", in.TableName),
 		fmt.Sprintf("nft add chain inet %s prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
+		fmt.Sprintf("nft add chain inet %s input { type filter hook input priority filter; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s udp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
 		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s tcp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
+		fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s udp dport %d accept", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
+		fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s tcp dport %d accept", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
+	}
+	if in.ProxyPort > 0 {
+		commands = append(commands,
+			fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s tcp dport %d accept", in.TableName, in.HostVeth, in.SubnetCIDR, in.ProxyPort),
+		)
 	}
 
 	for _, rule := range in.Rules {
@@ -175,6 +184,14 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 					protocol,
 					renderPorts(match.Ports),
 				),
+				fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s ip daddr @%s %s dport %s accept",
+					in.TableName,
+					in.HostVeth,
+					in.SubnetCIDR,
+					setName,
+					protocol,
+					renderPorts(match.Ports),
+				),
 			)
 		}
 
@@ -194,9 +211,21 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 					tuple.Type,
 					tuple.Code,
 				),
+				fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s ip daddr @%s icmp type %d icmp code %d accept",
+					in.TableName,
+					in.HostVeth,
+					in.SubnetCIDR,
+					setName,
+					tuple.Type,
+					tuple.Code,
+				),
 			)
 		}
 	}
+
+	commands = append(commands,
+		fmt.Sprintf("nft add rule inet %s input iifname %s ip saddr %s drop", in.TableName, in.HostVeth, in.SubnetCIDR),
+	)
 
 	return EnforcePlan{Commands: commands}, nil
 }

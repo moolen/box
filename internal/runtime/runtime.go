@@ -67,10 +67,10 @@ type DNSStartRequest struct {
 }
 
 type ProxyStartRequest struct {
-	Mode          string
-	Config        config.TransparentProxyConfig
-	OnEvent       func(proxy.Event)
-	AllowHostname func(string) bool
+	Mode        string
+	Config      config.TransparentProxyConfig
+	OnEvent     func(proxy.Event)
+	AllowTarget func(string, int) bool
 }
 
 type MonitorPreflightRequest struct {
@@ -92,11 +92,11 @@ type Runtime struct {
 }
 
 type compiledEgressRule struct {
-	SetName   string
-	Hostname  string
-	CIDR      string
-	Transport []firewall.TransportMatch
-	ICMP      []firewall.ICMPMatch
+	SetName    string
+	Hostname   string
+	CIDR       string
+	Transport  []firewall.TransportMatch
+	ICMP       []firewall.ICMPMatch
 	inputIndex int
 }
 
@@ -358,26 +358,13 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		return fmt.Errorf("apply firewall plan: %w", err)
 	}
 
-	routingPlan, err := firewall.BuildPolicyRoutingPlan(rt.Manifest.Net.FWMark, rt.Manifest.Net.RouteTable)
-	if err != nil {
-		return fmt.Errorf("build policy routing plan: %w", err)
-	}
-	recordedTeardown, err = runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(routingPlan, map[int]string{
-		0: fmt.Sprintf("ip rule del fwmark %d lookup %d", rt.Manifest.Net.FWMark, rt.Manifest.Net.RouteTable),
-		1: fmt.Sprintf("ip route del local 0.0.0.0/0 dev lo table %d", rt.Manifest.Net.RouteTable),
-	}))
-	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
-	if err != nil {
-		return fmt.Errorf("apply policy routing plan: %w", err)
-	}
-
 	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
 		onEvent := rt.monitorProxyCallback()
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:          cfg.Network.TransparentProxy.Mode,
-			Config:        cfg.Network.TransparentProxy,
-			OnEvent:       onEvent,
-			AllowHostname: nil,
+			Mode:        cfg.Network.TransparentProxy.Mode,
+			Config:      cfg.Network.TransparentProxy,
+			OnEvent:     onEvent,
+			AllowTarget: nil,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -410,6 +397,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		HostVeth:   rt.Manifest.Net.HostVeth,
 		SubnetCIDR: cfg.Network.Subnet,
 		DNSPort:    dnsPort,
+		ProxyPort:  proxyPortForEnforceInput(cfg),
 		Rules:      buildEnforceRules(compiledRules),
 	})
 	if err != nil {
@@ -448,9 +436,9 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 
 	if usesNestedDockerHostNetworkProxy(cfg) && deps.Proxy != nil {
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:          cfg.Network.TransparentProxy.Mode,
-			Config:        cfg.Network.TransparentProxy,
-			AllowHostname: allowQuery,
+			Mode:        cfg.Network.TransparentProxy.Mode,
+			Config:      cfg.Network.TransparentProxy,
+			AllowTarget: rt.enforceAllowTarget(compiledRules),
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -550,6 +538,25 @@ func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
 func (rt *Runtime) enforceAllowQuery(compiled []compiledEgressRule) func(hostname string) bool {
 	return func(hostname string) bool {
 		return anyHostnameRuleMatches(compiled, hostname)
+	}
+}
+
+func (rt *Runtime) enforceAllowTarget(compiled []compiledEgressRule) func(string, int) bool {
+	return func(target string, port int) bool {
+		if port < 1 || port > 65535 {
+			return false
+		}
+
+		normalized := config.NormalizeHostname(target)
+		if normalized == "" {
+			return false
+		}
+
+		if addr, err := netip.ParseAddr(normalized); err == nil && addr.Is4() {
+			return anyCIDRRuleMatches(compiled, addr.Unmap(), "tcp", port)
+		}
+
+		return anyHostnameRuleMatchesTransport(compiled, normalized, "tcp", port)
 	}
 }
 
@@ -714,6 +721,13 @@ func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
 		cfg.Docker.Enabled &&
 		cfg.Docker.HostNetworkNestedContainers
+}
+
+func proxyPortForEnforceInput(cfg config.Config) int {
+	if !usesNestedDockerHostNetworkProxy(cfg) {
+		return 0
+	}
+	return cfg.Network.TransparentProxy.HTTPPort
 }
 
 func compileRuntimeEgress(policy config.PolicyConfig) []compiledEgressRule {
@@ -888,6 +902,61 @@ func anyHostnameRuleMatches(compiled []compiledEgressRule, hostname string) bool
 		}
 		if matchesRuntimeHostnameRule(normalizedHost, rule.Hostname) {
 			return true
+		}
+	}
+	return false
+}
+
+func anyHostnameRuleMatchesTransport(compiled []compiledEgressRule, hostname string, protocol string, port int) bool {
+	for _, rule := range compiled {
+		if rule.Hostname == "" {
+			continue
+		}
+		if !matchesRuntimeHostnameRule(hostname, rule.Hostname) {
+			continue
+		}
+		if transportRuleAllows(rule.Transport, protocol, port) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyCIDRRuleMatches(compiled []compiledEgressRule, addr netip.Addr, protocol string, port int) bool {
+	if !addr.Is4() {
+		return false
+	}
+	for _, rule := range compiled {
+		if rule.CIDR == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(rule.CIDR)
+		if err != nil {
+			continue
+		}
+		if !prefix.Contains(addr) {
+			continue
+		}
+		if transportRuleAllows(rule.Transport, protocol, port) {
+			return true
+		}
+	}
+	return false
+}
+
+func transportRuleAllows(matches []firewall.TransportMatch, protocol string, port int) bool {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" || port < 1 || port > 65535 {
+		return false
+	}
+	for _, match := range matches {
+		if strings.ToLower(strings.TrimSpace(match.Protocol)) != protocol {
+			continue
+		}
+		for _, allowedPort := range match.Ports {
+			if allowedPort == port {
+				return true
+			}
 		}
 	}
 	return false

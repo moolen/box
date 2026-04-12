@@ -175,7 +175,7 @@ CMD ["cat", "/build-artifact.txt"]
 `, true)
 
 	imageTag := "box-enforce-test:" + strconv.FormatInt(time.Now().UnixNano(), 10)
-script := fmt.Sprintf(`
+	script := fmt.Sprintf(`
 set -e
 docker load -i %s >/dev/null
 docker load -i %s >/dev/null
@@ -275,6 +275,39 @@ func TestBoxEnforceAllowsDirectIPOnlyWhenCIDRRuleMatches(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Example Domain") {
 		t.Fatalf("allowed direct-ip stdout = %q, want fixture body", stdout)
+	}
+}
+
+func TestBoxEnforceBlocksHostLocalDirectIPWithoutMatchingPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	fixture := startLocalHTTPFixture(t)
+
+	blockedConfigPath := testenv.WriteEnforceConfig(t, "[]")
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fixture.URL)
+	if err == nil {
+		t.Fatalf("expected host-local direct-ip request without matching policy to fail; stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
+- cidr: %s
+  transport:
+    - protocol: tcp
+      ports: [%d]
+`, fixture.CIDR, fixture.Port))
+	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fixture.URL)
+	if err != nil {
+		t.Fatalf("allowed host-local direct-ip request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("allowed host-local direct-ip stdout = %q, want fixture body", stdout)
 	}
 }
 

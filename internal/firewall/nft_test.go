@@ -357,6 +357,67 @@ func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
 	}
 }
 
+func TestEnforceModeRendersHostInputAllowAndDropRules(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:  "box_deadbeef",
+		HostVeth:   "vethhdeadbeef",
+		SubnetCIDR: "100.96.0.0/30",
+		DNSPort:    1053,
+		Rules: []EnforceRule{
+			{
+				SetName: "egress_0_v4",
+				CIDRs:   []string{"192.0.2.10/32"},
+				Transport: []TransportMatch{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+				ICMP: []ICMPMatch{{
+					Type: 8,
+					Code: 0,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error = %v", err)
+	}
+
+	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef input { type filter hook input priority filter; policy accept; }")
+	mustContainCommandFragments(t, plan.Commands,
+		"input",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"udp dport 1053",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"input",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"tcp dport 1053",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"input",
+		"ip daddr @egress_0_v4",
+		"tcp dport 443",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"input",
+		"ip daddr @egress_0_v4",
+		"icmp type 8",
+		"icmp code 0",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"input",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"drop",
+	)
+}
+
 func TestBuildEnforcePlanRejectsInvalidRuleInputs(t *testing.T) {
 	tests := []struct {
 		name        string

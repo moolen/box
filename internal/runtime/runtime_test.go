@@ -155,8 +155,8 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	if !exec.contains("iifname " + resources.HostVeth) {
 		t.Fatalf("firewall setup commands = %#v, want host-veth scoping", exec.calls)
 	}
-	if !exec.contains("ip rule add fwmark") || !exec.contains("lookup") {
-		t.Fatalf("routing setup commands = %#v, want policy routing setup", exec.calls)
+	if exec.contains("ip rule add fwmark") || exec.contains("ip route add local 0.0.0.0/0 dev lo table") {
+		t.Fatalf("monitor mode must not install global policy routing commands: %#v", exec.calls)
 	}
 }
 
@@ -1035,13 +1035,22 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{{
-		Hostname: "allowed.example.com",
-		Transport: []config.TransportRule{{
-			Protocol: "tcp",
-			Ports:    []int{443},
-		}},
-	}}
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			Hostname: "allowed.example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+		{
+			CIDR: "203.0.113.0/24",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+	}
 	cfg.Docker = config.DockerConfig{
 		Enabled:                     true,
 		DataRoot:                    "/var/lib/docker",
@@ -1068,14 +1077,23 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 		},
 		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
 			proxyCalled = true
-			if req.AllowHostname == nil {
-				t.Fatalf("ProxyStartRequest.AllowHostname = nil, want callback")
+			if req.AllowTarget == nil {
+				t.Fatalf("ProxyStartRequest.AllowTarget = nil, want callback")
 			}
-			if req.AllowHostname("blocked.example.com") {
-				t.Fatalf("AllowHostname(blocked.example.com) = true, want false")
+			if req.AllowTarget("blocked.example.com", 443) {
+				t.Fatalf("AllowTarget(blocked.example.com, 443) = true, want false")
 			}
-			if !req.AllowHostname("allowed.example.com") {
-				t.Fatalf("AllowHostname(allowed.example.com) = false, want true")
+			if !req.AllowTarget("allowed.example.com", 443) {
+				t.Fatalf("AllowTarget(allowed.example.com, 443) = false, want true")
+			}
+			if req.AllowTarget("allowed.example.com", 8443) {
+				t.Fatalf("AllowTarget(allowed.example.com, 8443) = true, want false")
+			}
+			if req.AllowTarget("198.51.100.8", 443) {
+				t.Fatalf("AllowTarget(198.51.100.8, 443) = true, want false")
+			}
+			if !req.AllowTarget("203.0.113.42", 443) {
+				t.Fatalf("AllowTarget(203.0.113.42, 443) = false, want true for cidr-backed ip literal")
 			}
 			return noopRunner{}, nil
 		},
@@ -1089,6 +1107,40 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 
 	if !proxyCalled {
 		t.Fatalf("proxy factory was not called in enforce mode for nested docker host networking")
+	}
+}
+
+func TestEnforceAllowTargetMatchesIPv4LiteralAgainstCIDRRules(t *testing.T) {
+	t.Parallel()
+
+	compiled := compileRuntimeEgress(config.PolicyConfig{
+		Egress: []config.EgressRule{
+			{
+				CIDR: "203.0.113.0/24",
+				Transport: []config.TransportRule{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+			},
+		},
+	})
+
+	rt := &Runtime{}
+	allow := rt.enforceAllowTarget(compiled)
+	if allow == nil {
+		t.Fatal("enforceAllowTarget() = nil")
+	}
+	if !allow("203.0.113.44", 443) {
+		t.Fatal("allow(203.0.113.44, 443) = false, want true")
+	}
+	if !allow("203.0.113.44:443", 443) {
+		t.Fatal("allow(203.0.113.44:443, 443) = false, want true")
+	}
+	if allow("203.0.113.44", 8443) {
+		t.Fatal("allow(203.0.113.44, 8443) = true, want false")
+	}
+	if allow("198.51.100.7", 443) {
+		t.Fatal("allow(198.51.100.7, 443) = true, want false")
 	}
 }
 
@@ -1371,10 +1423,10 @@ func (f *failingCommandExec) Run(_ context.Context, name string, args ...string)
 }
 
 type firewallReadyCommandExec struct {
-	calls            []string
-	firewallReady    bool
+	calls             []string
+	firewallReady     bool
 	failedBeforeReady []string
-	successfulAdds   []string
+	successfulAdds    []string
 }
 
 func (f *firewallReadyCommandExec) Run(_ context.Context, name string, args ...string) error {

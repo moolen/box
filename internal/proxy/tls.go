@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 )
 
 func StartTLS(ctx context.Context, cfg ProxyConfig) (*Server, error) {
@@ -29,6 +30,25 @@ func StartTLS(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 		upstreamAddr, err := s.resolveUpstreamAddr(client, sni, "443")
 		if err != nil {
 			return
+		}
+		if s.allowTarget != nil {
+			targetHost := sni
+			if targetHost == "" {
+				targetHost, _, err = net.SplitHostPort(upstreamAddr)
+				if err != nil {
+					return
+				}
+			}
+			targetPort := 443
+			if _, portText, err := net.SplitHostPort(upstreamAddr); err == nil {
+				targetPort, err = strconv.Atoi(portText)
+				if err != nil {
+					return
+				}
+			}
+			if !s.allowTarget(targetHost, targetPort) {
+				return
+			}
 		}
 
 		s.forward(client, io.MultiReader(bytes.NewReader(clientHello), reader), upstreamAddr)

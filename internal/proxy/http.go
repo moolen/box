@@ -34,6 +34,7 @@ type ProxyConfig struct {
 	DialContext     func(ctx context.Context, network, address string) (net.Conn, error)
 	ResolveUpstream func(client net.Conn) (string, error)
 	AllowHostname   func(host string) bool
+	AllowTarget     func(host string, port int) bool
 	OnEvent         func(Event)
 }
 
@@ -44,6 +45,7 @@ type Server struct {
 	dialCancel      context.CancelFunc
 	resolveUpstream func(client net.Conn) (string, error)
 	allowHostname   func(host string) bool
+	allowTarget     func(host string, port int) bool
 	onEvent         func(Event)
 	handleConn      func(*Server, net.Conn)
 
@@ -79,7 +81,13 @@ func StartHTTP(ctx context.Context, cfg ProxyConfig) (*Server, error) {
 			})
 		}
 
-		if s.allowHostname != nil && !s.allowHostname(host) {
+		if s.allowTarget != nil {
+			targetPort, err := requestTargetPort(req)
+			if err != nil || !s.allowTarget(host, targetPort) {
+				writeHTTPForbidden(client)
+				return
+			}
+		} else if s.allowHostname != nil && !s.allowHostname(host) {
 			writeHTTPForbidden(client)
 			return
 		}
@@ -160,6 +168,7 @@ func start(ctx context.Context, cfg ProxyConfig, handler func(*Server, net.Conn)
 		dialCancel:      func() {},
 		resolveUpstream: cfg.ResolveUpstream,
 		allowHostname:   cfg.AllowHostname,
+		allowTarget:     cfg.AllowTarget,
 		onEvent:         cfg.OnEvent,
 		handleConn:      handler,
 		conns:           make(map[net.Conn]struct{}),
@@ -272,7 +281,14 @@ func (s *Server) resolveHTTPUpstreamAddr(client net.Conn, req *http.Request) (st
 	if isExplicitProxyRequest(req) {
 		return s.resolveRequestHostAddr(host, port)
 	}
-	return s.resolveUpstreamAddr(client, host, port)
+	upstreamAddr, err := s.resolveUpstreamAddr(client, host, port)
+	if err != nil {
+		return "", err
+	}
+	if host != "" && upstreamTargetsClientLocalAddr(upstreamAddr, client.LocalAddr()) {
+		return s.resolveRequestHostAddr(host, port)
+	}
+	return upstreamAddr, nil
 }
 
 func (s *Server) resolveRequestHostAddr(fallbackHost, defaultPort string) (string, error) {
@@ -374,6 +390,46 @@ func defaultHTTPPort(req *http.Request) string {
 		return "443"
 	}
 	return "80"
+}
+
+func requestTargetPort(req *http.Request) (int, error) {
+	portText := defaultHTTPPort(req)
+	host := httpRequestHost(req)
+	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
+		if parsedHost == "" {
+			return 0, errors.New("request host is empty")
+		}
+		host = parsedHost
+		portText = parsedPort
+	}
+	return strconv.Atoi(portText)
+}
+
+func upstreamTargetsClientLocalAddr(upstreamAddr string, localAddr net.Addr) bool {
+	if strings.TrimSpace(upstreamAddr) == "" || localAddr == nil {
+		return false
+	}
+
+	upstreamHost, upstreamPort, err := net.SplitHostPort(strings.TrimSpace(upstreamAddr))
+	if err != nil {
+		return false
+	}
+
+	localHost, localPort, err := net.SplitHostPort(strings.TrimSpace(localAddr.String()))
+	if err != nil {
+		return false
+	}
+	if upstreamPort != localPort {
+		return false
+	}
+
+	upstreamIP := net.ParseIP(upstreamHost)
+	localIP := net.ParseIP(localHost)
+	if upstreamIP != nil && localIP != nil {
+		return upstreamIP.Equal(localIP)
+	}
+
+	return strings.EqualFold(upstreamHost, localHost)
 }
 
 func rewriteHTTPRequestHead(req *http.Request) ([]byte, error) {
