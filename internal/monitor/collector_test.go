@@ -173,7 +173,7 @@ func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 	}
 
 	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictAllow {
-		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule despite conflicting legacy fields", got)
+		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule", got)
 	}
 }
 

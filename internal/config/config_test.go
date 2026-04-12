@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
+func TestLoadDefaultsFromStructuredFixtureYAML(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `
 sandbox:
