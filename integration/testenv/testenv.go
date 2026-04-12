@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 type BuiltBox struct {
@@ -99,25 +101,34 @@ func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs [
 	t.Helper()
 	subnet := uniqueTestSubnet(t)
 
+	type policyRule struct {
+		Hostname string `yaml:"hostname,omitempty"`
+		CIDR     string `yaml:"cidr,omitempty"`
+		Ports    []int  `yaml:"ports"`
+	}
+	rules := make([]policyRule, 0, len(allowDomains)+len(extraAllowedCIDRs))
+	for _, domain := range allowDomains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		rules = append(rules, policyRule{Hostname: domain, Ports: []int{80, 443}})
+	}
+	for _, cidr := range extraAllowedCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		rules = append(rules, policyRule{CIDR: cidr, Ports: []int{80, 443}})
+	}
+
 	policySection := "  policy: []"
-	if len(allowDomains) > 0 || len(extraAllowedCIDRs) > 0 {
-		var b strings.Builder
-		b.WriteString("  policy:\n")
-		for _, domain := range allowDomains {
-			domain = strings.TrimSpace(domain)
-			if domain == "" {
-				continue
-			}
-			fmt.Fprintf(&b, "    - hostname: %s\n      ports: [80, 443]\n", domain)
+	if len(rules) > 0 {
+		data, err := yaml.Marshal(map[string]any{"policy": rules})
+		if err != nil {
+			t.Fatalf("yaml.Marshal(policy) error = %v", err)
 		}
-		for _, cidr := range extraAllowedCIDRs {
-			cidr = strings.TrimSpace(cidr)
-			if cidr == "" {
-				continue
-			}
-			fmt.Fprintf(&b, "    - cidr: %s\n      ports: [80, 443]\n", cidr)
-		}
-		policySection = strings.TrimRight(b.String(), "\n")
+		policySection = indentYAML(string(data), "  ")
 	}
 
 	content := fmt.Sprintf(`sandbox:
@@ -157,6 +168,18 @@ gvisor:
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 	return path
+}
+
+func indentYAML(s string, prefix string) string {
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func WriteWorkdirOverlayConfig(t *testing.T, moduleRoot string, enabled bool) string {
