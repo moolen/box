@@ -840,6 +840,15 @@ func TestRuntimeExecutorPassesBuildKitRootlessLaunchInputsToSandboxRunner(t *tes
 			}
 			return nil
 		},
+		ensureRootlessRuntimeDir: func(uid int, gid int) error {
+			if uid != 1000 {
+				t.Fatalf("ensure runtime uid = %d, want %d", uid, 1000)
+			}
+			if gid != 1000 {
+				t.Fatalf("ensure runtime gid = %d, want %d", gid, 1000)
+			}
+			return nil
+		},
 		runSandbox: func(req gvisor.RunRequest) error {
 			if !req.BuildKitEnabled {
 				t.Fatalf("BuildKitEnabled = false, want true")

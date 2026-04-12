@@ -72,7 +72,7 @@ func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver 100.96.0.1") {
+	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver "+rt.Manifest.GatewayIP) {
 		t.Fatalf("Manifest.ResolvConf = %q, want nameserver gateway IP", rt.Manifest.ResolvConf)
 	}
 	if strings.Contains(rt.Manifest.ResolvConf, "nameserver 127.0.0.1") {
@@ -90,7 +90,7 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	var dnsCalled bool
 	exec := &recordingCommandExec{}
 
-	_, err := Run(context.Background(), Request{
+	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
 		StateRoot: t.TempDir(),
 	}, Deps{
@@ -116,25 +116,30 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	if dnsReq.Mode != "monitor" {
 		t.Fatalf("DNS request mode = %q, want %q", dnsReq.Mode, "monitor")
 	}
-	if dnsReq.GatewayIP != "100.96.0.1" {
-		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, "100.96.0.1")
+	if dnsReq.GatewayIP != rt.Manifest.GatewayIP {
+		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, rt.Manifest.GatewayIP)
 	}
 
 	resources, err := netns.ResourcesForRuntimeID("runtime-monitor-b")
 	if err != nil {
 		t.Fatalf("ResourcesForRuntimeID() error = %v", err)
 	}
+	resources.SubnetCIDR = rt.Manifest.Net.SubnetCIDR
+	setupPlan, err := netns.BuildSetupPlan(resources)
+	if err != nil {
+		t.Fatalf("BuildSetupPlan() error = %v", err)
+	}
 
 	wantSetupPrefix := []string{
 		"ip netns add " + resources.NetNS,
 		"ip link add " + resources.HostVeth + " type veth peer name " + resources.GuestVeth,
 		"ip link set " + resources.GuestVeth + " netns " + resources.NetNS,
-		"ip addr add 100.96.0.1/30 dev " + resources.HostVeth,
+		"ip addr add " + setupPlan.GatewayCIDR + " dev " + resources.HostVeth,
 		"ip link set " + resources.HostVeth + " up",
 		"ip netns exec " + resources.NetNS + " ip link set lo up",
-		"ip netns exec " + resources.NetNS + " ip addr add 100.96.0.2/30 dev " + resources.GuestVeth,
+		"ip netns exec " + resources.NetNS + " ip addr add " + setupPlan.SandboxCIDR + " dev " + resources.GuestVeth,
 		"ip netns exec " + resources.NetNS + " ip link set " + resources.GuestVeth + " up",
-		"ip netns exec " + resources.NetNS + " ip route add default via 100.96.0.1 dev " + resources.GuestVeth,
+		"ip netns exec " + resources.NetNS + " ip route add default via " + setupPlan.GatewayIP + " dev " + resources.GuestVeth,
 	}
 	setupStart := slices.Index(exec.calls, wantSetupPrefix[0])
 	if setupStart == -1 {
@@ -439,7 +444,7 @@ func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver 100.96.0.1") {
+	if !strings.Contains(rt.Manifest.ResolvConf, "nameserver "+rt.Manifest.GatewayIP) {
 		t.Fatalf("Manifest.ResolvConf = %q, want gateway nameserver in enforce mode", rt.Manifest.ResolvConf)
 	}
 	if strings.Contains(rt.Manifest.ResolvConf, "nameserver 127.0.0.1") {
@@ -852,8 +857,8 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	if dnsReq.Mode != "enforce" {
 		t.Fatalf("DNS request mode = %q, want %q", dnsReq.Mode, "enforce")
 	}
-	if dnsReq.GatewayIP != "100.96.0.1" {
-		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, "100.96.0.1")
+	if dnsReq.GatewayIP != rt.Manifest.GatewayIP {
+		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, rt.Manifest.GatewayIP)
 	}
 
 	mustContainCall(t, exec.calls, "nft add set inet box_")
@@ -917,8 +922,8 @@ func TestEnforceModeStartsProxyForBuildKit(t *testing.T) {
 	if proxyReq.Config.HTTPPort != 18080 {
 		t.Fatalf("Proxy request http port = %d, want %d", proxyReq.Config.HTTPPort, 18080)
 	}
-	if proxyReq.GatewayIP != "100.96.0.1" {
-		t.Fatalf("Proxy request gateway ip = %q, want %q", proxyReq.GatewayIP, "100.96.0.1")
+	if proxyReq.GatewayIP != rt.Manifest.GatewayIP {
+		t.Fatalf("Proxy request gateway ip = %q, want %q", proxyReq.GatewayIP, rt.Manifest.GatewayIP)
 	}
 	if proxyReq.Mode != "peek" {
 		t.Fatalf("Proxy request mode = %q, want %q", proxyReq.Mode, "peek")

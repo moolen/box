@@ -30,31 +30,31 @@ import (
 )
 
 const (
-	ipTransparent       = 19
-	ipv6Transparent     = 75
-	envBuildKitdFlags   = "BUILDKITD_FLAGS"
-	envBuildKitHost     = "BUILDKIT_HOST"
+	ipTransparent         = 19
+	ipv6Transparent       = 75
+	envBuildKitdFlags     = "BUILDKITD_FLAGS"
+	envBuildKitHost       = "BUILDKIT_HOST"
 	envBuildKitHTTPProxy  = "BOX_BUILDKIT_HTTP_PROXY"
 	envBuildKitHTTPSProxy = "BOX_BUILDKIT_HTTPS_PROXY"
 	envBuildKitNoProxy    = "BOX_BUILDKIT_NO_PROXY"
 	envBuildKitHome       = "BOX_BUILDKIT_HOME"
-	buildkitPathDir     = "/box/bin"
-	envDockerEnabled    = "BOX_DOCKER_ENABLED"
-	envDockerMode       = "BOX_DOCKER_MODE"
-	envDockerUser       = "BOX_DOCKER_USER"
-	envDockerUID        = "BOX_DOCKER_UID"
-	envDockerGID        = "BOX_DOCKER_GID"
-	envDockerHome       = "BOX_DOCKER_HOME"
-	envDockerRuntimeDir = "BOX_DOCKER_RUNTIME_DIR"
-	envDockerDataRoot   = "BOX_DOCKER_DATA_ROOT"
-	envDockerConfig     = "DOCKER_CONFIG"
-	envDockerHost       = "DOCKER_HOST"
-	envDockerSocketPath = "BOX_DOCKER_SOCKET_PATH"
-	envDockerWait       = "BOX_DOCKER_WAIT_FOR_SOCKET"
-	envDockerReady      = "BOX_DOCKER_READY_TIMEOUT"
-	dockerConfigDir     = "/etc/docker"
-	defaultNoProxy      = "127.0.0.1,localhost"
-	soOriginalDst       = 80
+	buildkitPathDir       = "/box/bin"
+	envDockerEnabled      = "BOX_DOCKER_ENABLED"
+	envDockerMode         = "BOX_DOCKER_MODE"
+	envDockerUser         = "BOX_DOCKER_USER"
+	envDockerUID          = "BOX_DOCKER_UID"
+	envDockerGID          = "BOX_DOCKER_GID"
+	envDockerHome         = "BOX_DOCKER_HOME"
+	envDockerRuntimeDir   = "BOX_DOCKER_RUNTIME_DIR"
+	envDockerDataRoot     = "BOX_DOCKER_DATA_ROOT"
+	envDockerConfig       = "DOCKER_CONFIG"
+	envDockerHost         = "DOCKER_HOST"
+	envDockerSocketPath   = "BOX_DOCKER_SOCKET_PATH"
+	envDockerWait         = "BOX_DOCKER_WAIT_FOR_SOCKET"
+	envDockerReady        = "BOX_DOCKER_READY_TIMEOUT"
+	dockerConfigDir       = "/etc/docker"
+	defaultNoProxy        = "127.0.0.1,localhost"
+	soOriginalDst         = 80
 )
 
 type runtimeHandle interface {
@@ -76,6 +76,7 @@ type runtimeExecutor struct {
 	runSandbox                 func(gvisor.RunRequest) error
 	startSandboxBuildKitDaemon func(boxruntime.Manifest, int, int, config.Config) (*managedBuildKitDaemon, error)
 	stopSandboxBuildKitDaemon  func(*managedBuildKitDaemon) error
+	ensureRootlessRuntimeDir   func(int, int) error
 }
 
 func (e runtimeExecutor) Run(req runRequest) error {
@@ -130,6 +131,10 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	if stopSandboxBuildKitDaemon == nil {
 		stopSandboxBuildKitDaemon = stopManagedBuildKitDaemon
 	}
+	ensureRootlessRuntimeDirFn := e.ensureRootlessRuntimeDir
+	if ensureRootlessRuntimeDirFn == nil {
+		ensureRootlessRuntimeDirFn = ensureRootlessRuntimeDir
+	}
 
 	stderr := e.stderr
 	if stderr == nil {
@@ -154,7 +159,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		if err != nil {
 			return err
 		}
-		if err := ensureRootlessRuntimeDir(callerUID, callerGID); err != nil {
+		if err := ensureRootlessRuntimeDirFn(callerUID, callerGID); err != nil {
 			return fmt.Errorf("prepare rootless runtime dir: %w", err)
 		}
 	}
@@ -1198,7 +1203,7 @@ func runManagedBuildKit(manifest boxruntime.Manifest, repoPath string, shellComm
 		"XDG_RUNTIME_DIR="+runtimeDir,
 		"HOME="+homeDir,
 		"BUILDKIT_RUN_DIR="+runDir,
-		"BUILDKITD_FLAGS=--root " + stateDir + " --rootless --oci-worker-binary " + runcWrapperPath + " --oci-worker-rootless --oci-worker-no-process-sandbox",
+		"BUILDKITD_FLAGS=--root "+stateDir+" --rootless --oci-worker-binary "+runcWrapperPath+" --oci-worker-rootless --oci-worker-no-process-sandbox",
 		"bash",
 		"-lc",
 		buildkitShellCommand(manifest.GatewayIP, repoPath, shellCommand),
