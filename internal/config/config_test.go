@@ -42,6 +42,24 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Docker.ReadyTimeout.String() != "10s" {
 		t.Fatalf("docker.ready_timeout = %q, want %q", got.Docker.ReadyTimeout, "10s")
 	}
+	if got.Docker.ModeValue() != "rootless" {
+		t.Fatalf("docker.mode = %q, want %q", got.Docker.ModeValue(), "rootless")
+	}
+	if got.Docker.UserValue() != "box" {
+		t.Fatalf("docker.user = %q, want %q", got.Docker.UserValue(), "box")
+	}
+	if got.Docker.HomeDirValue() != "/home/box" {
+		t.Fatalf("docker.home_dir = %q, want %q", got.Docker.HomeDirValue(), "/home/box")
+	}
+	if got.Docker.RuntimeDirValue() != "/run/user/1000" {
+		t.Fatalf("docker.runtime_dir = %q, want %q", got.Docker.RuntimeDirValue(), "/run/user/1000")
+	}
+	if got.Docker.SocketPathValue() != "/run/user/1000/docker.sock" {
+		t.Fatalf("docker.socket_path = %q, want %q", got.Docker.SocketPathValue(), "/run/user/1000/docker.sock")
+	}
+	if got.Docker.DataRootValue() != "/home/box/.local/share/docker" {
+		t.Fatalf("docker.data_root = %q, want %q", got.Docker.DataRootValue(), "/home/box/.local/share/docker")
+	}
 }
 
 func TestLoadResolvesWorkdirRelativeToInvocationDir(t *testing.T) {
@@ -116,6 +134,41 @@ policy:
 	}
 }
 
+func TestLoadStructuredEgressPolicy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: enforce
+policy:
+  egress:
+    - hostname: example.com
+      transport:
+        - protocol: tcp
+          ports: [443]
+      icmp:
+        - type: 8
+          code: 0
+    - cidr: 93.184.216.0/24
+      transport:
+        - protocol: udp
+          ports: [443]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got.Policy.Egress) != 2 {
+		t.Fatalf("policy.egress len = %d, want 2", len(got.Policy.Egress))
+	}
+}
+
 func TestLoadHonorsExplicitDisabledWorkdirOverlay(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `
@@ -168,6 +221,60 @@ func TestValidateRejectsTransparentProxyMITMEvenWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEgressRuleWithHostnameAndCIDR(t *testing.T) {
+	t.Run("mutually exclusive selectors", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Policy.Egress = []EgressRule{{
+			Hostname: "example.com",
+			CIDR:     "93.184.216.0/24",
+			Transport: []TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want selector rejection")
+		}
+	})
+
+	t.Run("invalid transport protocol", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Policy.Egress = []EgressRule{{
+			Hostname: "example.com",
+			Transport: []TransportRule{{
+				Protocol: "sctp",
+				Ports:    []int{443},
+			}},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want protocol rejection")
+		}
+	})
+
+	t.Run("invalid icmp tuple", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Policy.Egress = []EgressRule{{
+			CIDR: "93.184.216.0/24",
+			ICMP: []ICMPRule{{
+				Type: 300,
+				Code: -1,
+			}},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want icmp tuple rejection")
+		}
+	})
+}
+
 func TestValidateAcceptsMonitorAndEnforceModes(t *testing.T) {
 	for _, mode := range []string{"monitor", "enforce", "MONITOR", "ENFORCE"} {
 		t.Run(mode, func(t *testing.T) {
@@ -177,6 +284,21 @@ func TestValidateAcceptsMonitorAndEnforceModes(t *testing.T) {
 				t.Fatalf("ValidateRuntime() error = %v, want nil for mode %q", err, mode)
 			}
 		})
+	}
+}
+
+func TestValidateRejectsNonRootlessDockerModeWhenEnabled(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "monitor"
+	cfg.Docker.Enabled = true
+	cfg.Docker.Mode = "rootful"
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want rejection for rootful docker mode")
+	}
+	if !strings.Contains(err.Error(), "docker.mode") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of docker.mode", err)
 	}
 }
 
