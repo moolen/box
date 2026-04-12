@@ -167,6 +167,8 @@ func TestValidateRejectsEnvoyMITMAtRuntimeBoundary(t *testing.T) {
 	cfg := Config{}
 	cfg.Network.Envoy.Enabled = true
 	cfg.Network.Envoy.Mode = "mitm"
+	cfg.Network.Envoy.HTTPPort = 18080
+	cfg.Network.Envoy.TLSPort = 18443
 
 	err := ValidateRuntime(cfg)
 	if err == nil {
@@ -606,6 +608,36 @@ func TestValidateRejectsInvalidEnvoyPorts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network.envoy.http_port") {
 		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
+	}
+}
+
+func TestValidateRejectsEnabledEnvoyWithZeroPorts(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "monitor"
+	cfg.Network.Envoy.Enabled = true
+	cfg.Network.Envoy.HTTPPort = 0
+	cfg.Network.Envoy.TLSPort = 18443
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want rejection for enabled envoy with http_port=0")
+	}
+	if !strings.Contains(err.Error(), "network.envoy.http_port") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
+	}
+
+	cfg = Config{}
+	cfg.Network.Mode = "monitor"
+	cfg.Network.Envoy.Enabled = true
+	cfg.Network.Envoy.HTTPPort = 18080
+	cfg.Network.Envoy.TLSPort = 0
+
+	err = ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want rejection for enabled envoy with tls_port=0")
+	}
+	if !strings.Contains(err.Error(), "network.envoy.tls_port") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.tls_port", err)
 	}
 }
 
