@@ -268,6 +268,46 @@ func TestValidateRejectsEgressRuleWithInvalidICMPTuple(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEgressRuleWithIPv6CIDR(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Policy.Egress = []EgressRule{{
+		CIDR: "2001:db8::/64",
+		Transport: []TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want IPv6 CIDR rejection")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "cidr") || !strings.Contains(strings.ToLower(err.Error()), "ipv4") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of ipv4 cidr validation", err)
+	}
+}
+
+func TestValidateRejectsEgressRuleWithEmptyTransportPorts(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Policy.Egress = []EgressRule{{
+		Hostname: "example.com",
+		Transport: []TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{},
+		}},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want empty transport ports rejection")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "transport") || !strings.Contains(strings.ToLower(err.Error()), "ports") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of transport ports validation", err)
+	}
+}
+
 func TestLoadHonorsExplicitDisabledWorkdirOverlay(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `

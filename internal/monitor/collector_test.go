@@ -100,6 +100,22 @@ func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
 	}
 }
 
+func TestEvaluateHostnameDeniesWhenStructuredPolicyContainsInvalidHostnameRule(t *testing.T) {
+	policy := config.PolicyConfig{
+		Egress: []config.EgressRule{{
+			Hostname: "https://bad.example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
+	}
+
+	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictDeny {
+		t.Fatalf("EvaluateHostname() = %q, want %q for invalid hostname rule", got, VerdictDeny)
+	}
+}
+
 func TestUnknownHostnameVerdictDefaultsToAllowWithoutAllowlist(t *testing.T) {
 	policy := config.PolicyConfig{}
 
@@ -158,6 +174,22 @@ func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 
 	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictAllow {
 		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule despite conflicting legacy fields", got)
+	}
+}
+
+func TestEvaluateHostnameWithCIDROnlyPolicyDefaultsToAllow(t *testing.T) {
+	policy := config.PolicyConfig{
+		Egress: []config.EgressRule{{
+			CIDR: "93.184.216.0/24",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
+	}
+
+	if got := EvaluateHostname(policy, "arbitrary.example.com"); got != VerdictAllow {
+		t.Fatalf("EvaluateHostname() = %q, want %q when hostname allowlist is empty", got, VerdictAllow)
 	}
 }
 
