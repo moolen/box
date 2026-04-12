@@ -102,10 +102,9 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 	return Spec{
 		OCIVersion: "1.0.2",
 		Process: ProcessSpec{
-			Args:         args,
-			Cwd:          cwd,
-			Env:          ensureDefaultEnv(baseProcessEnv(cfg, req.HostEnv), cfg.Sandbox.Env, req.ExtraEnv),
-			Capabilities: dockerSandboxCapabilities(cfg),
+			Args: args,
+			Cwd:  cwd,
+			Env:  ensureDefaultEnv(baseProcessEnv(cfg, req.HostEnv), cfg.Sandbox.Env, req.ExtraEnv),
 		},
 		Root: RootSpec{
 			Path:     "rootfs",
@@ -124,21 +123,6 @@ func baseProcessEnv(cfg config.Config, hostEnv []string) []string {
 		return nil
 	}
 	return append([]string(nil), hostEnv...)
-}
-
-func dockerSandboxCapabilities(cfg config.Config) *LinuxCapabilitiesSpec {
-	if !cfg.Docker.Enabled {
-		return nil
-	}
-
-	caps := []string{"CAP_SETUID", "CAP_SETGID"}
-	return &LinuxCapabilitiesSpec{
-		Bounding:    append([]string(nil), caps...),
-		Effective:   append([]string(nil), caps...),
-		Inheritable: append([]string(nil), caps...),
-		Permitted:   append([]string(nil), caps...),
-		Ambient:     append([]string(nil), caps...),
-	}
 }
 
 func buildMounts(plan rootfs.Plan) []MountSpec {
@@ -192,8 +176,6 @@ func tmpfsOptionsForPath(path string) []string {
 	switch path {
 	case "/tmp", "/var/tmp":
 		return append(options, "mode=1777")
-	case "/home/box", "/run/user/1000", "/home/box/.local/share/docker":
-		return append(options, "mode=0700")
 	default:
 		return append(options, "mode=0755")
 	}

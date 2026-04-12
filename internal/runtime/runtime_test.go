@@ -452,33 +452,6 @@ func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 	}
 }
 
-func TestBuildKitSettingsPropagateIntoRuntimeState(t *testing.T) {
-	t.Parallel()
-
-	cfg := testConfig("enforce")
-	cfg.BuildKit = config.BuildKitConfig{
-		Enabled:    true,
-		HelperPath: "/box/bin/buildctl-daemonless.sh",
-		StateDir:   "/var/cache/buildkit",
-		RunDir:     "/run/buildkit",
-	}
-
-	rt, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: t.TempDir(),
-	}, Deps{
-		Clock:    fixedClock,
-		RandomID: func() string { return "runtime-d" },
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if rt.Manifest.BuildKit != cfg.BuildKit {
-		t.Fatalf("Manifest.BuildKit = %#v, want %#v", rt.Manifest.BuildKit, cfg.BuildKit)
-	}
-}
-
 func TestRejectsMITMBeforeMutatingHostState(t *testing.T) {
 	t.Parallel()
 
@@ -870,65 +843,6 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	}
 }
 
-func TestEnforceModeStartsProxyForBuildKit(t *testing.T) {
-	t.Parallel()
-
-	cfg := testConfig("enforce")
-	cfg.BuildKit.Enabled = true
-	cfg.Policy.AllowDomains = []string{"docker.io"}
-
-	exec := &recordingCommandExec{}
-	var proxyReq ProxyStartRequest
-	var proxyCalled bool
-
-	rt, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: t.TempDir(),
-	}, Deps{
-		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-buildkit-proxy" },
-		CommandExec: exec,
-		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
-			return nil
-		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			return noopRunner{}, nil
-		},
-		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
-			proxyCalled = true
-			proxyReq = req
-			if req.AllowHostname == nil {
-				t.Fatalf("ProxyStartRequest.AllowHostname = nil, want callback")
-			}
-			if req.AllowHostname("blocked.example.com") {
-				t.Fatalf("AllowHostname(blocked.example.com) = true, want false")
-			}
-			if !req.AllowHostname("registry-1.docker.io") {
-				t.Fatalf("AllowHostname(registry-1.docker.io) = false, want true")
-			}
-			return noopRunner{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	defer func() {
-		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
-	}()
-
-	if !proxyCalled {
-		t.Fatalf("Proxy factory was not called in enforce mode for BuildKit")
-	}
-	if proxyReq.Config.HTTPPort != 18080 {
-		t.Fatalf("Proxy request http port = %d, want %d", proxyReq.Config.HTTPPort, 18080)
-	}
-	if proxyReq.GatewayIP != rt.Manifest.GatewayIP {
-		t.Fatalf("Proxy request gateway ip = %q, want %q", proxyReq.GatewayIP, rt.Manifest.GatewayIP)
-	}
-	if proxyReq.Mode != "peek" {
-		t.Fatalf("Proxy request mode = %q, want %q", proxyReq.Mode, "peek")
-	}
-}
 
 func TestEnforceAllowProxyTargetAllowsConfiguredCIDRAndBlocksOtherIPs(t *testing.T) {
 	t.Parallel()

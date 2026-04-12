@@ -185,17 +185,6 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 			"HTTP_PROXY=http://100.96.0.1:18080",
 			"HTTPS_PROXY=http://100.96.0.1:18080",
 			"NO_PROXY=127.0.0.1,localhost",
-			"BOX_DOCKER_ENABLED=1",
-			"BOX_DOCKER_MODE=rootless",
-			"BOX_DOCKER_USER=box",
-			"BOX_DOCKER_UID=1000",
-			"BOX_DOCKER_GID=1000",
-			"BOX_DOCKER_HOME=/home/box",
-			"BOX_DOCKER_RUNTIME_DIR=/run/user/1000",
-			"BOX_DOCKER_SOCKET_PATH=/run/user/1000/docker.sock",
-			"BOX_DOCKER_WAIT_FOR_SOCKET=1",
-			"BOX_DOCKER_READY_TIMEOUT=10s",
-			"DOCKER_HOST=unix:///run/user/1000/docker.sock",
 		},
 	})
 	if err != nil {
@@ -210,15 +199,6 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
-	}
-	if value := envValue(spec.Process.Env, "BOX_DOCKER_SOCKET_PATH"); value != "/run/user/1000/docker.sock" {
-		t.Fatalf("BOX_DOCKER_SOCKET_PATH = %q, want configured socket path", value)
-	}
-	if value := envValue(spec.Process.Env, "BOX_DOCKER_READY_TIMEOUT"); value != "10s" {
-		t.Fatalf("BOX_DOCKER_READY_TIMEOUT = %q, want configured timeout", value)
-	}
-	if value := envValue(spec.Process.Env, "DOCKER_HOST"); value != "unix:///run/user/1000/docker.sock" {
-		t.Fatalf("DOCKER_HOST = %q, want configured rootless docker host", value)
 	}
 }
 
@@ -307,105 +287,6 @@ func TestRunnerExecutesRunscInsideNamedNetworkNamespace(t *testing.T) {
 	wantArgs := []string{"netns", "exec", "box-deadbeef", "runsc", "--ignore-cgroups", "run", "--bundle", "/tmp/box-bundle", "box-123"}
 	if !reflect.DeepEqual(fake.args, wantArgs) {
 		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
-	}
-}
-
-func TestRunnerAddsDockerNetworkingFlagsWhenDockerEnabled(t *testing.T) {
-	fake := &fakeCommandRunner{}
-	runner := Runner{
-		Command: fake,
-	}
-
-	err := runner.Run(RunRequest{
-		BundleDir:     "/tmp/box-bundle",
-		ContainerID:   "box-123",
-		DockerEnabled: true,
-	})
-	if err != nil {
-		t.Fatalf("Run() error: %v", err)
-	}
-
-	wantArgs := []string{
-		"--ignore-cgroups",
-		"--net-raw",
-		"--allow-packet-socket-write",
-		"run",
-		"--bundle",
-		"/tmp/box-bundle",
-		"box-123",
-	}
-	if !reflect.DeepEqual(fake.args, wantArgs) {
-		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
-	}
-}
-
-func TestRunnerKeepsBuildKitSandboxInsideNamedNetworkNamespace(t *testing.T) {
-	fake := &fakeCommandRunner{}
-	runner := Runner{
-		Command: fake,
-	}
-
-	err := runner.Run(RunRequest{
-		BundleDir:       "/tmp/box-bundle",
-		ContainerID:     "box-123",
-		NetNS:           "box-deadbeef",
-		BuildKitEnabled: true,
-		CallerUID:       1000,
-		CallerGID:       1000,
-	})
-	if err != nil {
-		t.Fatalf("Run() error: %v", err)
-	}
-
-	if fake.name != "ip" {
-		t.Fatalf("command name = %q, want %q", fake.name, "ip")
-	}
-	wantArgs := []string{
-		"netns",
-		"exec",
-		"box-deadbeef",
-		"runsc",
-		"--ignore-cgroups",
-		"run",
-		"--bundle",
-		"/tmp/box-bundle",
-		"box-123",
-	}
-	if !reflect.DeepEqual(fake.args, wantArgs) {
-		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
-	}
-}
-
-func TestBuildSandboxSpecAddsOnlyMinimalDockerTransitionCapabilities(t *testing.T) {
-	cfg := config.Config{
-		Sandbox: config.SandboxConfig{
-			CommandShell: "/bin/bash -lc",
-		},
-		Docker: config.DockerConfig{
-			Enabled: true,
-		},
-	}
-
-	spec, err := BuildSandboxSpec(BuildSpecRequest{
-		Config:  cfg,
-		Workdir: "/workspace",
-		Payload: "docker version",
-	})
-	if err != nil {
-		t.Fatalf("BuildSandboxSpec() error: %v", err)
-	}
-	if spec.Process.Capabilities == nil {
-		t.Fatal("Process.Capabilities = nil, want minimal transition capabilities")
-	}
-	for _, capability := range []string{"CAP_SETUID", "CAP_SETGID"} {
-		if !containsCapability(spec.Process.Capabilities.Bounding, capability) {
-			t.Fatalf("Bounding capabilities = %#v, want %q", spec.Process.Capabilities.Bounding, capability)
-		}
-	}
-	for _, capability := range []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN", "CAP_NET_RAW"} {
-		if containsCapability(spec.Process.Capabilities.Bounding, capability) {
-			t.Fatalf("Bounding capabilities = %#v, do not want broad docker capability %q", spec.Process.Capabilities.Bounding, capability)
-		}
 	}
 }
 

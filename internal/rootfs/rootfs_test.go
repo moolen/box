@@ -38,12 +38,9 @@ func TestHostOverlayPlanIncludesRecoveredReadonlyBinds(t *testing.T) {
 
 func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:       "host-overlay",
-		RepoPath:         "/home/user/repo",
-		Workdir:          "/workspace",
-		BuildKitEnabled:  true,
-		BuildKitStateDir: "/var/cache/buildkit",
-		BuildKitRunDir:   "/run/buildkit",
+		RootfsMode: "host-overlay",
+		RepoPath:   "/home/user/repo",
+		Workdir:    "/workspace",
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan() error: %v", err)
@@ -56,7 +53,7 @@ func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T)
 		}
 	}
 
-	wantWritableDirs := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache", "/var/cache/buildkit", "/run/buildkit"}
+	wantWritableDirs := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache"}
 	for _, target := range wantWritableDirs {
 		if !slices.Contains(plan.WritableDirs, target) {
 			t.Fatalf("WritableDirs missing %q; got %#v", target, plan.WritableDirs)
@@ -130,72 +127,6 @@ func TestGeneratedEtcFilesUseGatewayDNSInEnforceMode(t *testing.T) {
 	}
 
 	t.Fatalf("generated resolv.conf missing from plan: %#v", plan.GeneratedFiles)
-}
-
-func TestBuildPlanStagesBuildKitDaemonlessHelper(t *testing.T) {
-	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:      "host-overlay",
-		BuildKitEnabled: true,
-		BuildKitHelper:  "/box/bin/buildctl-daemonless.sh",
-		BuildKitRunDir:  "/run/buildkit",
-	})
-	if err != nil {
-		t.Fatalf("BuildPlan() error: %v", err)
-	}
-
-	var helper GeneratedFile
-	var client GeneratedFile
-	var found bool
-	var foundClient bool
-	for _, file := range plan.GeneratedFiles {
-		if file.Path == "/box/bin/buildctl-daemonless.sh" {
-			helper = file
-			found = true
-		}
-		if file.Path == "/box/bin/buildctl" {
-			client = file
-			foundClient = true
-		}
-	}
-	if !found {
-		t.Fatalf("generated buildkit helper missing; files=%#v", plan.GeneratedFiles)
-	}
-	if !foundClient {
-		t.Fatalf("generated buildkit client wrapper missing; files=%#v", plan.GeneratedFiles)
-	}
-	if helper.Mode != 0o755 {
-		t.Fatalf("helper mode = %#o, want %#o", helper.Mode, 0o755)
-	}
-	if !strings.Contains(helper.Content, `if [ -n "${BUILDKIT_HOST:-}" ]`) {
-		t.Fatalf("helper content = %q, want host daemon shortcut", helper.Content)
-	}
-	if !strings.Contains(helper.Content, "buildctl --addr=\"$BUILDKIT_HOST\"") {
-		t.Fatalf("helper content = %q, want host socket client invocation", helper.Content)
-	}
-	if !strings.Contains(client.Content, "set -- --addr=\"$BUILDKIT_HOST\" \"$@\"") {
-		t.Fatalf("client wrapper content = %q, want buildctl host socket setup", client.Content)
-	}
-	if !strings.Contains(client.Content, `BOX_BUILDKIT_HTTP_PROXY`) {
-		t.Fatalf("client wrapper content = %q, want buildkit-specific proxy env support", client.Content)
-	}
-	if !strings.Contains(client.Content, `build-arg:HTTP_PROXY=$BOX_BUILDKIT_HTTP_PROXY`) {
-		t.Fatalf("client wrapper content = %q, want build proxy auto-injection", client.Content)
-	}
-}
-
-func TestBuildPlanDoesNotGenerateDockerDaemonFilesWhenBuildKitEnabled(t *testing.T) {
-	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:      "host-overlay",
-		BuildKitEnabled: true,
-	})
-	if err != nil {
-		t.Fatalf("BuildPlan() error: %v", err)
-	}
-	for _, file := range plan.GeneratedFiles {
-		if strings.HasPrefix(file.Path, "/etc/docker/") {
-			t.Fatalf("generated docker file %q present in buildkit mode; files=%#v", file.Path, plan.GeneratedFiles)
-		}
-	}
 }
 
 func TestResolveInitShimCopiesSiblingBinaryIntoBundle(t *testing.T) {

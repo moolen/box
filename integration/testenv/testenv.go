@@ -95,61 +95,6 @@ func RequireAnyCommand(t *testing.T, names ...string) {
 	t.Skipf("none of the required commands are available: %s", strings.Join(names, ", "))
 }
 
-func WriteBuildKitEnabledConfig(t *testing.T, moduleRoot string) string {
-	t.Helper()
-	_ = moduleRoot
-	subnet := uniqueTestSubnet(t)
-
-content := fmt.Sprintf(`sandbox:
-  rootfs: host-overlay
-  rootfs_source: ""
-  hostname: box
-  workdir: .
-  workdir_overlay: false
-  env:
-    - TERM=xterm
-  command_shell: /bin/bash -lc
-network:
-  mode: monitor
-  subnet: %s
-  dns:
-    bind_addr: auto
-    upstream:
-      - 1.1.1.1:53
-      - 8.8.8.8:53
-  transparent_proxy:
-    enabled: true
-    mode: peek
-    http_port: 18080
-    tls_port: 18443
-policy:
-  allow_domains: []
-  deny_domains: []
-  extra_allowed_cidrs: []
-mounts:
-  extra_ro: []
-  extra_rw: []
-buildkit:
-  enabled: true
-  helper_path: /box/bin/buildctl-daemonless.sh
-  state_dir: /var/cache/buildkit
-  run_dir: /run/buildkit
-  daemonless: true
-docker:
-  enabled: false
-gvisor:
-  platform: systrap
-  network: sandbox
-  debug: false
-`, subnet)
-
-	path := filepath.Join(t.TempDir(), "box-buildkit.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", path, err)
-	}
-	return path
-}
-
 func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
 	t.Helper()
 	subnet := uniqueTestSubnet(t)
@@ -185,14 +130,6 @@ policy:
 mounts:
   extra_ro: []
   extra_rw: []
-buildkit:
-  enabled: true
-  helper_path: /box/bin/buildctl-daemonless.sh
-  state_dir: /var/cache/buildkit
-  run_dir: /run/buildkit
-  daemonless: true
-docker:
-  enabled: false
 gvisor:
   platform: systrap
   network: sandbox
@@ -200,62 +137,6 @@ gvisor:
 `, subnet, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
 
 	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", path, err)
-	}
-	return path
-}
-
-func WriteEnforceBuildKitProxyConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
-	t.Helper()
-	subnet := uniqueTestSubnet(t)
-
-content := fmt.Sprintf(`sandbox:
-  rootfs: host-overlay
-  rootfs_source: ""
-  hostname: box
-  workdir: .
-  workdir_overlay: false
-  env:
-    - TERM=xterm
-  command_shell: /bin/bash -lc
-network:
-  mode: enforce
-  subnet: %s
-  dns:
-    bind_addr: auto
-    upstream:
-      - 1.1.1.1:53
-      - 8.8.8.8:53
-  transparent_proxy:
-    enabled: true
-    mode: peek
-    http_port: 18080
-    tls_port: 18443
-policy:
-  allow_domains:
-%s
-  deny_domains: []
-  extra_allowed_cidrs:
-%s
-mounts:
-  extra_ro: []
-  extra_rw: []
-buildkit:
-  enabled: true
-  helper_path: /box/bin/buildctl-daemonless.sh
-  state_dir: /var/cache/buildkit
-  run_dir: /run/buildkit
-  daemonless: true
-docker:
-  enabled: false
-gvisor:
-  platform: systrap
-  network: sandbox
-  debug: false
-`, subnet, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
-
-	path := filepath.Join(t.TempDir(), "box-enforce-buildkit-proxy.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
@@ -350,10 +231,6 @@ mounts:
   extra_ro:
     - %s
   extra_rw: []
-buildkit:
-  enabled: false
-docker:
-  enabled: false
 gvisor:
   platform: systrap
   network: sandbox

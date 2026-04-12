@@ -103,8 +103,6 @@ type Manifest struct {
 	NetworkMode        string                `json:"network_mode"`
 	GatewayIP          string                `json:"gateway_ip"`
 	ResolvConf         string                `json:"resolv_conf"`
-	BuildKit           config.BuildKitConfig `json:"buildkit"`
-	Docker             config.DockerConfig   `json:"docker"`
 	Net                NetResources          `json:"net"`
 	StartedRunners     []string              `json:"started_runners"`
 	TeardownCmds       []string              `json:"teardown_cmds"`
@@ -193,26 +191,14 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	runtimeCfg.Network.Subnet = netResources.SubnetCIDR
 
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
-		RootfsMode:       runtimeCfg.Sandbox.Rootfs,
-		RepoPath:         "",
-		Workdir:          runtimeCfg.Sandbox.Workdir,
-		NetworkMode:      network,
-		GatewayIP:        gatewayIP,
-		SandboxHostn:     runtimeCfg.Sandbox.Hostname,
-		BuildKitEnabled:  runtimeCfg.BuildKit.Enabled,
-		BuildKitHelper:   runtimeCfg.BuildKit.HelperPathValue(),
-		BuildKitStateDir: runtimeCfg.BuildKit.StateDirValue(),
-		BuildKitRunDir:   runtimeCfg.BuildKit.RunDirValue(),
-		DockerEnabled:    runtimeCfg.Docker.Enabled,
-		DockerUser:       runtimeCfg.Docker.UserValue(),
-		DockerUID:        runtimeCfg.Docker.UIDValue(),
-		DockerGID:        runtimeCfg.Docker.GIDValue(),
-		DockerHomeDir:    runtimeCfg.Docker.HomeDirValue(),
-		DockerRuntimeDir: runtimeCfg.Docker.RuntimeDirValue(),
-		DockerDataRoot:   runtimeCfg.Docker.DataRootValue(),
-		DockerSocketPath: runtimeCfg.Docker.SocketPathValue(),
-		ExtraRO:          runtimeCfg.Mounts.ExtraRO,
-		ExtraRW:          runtimeCfg.Mounts.ExtraRW,
+		RootfsMode:   runtimeCfg.Sandbox.Rootfs,
+		RepoPath:     "",
+		Workdir:      runtimeCfg.Sandbox.Workdir,
+		NetworkMode:  network,
+		GatewayIP:    gatewayIP,
+		SandboxHostn: runtimeCfg.Sandbox.Hostname,
+		ExtraRO:      runtimeCfg.Mounts.ExtraRO,
+		ExtraRW:      runtimeCfg.Mounts.ExtraRW,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build rootfs plan: %w", err)
@@ -227,10 +213,8 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		EventLogPath:   eventLogPath,
 		NetworkMode:    network,
 		GatewayIP:      gatewayIP,
-		ResolvConf:     generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
-		BuildKit:       req.Config.BuildKit,
-		Docker:         req.Config.Docker,
-		Net:            fromNetnsResources(netResources),
+		ResolvConf: generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
+		Net:        fromNetnsResources(netResources),
 		StartedRunners: nil,
 		TeardownCmds:   nil,
 		ManagedPaths: []ManagedPath{
@@ -429,23 +413,6 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		if dnsRunner != nil {
 			rt.runners["dns"] = dnsRunner
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "dns")
-		}
-	}
-
-	if usesEnforceBuildProxy(cfg) && deps.Proxy != nil {
-		allowProxyTarget := rt.enforceAllowProxyTarget(cfg.Policy)
-		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			GatewayIP:     rt.Manifest.GatewayIP,
-			Mode:          cfg.Network.TransparentProxy.Mode,
-			Config:        cfg.Network.TransparentProxy,
-			AllowHostname: allowProxyTarget,
-		})
-		if err != nil {
-			return fmt.Errorf("start proxy: %w", err)
-		}
-		if proxyRunner != nil {
-			rt.runners["proxy"] = proxyRunner
-			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
 		}
 	}
 
@@ -748,16 +715,6 @@ func resolveGatewayDNSPort(bindAddr, gatewayIP string) (int, error) {
 func usesManagedNetworkPolicy(mode string) bool {
 	mode = strings.TrimSpace(mode)
 	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
-}
-
-func usesEnforceBuildProxy(cfg config.Config) bool {
-	if !strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") || !cfg.Network.TransparentProxy.Enabled {
-		return false
-	}
-	if cfg.BuildKit.Enabled {
-		return true
-	}
-	return cfg.Docker.Enabled && cfg.Docker.HostNetworkNestedContainers
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {

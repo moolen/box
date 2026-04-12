@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLoadBuildKitDefaults(t *testing.T) {
+func TestLoadRejectsBuildKitSection(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `
 sandbox:
@@ -22,24 +22,12 @@ buildkit:
 		t.Fatalf("write config: %v", err)
 	}
 
-	got, err := Load(cfgPath, t.TempDir())
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for buildkit section")
 	}
-	if !got.BuildKit.Enabled {
-		t.Fatal("buildkit.enabled = false, want true")
-	}
-	if got.BuildKit.HelperPathValue() != "/box/bin/buildctl-daemonless.sh" {
-		t.Fatalf("buildkit.helper_path = %q, want %q", got.BuildKit.HelperPathValue(), "/box/bin/buildctl-daemonless.sh")
-	}
-	if got.BuildKit.StateDirValue() != "/var/cache/buildkit" {
-		t.Fatalf("buildkit.state_dir = %q, want %q", got.BuildKit.StateDirValue(), "/var/cache/buildkit")
-	}
-	if got.BuildKit.RunDirValue() != "/run/buildkit" {
-		t.Fatalf("buildkit.run_dir = %q, want %q", got.BuildKit.RunDirValue(), "/run/buildkit")
-	}
-	if !got.BuildKit.DaemonlessValue() {
-		t.Fatal("buildkit.daemonless = false, want true by default")
+	if !strings.Contains(err.Error(), "buildkit") {
+		t.Fatalf("Load() error = %q, want mention of buildkit", err)
 	}
 }
 
@@ -74,12 +62,6 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	}
 	if got.Network.TransparentProxy.Mode != "peek" {
 		t.Fatalf("transparent_proxy.mode = %q, want %q", got.Network.TransparentProxy.Mode, "peek")
-	}
-	if got.BuildKit.HelperPathValue() != "/box/bin/buildctl-daemonless.sh" {
-		t.Fatalf("buildkit.helper_path = %q, want %q", got.BuildKit.HelperPathValue(), "/box/bin/buildctl-daemonless.sh")
-	}
-	if got.BuildKit.StateDirValue() != "/var/cache/buildkit" {
-		t.Fatalf("buildkit.state_dir = %q, want %q", got.BuildKit.StateDirValue(), "/var/cache/buildkit")
 	}
 }
 
@@ -228,16 +210,27 @@ func TestValidateRejectsTransparentProxyMITMAtRuntimeBoundary(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsDockerDaemonMode(t *testing.T) {
-	cfg := Config{}
-	cfg.Docker.Enabled = true
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for docker.enabled=true")
+func TestLoadRejectsDockerSection(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+docker:
+  enabled: true
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
-	if !strings.Contains(err.Error(), "docker.enabled") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of docker.enabled", err)
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for docker section")
+	}
+	if !strings.Contains(err.Error(), "docker") {
+		t.Fatalf("Load() error = %q, want mention of docker", err)
 	}
 }
 

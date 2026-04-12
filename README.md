@@ -48,25 +48,16 @@ Integration tests cover:
 - writable sandbox workdir
 - isolation checks for mounts and sandbox privileges
 - enforce-mode blocked DNS resolution
-- rootless BuildKit Dockerfile builds
-- enforce-mode BuildKit multi-stage builds and blocked remote fetches on Linux hosts with
-  `runsc`, `rootlesskit`, `newuidmap`, `newgidmap`, `buildctl`, `buildkitd`, `nsenter`, and
-  `setpriv` available
-- enforce-mode registry-backed BuildKit builds that are allowed or denied by hostname policy
-
-When `buildkit.enabled: true`, `box` launches `runsc` rootlessly through `rootlesskit` after
-joining the managed sandbox network namespace for normal sandbox execution, but Dockerfile builds
-run through a direct rootless BuildKit launcher inside that same managed network namespace so
-enforce-mode nftables policy still applies. Docker daemon mode is not supported.
+- monitor-mode traffic visibility for networked commands
+- enforce-mode allowed and denied egress behavior for ordinary sandbox commands
 
 ## Repository Automation
 
 GitHub Actions automation is wired for the `main` branch:
 
 - CI runs on pull requests targeting `main` and on pushes to `main`
-- CI installs missing Linux integration-test host tooling as needed, reusing preinstalled
-  Docker/daemon when available, and installs a pinned `runsc` release with checksum verification
-  before running `go test ./... -count=1` and `make build`
+- CI installs missing Linux integration-test host tooling as needed and installs a pinned `runsc`
+  release with checksum verification before running `go test ./... -count=1` and `make build`
 - release automation runs on pushes to `main` and creates one deterministic commit-based tag
   per commit in the format `v0.0.0-<commit-timestamp>-<short-sha>`
 - rerunning the release workflow reuses the existing tag and updates the existing GitHub Release

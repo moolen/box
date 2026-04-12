@@ -57,9 +57,6 @@ func ValidateRuntime(cfg Config) error {
 	if strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
 		return errors.New("network.transparent_proxy.mode=mitm is not supported by runtime yet")
 	}
-	if cfg.Docker.Enabled {
-		return errors.New("docker.enabled=true is unsupported; use buildkit instead")
-	}
 	for i, rule := range cfg.Policy.Egress {
 		if err := validateEgressRule(rule); err != nil {
 			return fmt.Errorf("policy.egress[%d]: %w", i, err)

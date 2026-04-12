@@ -347,7 +347,7 @@ func TestForwarderReturnsEmptySuccessForAllowedAAAAInEnforceMode(t *testing.T) {
 	upstreamCalls := 0
 	upstreamAddr, upstreamShutdown := startFakeUpstream(t, func(query []byte) []byte {
 		upstreamCalls++
-		return buildDNSAResponse(t, query, "registry-1.docker.io", []string{"93.184.216.34"})
+		return buildDNSAResponse(t, query, "allowed.example", []string{"93.184.216.34"})
 	})
 	defer upstreamShutdown()
 
@@ -358,7 +358,7 @@ func TestForwarderReturnsEmptySuccessForAllowedAAAAInEnforceMode(t *testing.T) {
 		ListenAddr: "127.0.0.1:0",
 		Upstreams:  []string{upstreamAddr},
 		AllowQuery: func(hostname string) bool {
-			return hostname == "registry-1.docker.io"
+			return hostname == "allowed.example"
 		},
 	}, Deps{
 		Mode:      "enforce",
@@ -375,7 +375,7 @@ func TestForwarderReturnsEmptySuccessForAllowedAAAAInEnforceMode(t *testing.T) {
 	}
 	defer client.Close()
 
-	query := buildDNSQueryWithType(t, []string{"registry-1.docker.io"}, 28)
+	query := buildDNSQueryWithType(t, []string{"allowed.example"}, 28)
 	if _, err := client.Write(query); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}

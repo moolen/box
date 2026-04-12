@@ -77,20 +77,6 @@ mounts:
   extra_ro: []
   extra_rw: []
 
-buildkit:
-  # Opt in when the sandbox should support daemonless Dockerfile builds.
-  enabled: false
-
-  # Helper script staged into the sandbox rootfs.
-  helper_path: /box/bin/buildctl-daemonless.sh
-
-  # Writable BuildKit state and runtime directories inside the sandbox.
-  state_dir: /var/cache/buildkit
-  run_dir: /run/buildkit
-
-  # Use the staged daemonless helper rather than a long-lived daemon.
-  daemonless: true
-
 gvisor:
   # gVisor platform passed to `runsc`.
   platform: systrap
