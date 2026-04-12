@@ -37,8 +37,8 @@ network:
   # Use `enforce` for DNS-gated egress controls.
   mode: monitor
 
-  # Per-sandbox point-to-point subnet used for the host veth and sandbox NIC.
-  subnet: 100.96.0.0/30
+  # IPv4 pool that `box` allocates per-sandbox /30 point-to-point links from.
+  subnet: 100.96.0.0/24
 
   dns:
     # `auto` binds port 53 on the sandbox gateway IP in managed network modes.
@@ -77,24 +77,19 @@ mounts:
   extra_ro: []
   extra_rw: []
 
-docker:
-  # Opt in when the sandbox should start `dockerd` before the payload command.
+buildkit:
+  # Opt in when the sandbox should support daemonless Dockerfile builds.
   enabled: false
 
-  # Private Docker state inside the sandbox rootfs.
-  data_root: /var/lib/docker
+  # Helper script staged into the sandbox rootfs.
+  helper_path: /box/bin/buildctl-daemonless.sh
 
-  # Unix socket exposed inside the sandbox.
-  socket_path: /var/run/docker.sock
+  # Writable BuildKit state and runtime directories inside the sandbox.
+  state_dir: /var/cache/buildkit
+  run_dir: /run/buildkit
 
-  # Wait for the socket to accept connections before running the user command.
-  wait_for_socket: true
-
-  # Timeout used when waiting for dockerd readiness.
-  ready_timeout: 10s
-
-  # Route nested Docker `--network=host` traffic through the host-process proxy in both modes.
-  host_network_nested_containers: true
+  # Use the staged daemonless helper rather than a long-lived daemon.
+  daemonless: true
 
 gvisor:
   # gVisor platform passed to `runsc`.

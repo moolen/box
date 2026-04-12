@@ -131,7 +131,7 @@ func dockerSandboxCapabilities(cfg config.Config) *LinuxCapabilitiesSpec {
 		return nil
 	}
 
-	caps := append([]string(nil), dockerSandboxCapabilitySet...)
+	caps := []string{"CAP_SETUID", "CAP_SETGID"}
 	return &LinuxCapabilitiesSpec{
 		Bounding:    append([]string(nil), caps...),
 		Effective:   append([]string(nil), caps...),
@@ -139,26 +139,6 @@ func dockerSandboxCapabilities(cfg config.Config) *LinuxCapabilitiesSpec {
 		Permitted:   append([]string(nil), caps...),
 		Ambient:     append([]string(nil), caps...),
 	}
-}
-
-var dockerSandboxCapabilitySet = []string{
-	"CAP_AUDIT_WRITE",
-	"CAP_CHOWN",
-	"CAP_DAC_OVERRIDE",
-	"CAP_FOWNER",
-	"CAP_FSETID",
-	"CAP_KILL",
-	"CAP_MKNOD",
-	"CAP_NET_BIND_SERVICE",
-	"CAP_NET_ADMIN",
-	"CAP_NET_RAW",
-	"CAP_SETFCAP",
-	"CAP_SETGID",
-	"CAP_SETPCAP",
-	"CAP_SETUID",
-	"CAP_SYS_ADMIN",
-	"CAP_SYS_CHROOT",
-	"CAP_SYS_PTRACE",
 }
 
 func buildMounts(plan rootfs.Plan) []MountSpec {
@@ -179,11 +159,15 @@ func buildMounts(plan rootfs.Plan) []MountSpec {
 		},
 	}
 	for _, dir := range plan.WritableDirs {
+		options := tmpfsOptionsForPath(dir)
+		if owner, ok := plan.WritableOwners[dir]; ok && owner.UID > 0 && owner.GID > 0 {
+			options = append(options, fmt.Sprintf("uid=%d", owner.UID), fmt.Sprintf("gid=%d", owner.GID))
+		}
 		mounts = append(mounts, MountSpec{
 			Destination: dir,
 			Type:        "tmpfs",
 			Source:      "tmpfs",
-			Options:     tmpfsOptionsForPath(dir),
+			Options:     options,
 		})
 	}
 	for _, bind := range plan.Binds {
@@ -208,6 +192,8 @@ func tmpfsOptionsForPath(path string) []string {
 	switch path {
 	case "/tmp", "/var/tmp":
 		return append(options, "mode=1777")
+	case "/home/box", "/run/user/1000", "/home/box/.local/share/docker":
+		return append(options, "mode=0700")
 	default:
 		return append(options, "mode=0755")
 	}
@@ -220,11 +206,12 @@ func buildNamespaces(networkNamespacePath string) []LinuxNamespace {
 		{Type: "uts"},
 		{Type: "mount"},
 	}
-	network := LinuxNamespace{Type: "network"}
 	if strings.TrimSpace(networkNamespacePath) != "" {
-		network.Path = strings.TrimSpace(networkNamespacePath)
+		namespaces = append(namespaces, LinuxNamespace{
+			Type: "network",
+			Path: strings.TrimSpace(networkNamespacePath),
+		})
 	}
-	namespaces = append(namespaces, network)
 	return namespaces
 }
 

@@ -8,10 +8,13 @@ import (
 )
 
 type RunRequest struct {
-	BundleDir     string
-	ContainerID   string
-	NetNS         string
-	DockerEnabled bool
+	BundleDir       string
+	ContainerID     string
+	NetNS           string
+	DockerEnabled   bool
+	BuildKitEnabled bool
+	CallerUID       int
+	CallerGID       int
 }
 
 type CommandRunner interface {
@@ -52,6 +55,17 @@ func (r Runner) Run(req RunRequest) error {
 		return command.Run("ip", ipArgs...)
 	}
 	return command.Run(binary, args...)
+}
+
+func netNSPath(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(name, "/") {
+		return name
+	}
+	return "/run/netns/" + name
 }
 
 type ExecCommandRunner struct{}

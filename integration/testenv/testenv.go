@@ -3,6 +3,7 @@ package testenv
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,26 +84,66 @@ func RequireCommands(t *testing.T, names ...string) {
 	}
 }
 
-func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
+func RequireAnyCommand(t *testing.T, names ...string) {
 	t.Helper()
 
-	sourcePath := filepath.Join(moduleRoot, "box.yaml")
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
+	for _, name := range names {
+		if _, err := exec.LookPath(name); err == nil {
+			return
+		}
 	}
+	t.Skipf("none of the required commands are available: %s", strings.Join(names, ", "))
+}
 
-	content := string(data)
-	switch {
-	case strings.Contains(content, "enabled: false"):
-		content = strings.Replace(content, "enabled: false", "enabled: true", 1)
-	case strings.Contains(content, "enabled: true"):
-		// Already enabled in the caller's working tree. Leave it as-is.
-	default:
-		t.Fatalf("config template missing docker enabled setting")
-	}
+func WriteBuildKitEnabledConfig(t *testing.T, moduleRoot string) string {
+	t.Helper()
+	_ = moduleRoot
+	subnet := uniqueTestSubnet(t)
 
-	path := filepath.Join(t.TempDir(), "box-docker.yaml")
+content := fmt.Sprintf(`sandbox:
+  rootfs: host-overlay
+  rootfs_source: ""
+  hostname: box
+  workdir: .
+  workdir_overlay: false
+  env:
+    - TERM=xterm
+  command_shell: /bin/bash -lc
+network:
+  mode: monitor
+  subnet: %s
+  dns:
+    bind_addr: auto
+    upstream:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  transparent_proxy:
+    enabled: true
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+policy:
+  allow_domains: []
+  deny_domains: []
+  extra_allowed_cidrs: []
+mounts:
+  extra_ro: []
+  extra_rw: []
+buildkit:
+  enabled: true
+  helper_path: /box/bin/buildctl-daemonless.sh
+  state_dir: /var/cache/buildkit
+  run_dir: /run/buildkit
+  daemonless: true
+docker:
+  enabled: false
+gvisor:
+  platform: systrap
+  network: sandbox
+  debug: false
+`, subnet)
+
+	path := filepath.Join(t.TempDir(), "box-buildkit.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
@@ -111,25 +152,27 @@ func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
 
 func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
 	t.Helper()
+	subnet := uniqueTestSubnet(t)
 
-	content := fmt.Sprintf(`sandbox:
+content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
   rootfs_source: ""
   hostname: box
   workdir: .
+  workdir_overlay: false
   env:
     - TERM=xterm
   command_shell: /bin/bash -lc
 network:
   mode: enforce
-  subnet: 100.96.0.0/30
+  subnet: %s
   dns:
     bind_addr: auto
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
   transparent_proxy:
-    enabled: false
+    enabled: true
     mode: peek
     http_port: 18080
     tls_port: 18443
@@ -142,20 +185,77 @@ policy:
 mounts:
   extra_ro: []
   extra_rw: []
-docker:
+buildkit:
   enabled: true
-  data_root: /var/lib/docker
-  socket_path: /var/run/docker.sock
-  wait_for_socket: true
-  ready_timeout: 30s
-  host_network_nested_containers: true
+  helper_path: /box/bin/buildctl-daemonless.sh
+  state_dir: /var/cache/buildkit
+  run_dir: /run/buildkit
+  daemonless: true
+docker:
+  enabled: false
 gvisor:
   platform: systrap
   network: sandbox
   debug: false
-`, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
+`, subnet, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
 
 	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func WriteEnforceBuildKitProxyConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
+	t.Helper()
+	subnet := uniqueTestSubnet(t)
+
+content := fmt.Sprintf(`sandbox:
+  rootfs: host-overlay
+  rootfs_source: ""
+  hostname: box
+  workdir: .
+  workdir_overlay: false
+  env:
+    - TERM=xterm
+  command_shell: /bin/bash -lc
+network:
+  mode: enforce
+  subnet: %s
+  dns:
+    bind_addr: auto
+    upstream:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  transparent_proxy:
+    enabled: true
+    mode: peek
+    http_port: 18080
+    tls_port: 18443
+policy:
+  allow_domains:
+%s
+  deny_domains: []
+  extra_allowed_cidrs:
+%s
+mounts:
+  extra_ro: []
+  extra_rw: []
+buildkit:
+  enabled: true
+  helper_path: /box/bin/buildctl-daemonless.sh
+  state_dir: /var/cache/buildkit
+  run_dir: /run/buildkit
+  daemonless: true
+docker:
+  enabled: false
+gvisor:
+  platform: systrap
+  network: sandbox
+  debug: false
+`, subnet, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
+
+	path := filepath.Join(t.TempDir(), "box-enforce-buildkit-proxy.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
@@ -211,6 +311,7 @@ func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string
 	if hostPath == "" {
 		t.Fatal("hostPath is empty")
 	}
+	subnet := uniqueTestSubnet(t)
 
 	content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
@@ -230,7 +331,7 @@ func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string
   command_shell: /bin/bash -lc
 network:
   mode: monitor
-  subnet: 100.96.0.0/30
+  subnet: %s
   dns:
     bind_addr: auto
     upstream:
@@ -249,18 +350,15 @@ mounts:
   extra_ro:
     - %s
   extra_rw: []
+buildkit:
+  enabled: false
 docker:
   enabled: false
-  data_root: /var/lib/docker
-  socket_path: /var/run/docker.sock
-  wait_for_socket: true
-  ready_timeout: 10s
-  host_network_nested_containers: true
 gvisor:
   platform: systrap
   network: sandbox
   debug: false
-`, hostPath, hostBinDir)
+`, hostPath, subnet, hostBinDir)
 
 	path := filepath.Join(t.TempDir(), "box-opencode-monitor.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -275,6 +373,15 @@ func buildPackage(pkgPath, output string) error {
 		return err
 	}
 	return buildPackageAt(moduleRoot, pkgPath, output)
+}
+
+func uniqueTestSubnet(t *testing.T) string {
+	t.Helper()
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(t.Name()))
+	thirdOctet := 1 + int(hasher.Sum32()%250)
+	return fmt.Sprintf("100.96.%d.0/24", thirdOctet)
 }
 
 func buildPackageAt(moduleRoot, pkgPath, output string) error {

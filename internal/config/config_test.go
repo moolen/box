@@ -7,6 +7,42 @@ import (
 	"testing"
 )
 
+func TestLoadBuildKitDefaults(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+buildkit:
+  enabled: true
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !got.BuildKit.Enabled {
+		t.Fatal("buildkit.enabled = false, want true")
+	}
+	if got.BuildKit.HelperPathValue() != "/box/bin/buildctl-daemonless.sh" {
+		t.Fatalf("buildkit.helper_path = %q, want %q", got.BuildKit.HelperPathValue(), "/box/bin/buildctl-daemonless.sh")
+	}
+	if got.BuildKit.StateDirValue() != "/var/cache/buildkit" {
+		t.Fatalf("buildkit.state_dir = %q, want %q", got.BuildKit.StateDirValue(), "/var/cache/buildkit")
+	}
+	if got.BuildKit.RunDirValue() != "/run/buildkit" {
+		t.Fatalf("buildkit.run_dir = %q, want %q", got.BuildKit.RunDirValue(), "/run/buildkit")
+	}
+	if !got.BuildKit.DaemonlessValue() {
+		t.Fatal("buildkit.daemonless = false, want true by default")
+	}
+}
+
 func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -30,8 +66,8 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if !got.Sandbox.WorkdirOverlayEnabled() {
 		t.Fatalf("sandbox.workdir_overlay = %v, want enabled by default", got.Sandbox.WorkdirOverlay)
 	}
-	if got.Network.Subnet != "100.96.0.0/30" {
-		t.Fatalf("subnet = %q, want %q", got.Network.Subnet, "100.96.0.0/30")
+	if got.Network.Subnet != "100.96.0.0/24" {
+		t.Fatalf("subnet = %q, want %q", got.Network.Subnet, "100.96.0.0/24")
 	}
 	if got.Network.DNS.BindAddr != "auto" {
 		t.Fatalf("dns.bind_addr = %q, want %q", got.Network.DNS.BindAddr, "auto")
@@ -39,8 +75,11 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Network.TransparentProxy.Mode != "peek" {
 		t.Fatalf("transparent_proxy.mode = %q, want %q", got.Network.TransparentProxy.Mode, "peek")
 	}
-	if got.Docker.ReadyTimeout.String() != "10s" {
-		t.Fatalf("docker.ready_timeout = %q, want %q", got.Docker.ReadyTimeout, "10s")
+	if got.BuildKit.HelperPathValue() != "/box/bin/buildctl-daemonless.sh" {
+		t.Fatalf("buildkit.helper_path = %q, want %q", got.BuildKit.HelperPathValue(), "/box/bin/buildctl-daemonless.sh")
+	}
+	if got.BuildKit.StateDirValue() != "/var/cache/buildkit" {
+		t.Fatalf("buildkit.state_dir = %q, want %q", got.BuildKit.StateDirValue(), "/var/cache/buildkit")
 	}
 }
 
@@ -186,6 +225,19 @@ func TestValidateRejectsTransparentProxyMITMAtRuntimeBoundary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "network.transparent_proxy.mode=mitm") {
 		t.Fatalf("ValidateRuntime() error = %q, want mention of network.transparent_proxy.mode=mitm", err)
+	}
+}
+
+func TestValidateRejectsDockerDaemonMode(t *testing.T) {
+	cfg := Config{}
+	cfg.Docker.Enabled = true
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want rejection for docker.enabled=true")
+	}
+	if !strings.Contains(err.Error(), "docker.enabled") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of docker.enabled", err)
 	}
 }
 

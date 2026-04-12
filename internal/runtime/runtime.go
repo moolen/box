@@ -48,12 +48,13 @@ type DNSServerFactory func(ctx context.Context, req DNSStartRequest) (Runner, er
 type ProxyFactory func(ctx context.Context, req ProxyStartRequest) (Runner, error)
 
 type Deps struct {
-	Clock            func() time.Time
-	RandomID         func() string
-	CommandExec      CommandExec
-	DNS              DNSServerFactory
-	Proxy            ProxyFactory
-	MonitorPreflight MonitorPreflightFunc
+	Clock                func() time.Time
+	RandomID             func() string
+	CommandExec          CommandExec
+	AllocateNetResources func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error)
+	DNS                  DNSServerFactory
+	Proxy                ProxyFactory
+	MonitorPreflight     MonitorPreflightFunc
 }
 
 type DNSStartRequest struct {
@@ -66,6 +67,7 @@ type DNSStartRequest struct {
 }
 
 type ProxyStartRequest struct {
+	GatewayIP     string
 	Mode          string
 	Config        config.TransparentProxyConfig
 	OnEvent       func(proxy.Event)
@@ -91,21 +93,22 @@ type Runtime struct {
 }
 
 type Manifest struct {
-	RuntimeID          string              `json:"runtime_id"`
-	CreatedAtUTC       string              `json:"created_at_utc"`
-	StateRoot          string              `json:"state_root"`
-	StateDir           string              `json:"state_dir"`
-	ManifestPath       string              `json:"manifest_path"`
-	EventLogPath       string              `json:"event_log_path"`
-	WorkdirMountSource string              `json:"workdir_mount_source,omitempty"`
-	NetworkMode        string              `json:"network_mode"`
-	GatewayIP          string              `json:"gateway_ip"`
-	ResolvConf         string              `json:"resolv_conf"`
-	Docker             config.DockerConfig `json:"docker"`
-	Net                NetResources        `json:"net"`
-	StartedRunners     []string            `json:"started_runners"`
-	TeardownCmds       []string            `json:"teardown_cmds"`
-	ManagedPaths       []ManagedPath       `json:"managed_paths"`
+	RuntimeID          string                `json:"runtime_id"`
+	CreatedAtUTC       string                `json:"created_at_utc"`
+	StateRoot          string                `json:"state_root"`
+	StateDir           string                `json:"state_dir"`
+	ManifestPath       string                `json:"manifest_path"`
+	EventLogPath       string                `json:"event_log_path"`
+	WorkdirMountSource string                `json:"workdir_mount_source,omitempty"`
+	NetworkMode        string                `json:"network_mode"`
+	GatewayIP          string                `json:"gateway_ip"`
+	ResolvConf         string                `json:"resolv_conf"`
+	BuildKit           config.BuildKitConfig `json:"buildkit"`
+	Docker             config.DockerConfig   `json:"docker"`
+	Net                NetResources          `json:"net"`
+	StartedRunners     []string              `json:"started_runners"`
+	TeardownCmds       []string              `json:"teardown_cmds"`
+	ManagedPaths       []ManagedPath         `json:"managed_paths"`
 }
 
 type NetResources struct {
@@ -115,6 +118,7 @@ type NetResources struct {
 	TableName  string `json:"table_name"`
 	FWMark     uint32 `json:"fwmark"`
 	RouteTable int    `json:"route_table"`
+	SubnetCIDR string `json:"subnet_cidr,omitempty"`
 }
 
 type PathKind string
@@ -150,6 +154,9 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create runtime state root %q: %w", stateRoot, err)
 	}
+	if err := os.Chmod(stateRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("chmod runtime state root %q: %w", stateRoot, err)
+	}
 	if err := cleanupOrphanedRuntimes(ctx, stateRoot, deps.CommandExec); err != nil {
 		return nil, err
 	}
@@ -168,30 +175,47 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}
 
 	network := strings.TrimSpace(req.Config.Network.Mode)
-	gatewayIP, err := gatewayIPFromSubnet(req.Config.Network.Subnet)
+	allocateNetResources := deps.AllocateNetResources
+	if allocateNetResources == nil {
+		allocateNetResources = func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error) {
+			return netns.AllocateResources(ctx, runtimeID, subnetPool, nil)
+		}
+	}
+	netResources, err := allocateNetResources(ctx, runtimeID, req.Config.Network.Subnet)
+	if err != nil {
+		return nil, fmt.Errorf("allocate net resources: %w", err)
+	}
+	gatewayIP, err := gatewayIPFromSubnet(netResources.SubnetCIDR)
 	if err != nil {
 		return nil, err
 	}
+	runtimeCfg := req.Config
+	runtimeCfg.Network.Subnet = netResources.SubnetCIDR
 
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
-		RootfsMode:     req.Config.Sandbox.Rootfs,
-		RepoPath:       "",
-		Workdir:        req.Config.Sandbox.Workdir,
-		NetworkMode:    network,
-		GatewayIP:      gatewayIP,
-		SandboxHostn:   req.Config.Sandbox.Hostname,
-		DockerEnabled:  req.Config.Docker.Enabled,
-		DockerDataRoot: req.Config.Docker.DataRoot,
-		ExtraRO:        req.Config.Mounts.ExtraRO,
-		ExtraRW:        req.Config.Mounts.ExtraRW,
+		RootfsMode:       runtimeCfg.Sandbox.Rootfs,
+		RepoPath:         "",
+		Workdir:          runtimeCfg.Sandbox.Workdir,
+		NetworkMode:      network,
+		GatewayIP:        gatewayIP,
+		SandboxHostn:     runtimeCfg.Sandbox.Hostname,
+		BuildKitEnabled:  runtimeCfg.BuildKit.Enabled,
+		BuildKitHelper:   runtimeCfg.BuildKit.HelperPathValue(),
+		BuildKitStateDir: runtimeCfg.BuildKit.StateDirValue(),
+		BuildKitRunDir:   runtimeCfg.BuildKit.RunDirValue(),
+		DockerEnabled:    runtimeCfg.Docker.Enabled,
+		DockerUser:       runtimeCfg.Docker.UserValue(),
+		DockerUID:        runtimeCfg.Docker.UIDValue(),
+		DockerGID:        runtimeCfg.Docker.GIDValue(),
+		DockerHomeDir:    runtimeCfg.Docker.HomeDirValue(),
+		DockerRuntimeDir: runtimeCfg.Docker.RuntimeDirValue(),
+		DockerDataRoot:   runtimeCfg.Docker.DataRootValue(),
+		DockerSocketPath: runtimeCfg.Docker.SocketPathValue(),
+		ExtraRO:          runtimeCfg.Mounts.ExtraRO,
+		ExtraRW:          runtimeCfg.Mounts.ExtraRW,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build rootfs plan: %w", err)
-	}
-
-	netResources, err := netns.ResourcesForRuntimeID(runtimeID)
-	if err != nil {
-		return nil, fmt.Errorf("derive net resources: %w", err)
 	}
 
 	manifest := Manifest{
@@ -204,6 +228,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		NetworkMode:    network,
 		GatewayIP:      gatewayIP,
 		ResolvConf:     generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
+		BuildKit:       req.Config.BuildKit,
 		Docker:         req.Config.Docker,
 		Net:            fromNetnsResources(netResources),
 		StartedRunners: nil,
@@ -229,27 +254,27 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}()
 
 	if strings.EqualFold(network, "monitor") {
-		rt.monitor = monitor.NewCollector(req.Config.Policy)
+		rt.monitor = monitor.NewCollector(runtimeCfg.Policy)
 	}
 	if usesManagedNetworkPolicy(network) && deps.CommandExec != nil {
-		if err := monitorPreflightCheck(ctx, rt.Manifest, req.Config, deps); err != nil {
+		if err := monitorPreflightCheck(ctx, rt.Manifest, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	}
-	if err := prepareWorkdirOverlay(ctx, req.Config, &rt.Manifest, deps.CommandExec); err != nil {
+	if err := prepareWorkdirOverlay(ctx, runtimeCfg, &rt.Manifest, deps.CommandExec); err != nil {
 		return nil, err
 	}
 
-	if err := rt.startNetNSResources(ctx, req.Config, deps); err != nil {
+	if err := rt.startNetNSResources(ctx, runtimeCfg, deps); err != nil {
 		return nil, err
 	}
 
 	if strings.EqualFold(network, "monitor") {
-		if err := rt.startMonitorResources(ctx, req.Config, deps); err != nil {
+		if err := rt.startMonitorResources(ctx, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	} else if strings.EqualFold(network, "enforce") {
-		if err := rt.startEnforceResources(ctx, req.Config, deps); err != nil {
+		if err := rt.startEnforceResources(ctx, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	}
@@ -364,6 +389,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
 		onEvent := rt.monitorProxyCallback()
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
+			GatewayIP:     rt.Manifest.GatewayIP,
 			Mode:          cfg.Network.TransparentProxy.Mode,
 			Config:        cfg.Network.TransparentProxy,
 			OnEvent:       onEvent,
@@ -406,11 +432,13 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		}
 	}
 
-	if usesNestedDockerHostNetworkProxy(cfg) && deps.Proxy != nil {
+	if usesEnforceBuildProxy(cfg) && deps.Proxy != nil {
+		allowProxyTarget := rt.enforceAllowProxyTarget(cfg.Policy)
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
+			GatewayIP:     rt.Manifest.GatewayIP,
 			Mode:          cfg.Network.TransparentProxy.Mode,
 			Config:        cfg.Network.TransparentProxy,
-			AllowHostname: rt.enforceAllowQuery(cfg.Policy),
+			AllowHostname: allowProxyTarget,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -460,7 +488,8 @@ func (rt *Runtime) startNetNSResources(ctx context.Context, cfg config.Config, d
 		TableName:  rt.Manifest.Net.TableName,
 		FWMark:     rt.Manifest.Net.FWMark,
 		RouteTable: rt.Manifest.Net.RouteTable,
-	}, cfg.Network.Subnet)
+		SubnetCIDR: rt.Manifest.Net.SubnetCIDR,
+	})
 	if err != nil {
 		return fmt.Errorf("build netns setup plan: %w", err)
 	}
@@ -539,6 +568,32 @@ func (rt *Runtime) enforceAllowQuery(policyCfg config.PolicyConfig) func(hostnam
 	policy := monitor.CompilePolicy(policyCfg)
 	return func(hostname string) bool {
 		return policy.Evaluate(hostname) == monitor.VerdictAllow
+	}
+}
+
+func (rt *Runtime) enforceAllowProxyTarget(policyCfg config.PolicyConfig) func(hostname string) bool {
+	allowHostname := rt.enforceAllowQuery(policyCfg)
+	allowedCIDRs := make([]netip.Prefix, 0, len(policyCfg.ExtraAllowedCIDRs))
+	for _, value := range policyCfg.ExtraAllowedCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		allowedCIDRs = append(allowedCIDRs, prefix.Masked())
+	}
+
+	return func(hostname string) bool {
+		host := strings.TrimSpace(hostname)
+		if addr, err := netip.ParseAddr(host); err == nil {
+			addr = addr.Unmap()
+			for _, prefix := range allowedCIDRs {
+				if prefix.Contains(addr) {
+					return true
+				}
+			}
+			return false
+		}
+		return allowHostname(host)
 	}
 }
 
@@ -691,10 +746,14 @@ func usesManagedNetworkPolicy(mode string) bool {
 	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
 }
 
-func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
-	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
-		cfg.Docker.Enabled &&
-		cfg.Docker.HostNetworkNestedContainers
+func usesEnforceBuildProxy(cfg config.Config) bool {
+	if !strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") || !cfg.Network.TransparentProxy.Enabled {
+		return false
+	}
+	if cfg.BuildKit.Enabled {
+		return true
+	}
+	return cfg.Docker.Enabled && cfg.Docker.HostNetworkNestedContainers
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {
@@ -737,6 +796,7 @@ func fromNetnsResources(in netns.Resources) NetResources {
 		TableName:  in.TableName,
 		FWMark:     in.FWMark,
 		RouteTable: in.RouteTable,
+		SubnetCIDR: in.SubnetCIDR,
 	}
 }
 

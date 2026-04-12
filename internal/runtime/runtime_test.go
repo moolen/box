@@ -160,6 +160,69 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	}
 }
 
+func TestRunUsesInjectedNetworkAllocation(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	cfg.Network.Subnet = "100.96.0.0/24"
+
+	var preflightReq MonitorPreflightRequest
+	exec := &recordingCommandExec{}
+	allocated := netns.Resources{
+		NetNS:      "box-dynamic",
+		HostVeth:   "vethhdynamic",
+		GuestVeth:  "vethgdynamic",
+		TableName:  "box_dynamic",
+		FWMark:     4242,
+		RouteTable: 20042,
+		SubnetCIDR: "100.96.0.4/30",
+	}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-allocated" },
+		CommandExec: exec,
+		AllocateNetResources: func(context.Context, string, string) (netns.Resources, error) {
+			return allocated, nil
+		},
+		MonitorPreflight: func(_ context.Context, req MonitorPreflightRequest) error {
+			preflightReq = req
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	wantNet := NetResources{
+		NetNS:      allocated.NetNS,
+		HostVeth:   allocated.HostVeth,
+		GuestVeth:  allocated.GuestVeth,
+		TableName:  allocated.TableName,
+		FWMark:     allocated.FWMark,
+		RouteTable: allocated.RouteTable,
+		SubnetCIDR: allocated.SubnetCIDR,
+	}
+	if preflightReq.Net != wantNet {
+		t.Fatalf("MonitorPreflightRequest.Net = %#v, want %#v", preflightReq.Net, wantNet)
+	}
+	if rt.Manifest.Net != wantNet {
+		t.Fatalf("Manifest.Net = %#v, want %#v", rt.Manifest.Net, wantNet)
+	}
+	if rt.Manifest.GatewayIP != "100.96.0.5" {
+		t.Fatalf("Manifest.GatewayIP = %q, want %q", rt.Manifest.GatewayIP, "100.96.0.5")
+	}
+	mustContainCall(t, exec.calls, "ip addr add 100.96.0.5/30 dev vethhdynamic")
+	mustContainCall(t, exec.calls, "ip netns exec box-dynamic ip addr add 100.96.0.6/30 dev vethgdynamic")
+	mustContainCall(t, exec.calls, "ip rule add fwmark 4242 lookup 20042")
+}
+
 func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
 	t.Parallel()
 
@@ -384,17 +447,15 @@ func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 	}
 }
 
-func TestDockerSettingsPropagateIntoRuntimeState(t *testing.T) {
+func TestBuildKitSettingsPropagateIntoRuntimeState(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Docker = config.DockerConfig{
-		Enabled:                     true,
-		DataRoot:                    "/sandbox/docker",
-		SocketPath:                  "/sandbox/docker.sock",
-		WaitForSocket:               true,
-		ReadyTimeout:                15 * time.Second,
-		HostNetworkNestedContainers: true,
+	cfg.BuildKit = config.BuildKitConfig{
+		Enabled:    true,
+		HelperPath: "/box/bin/buildctl-daemonless.sh",
+		StateDir:   "/var/cache/buildkit",
+		RunDir:     "/run/buildkit",
 	}
 
 	rt, err := Run(context.Background(), Request{
@@ -408,8 +469,8 @@ func TestDockerSettingsPropagateIntoRuntimeState(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if rt.Manifest.Docker != cfg.Docker {
-		t.Fatalf("Manifest.Docker = %#v, want %#v", rt.Manifest.Docker, cfg.Docker)
+	if rt.Manifest.BuildKit != cfg.BuildKit {
+		t.Fatalf("Manifest.BuildKit = %#v, want %#v", rt.Manifest.BuildKit, cfg.BuildKit)
 	}
 }
 
@@ -804,20 +865,15 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	}
 }
 
-func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
+func TestEnforceModeStartsProxyForBuildKit(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
-	cfg.Docker = config.DockerConfig{
-		Enabled:                     true,
-		DataRoot:                    "/var/lib/docker",
-		SocketPath:                  "/var/run/docker.sock",
-		WaitForSocket:               true,
-		ReadyTimeout:                10 * time.Second,
-		HostNetworkNestedContainers: true,
-	}
+	cfg.BuildKit.Enabled = true
+	cfg.Policy.AllowDomains = []string{"docker.io"}
 
+	exec := &recordingCommandExec{}
+	var proxyReq ProxyStartRequest
 	var proxyCalled bool
 
 	rt, err := Run(context.Background(), Request{
@@ -825,24 +881,25 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 		StateRoot: t.TempDir(),
 	}, Deps{
 		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-proxy" },
-		CommandExec: noopCommandExec{},
+		RandomID:    func() string { return "runtime-enforce-buildkit-proxy" },
+		CommandExec: exec,
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
 			proxyCalled = true
+			proxyReq = req
 			if req.AllowHostname == nil {
 				t.Fatalf("ProxyStartRequest.AllowHostname = nil, want callback")
 			}
 			if req.AllowHostname("blocked.example.com") {
 				t.Fatalf("AllowHostname(blocked.example.com) = true, want false")
 			}
-			if !req.AllowHostname("allowed.example.com") {
-				t.Fatalf("AllowHostname(allowed.example.com) = false, want true")
+			if !req.AllowHostname("registry-1.docker.io") {
+				t.Fatalf("AllowHostname(registry-1.docker.io) = false, want true")
 			}
 			return noopRunner{}, nil
 		},
@@ -851,11 +908,35 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	defer func() {
-		_ = rt.Cleanup(context.Background(), Deps{CommandExec: noopCommandExec{}})
+		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
 	}()
 
 	if !proxyCalled {
-		t.Fatalf("proxy factory was not called in enforce mode for nested docker host networking")
+		t.Fatalf("Proxy factory was not called in enforce mode for BuildKit")
+	}
+	if proxyReq.Config.HTTPPort != 18080 {
+		t.Fatalf("Proxy request http port = %d, want %d", proxyReq.Config.HTTPPort, 18080)
+	}
+	if proxyReq.GatewayIP != "100.96.0.1" {
+		t.Fatalf("Proxy request gateway ip = %q, want %q", proxyReq.GatewayIP, "100.96.0.1")
+	}
+	if proxyReq.Mode != "peek" {
+		t.Fatalf("Proxy request mode = %q, want %q", proxyReq.Mode, "peek")
+	}
+}
+
+func TestEnforceAllowProxyTargetAllowsConfiguredCIDRAndBlocksOtherIPs(t *testing.T) {
+	t.Parallel()
+
+	rt := &Runtime{}
+	allow := rt.enforceAllowProxyTarget(config.PolicyConfig{
+		ExtraAllowedCIDRs: []string{"1.1.1.1/32"},
+	})
+	if !allow("1.1.1.1") {
+		t.Fatalf("allow(1.1.1.1) = false, want true")
+	}
+	if allow("1.1.1.2") {
+		t.Fatalf("allow(1.1.1.2) = true, want false")
 	}
 }
 
@@ -1151,7 +1232,7 @@ func testConfig(networkMode string) config.Config {
 		},
 		Network: config.NetworkConfig{
 			Mode:   networkMode,
-			Subnet: "100.96.0.0/30",
+			Subnet: "100.96.0.0/24",
 			DNS: config.DNSConfig{
 				BindAddr: "auto",
 				Upstream: []string{"1.1.1.1:53"},

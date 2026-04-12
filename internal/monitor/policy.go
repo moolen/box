@@ -50,6 +50,10 @@ func EvaluateHostname(policy config.PolicyConfig, hostname string) Verdict {
 
 func CompilePolicy(policy config.PolicyConfig) Policy {
 	compiled := Policy{}
+	if len(policy.Egress) > 0 {
+		compiled.allow, compiled.invalid = hostnamePolicyRules(policy)
+		return compiled
+	}
 	compiled.allow, compiled.invalid = normalizeRules(policy.AllowDomains)
 	compiled.deny, compiled.invalid = appendNormalizedRules(policy.DenyDomains, compiled.invalid)
 	return compiled
@@ -91,6 +95,23 @@ func appendNormalizedRules(rules []string, invalid bool) ([]string, bool) {
 			continue
 		}
 		normalized := NormalizeHostname(rule)
+		if normalized == "" {
+			invalid = true
+			continue
+		}
+		out = append(out, normalized)
+	}
+	return out, invalid
+}
+
+func hostnamePolicyRules(policy config.PolicyConfig) ([]string, bool) {
+	out := make([]string, 0, len(policy.Egress))
+	invalid := false
+	for _, rule := range policy.Egress {
+		if strings.TrimSpace(rule.Hostname) == "" {
+			continue
+		}
+		normalized := NormalizeHostname(rule.Hostname)
 		if normalized == "" {
 			invalid = true
 			continue

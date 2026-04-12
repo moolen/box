@@ -48,8 +48,16 @@ Integration tests cover:
 - writable sandbox workdir
 - isolation checks for mounts and sandbox privileges
 - enforce-mode blocked DNS resolution
-- enforce-mode nested Docker multi-stage builds on Linux hosts with `docker`, `dockerd`,
-  and `skopeo` available
+- rootless BuildKit Dockerfile builds
+- enforce-mode BuildKit multi-stage builds and blocked remote fetches on Linux hosts with
+  `runsc`, `rootlesskit`, `newuidmap`, `newgidmap`, `buildctl`, `buildkitd`, `nsenter`, and
+  `setpriv` available
+- enforce-mode registry-backed BuildKit builds that are allowed or denied by hostname policy
+
+When `buildkit.enabled: true`, `box` launches `runsc` rootlessly through `rootlesskit` after
+joining the managed sandbox network namespace for normal sandbox execution, but Dockerfile builds
+run through a direct rootless BuildKit launcher inside that same managed network namespace so
+enforce-mode nftables policy still applies. Docker daemon mode is not supported.
 
 ## Repository Automation
 
