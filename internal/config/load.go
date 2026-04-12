@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -54,29 +55,26 @@ func ValidateRuntime(cfg Config) error {
 	if !strings.EqualFold(mode, "monitor") && !strings.EqualFold(mode, "enforce") {
 		return fmt.Errorf("network.mode=%q is unsupported; allowed values are monitor and enforce", cfg.Network.Mode)
 	}
-	if strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
-		return errors.New("network.transparent_proxy.mode=mitm is not supported by runtime yet")
+	if strings.EqualFold(cfg.Network.Envoy.Mode, "mitm") {
+		return errors.New("network.envoy.mode=mitm is not supported by runtime yet")
 	}
-	for i, rule := range cfg.Policy.Egress {
-		if err := validateEgressRule(rule); err != nil {
-			return fmt.Errorf("policy.egress[%d]: %w", i, err)
+	for i, rule := range cfg.Network.Policy {
+		if err := validateNetworkPolicyRule(rule); err != nil {
+			return fmt.Errorf("network.policy[%d]: %w", i, err)
 		}
 	}
 	return nil
 }
 
-func validateEgressRule(rule EgressRule) error {
+func validateNetworkPolicyRule(rule NetworkPolicyRule) error {
 	hasHostname := strings.TrimSpace(rule.Hostname) != ""
 	hasCIDR := strings.TrimSpace(rule.CIDR) != ""
 	if hasHostname == hasCIDR {
 		return errors.New("must set exactly one of hostname or cidr")
 	}
-	if len(rule.Transport) == 0 && len(rule.ICMP) == 0 {
-		return errors.New("must allow at least one transport or icmp tuple")
-	}
 	if hasHostname {
-		if normalizeHostname(rule.Hostname) == "" {
-			return fmt.Errorf("invalid hostname %q", rule.Hostname)
+		if err := validateHostnameSelector(rule.Hostname); err != nil {
+			return fmt.Errorf("hostname: %w", err)
 		}
 	}
 	if hasCIDR {
@@ -84,21 +82,54 @@ func validateEgressRule(rule EgressRule) error {
 			return fmt.Errorf("invalid cidr %q: %w", rule.CIDR, err)
 		}
 	}
-	for _, transport := range rule.Transport {
-		protocol := strings.ToLower(strings.TrimSpace(transport.Protocol))
-		if protocol != "tcp" && protocol != "udp" {
-			return fmt.Errorf("unsupported transport protocol %q", transport.Protocol)
+	if len(rule.Ports) == 0 {
+		return errors.New("must specify at least one port")
+	}
+	for _, port := range rule.Ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("invalid port %d", port)
 		}
-		for _, port := range transport.Ports {
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("invalid port %d", port)
+	}
+	if rule.HTTP != nil {
+		if len(rule.HTTP.Path) == 0 {
+			return errors.New("http.path must have at least one entry when http is set")
+		}
+		for _, p := range rule.HTTP.Path {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				return errors.New("http.path entries must be non-empty")
+			}
+			if !strings.HasPrefix(p, "/") {
+				return fmt.Errorf("http.path entry %q must start with /", p)
+			}
+			if _, err := path.Match(p, "/"); err != nil {
+				return fmt.Errorf("http.path entry %q is not a valid glob: %w", p, err)
 			}
 		}
 	}
-	for _, icmp := range rule.ICMP {
-		if icmp.Type < 0 || icmp.Type > 255 || icmp.Code < 0 || icmp.Code > 255 {
-			return fmt.Errorf("invalid icmp tuple type=%d code=%d", icmp.Type, icmp.Code)
+	return nil
+}
+
+func validateHostnameSelector(hostname string) error {
+	host := strings.TrimSpace(hostname)
+	if host == "" {
+		return errors.New("must be non-empty")
+	}
+	if strings.HasPrefix(host, "*.") {
+		base := strings.TrimPrefix(host, "*.")
+		if strings.Contains(base, "*") {
+			return fmt.Errorf("invalid wildcard hostname %q", hostname)
 		}
+		if normalizeHostname(base) == "" {
+			return fmt.Errorf("invalid wildcard hostname %q", hostname)
+		}
+		return nil
+	}
+	if strings.Contains(host, "*") {
+		return fmt.Errorf("invalid wildcard hostname %q", hostname)
+	}
+	if normalizeHostname(host) == "" {
+		return fmt.Errorf("invalid hostname %q", hostname)
 	}
 	return nil
 }

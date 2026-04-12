@@ -50,7 +50,7 @@ network:
       - 1.1.1.1:53
       - 8.8.8.8:53
 
-  transparent_proxy:
+  envoy:
     # Enables host-side interception for HTTP and TLS.
     enabled: true
 
@@ -58,18 +58,12 @@ network:
     # `mitm` is rejected by the runtime today.
     mode: peek
 
-    # Host listener ports used by the transparent proxy.
+    # Host listener ports used by the proxy listeners.
     http_port: 18080
     tls_port: 18443
 
-policy:
-  # Domain rules drive DNS decisions in `enforce` and label monitor summaries.
-  allow_domains: []
-  deny_domains: []
-
-  # Bootstrap IPv4 exceptions added to the nft allow set before DNS learns
-  # additional destination IPs from allowed domain resolutions.
-  extra_allowed_cidrs: []
+  # Egress policy rules enforced by the host-managed network layer.
+  policy: []
 
 mounts:
   # Extra host paths to bind read-only or read-write into the sandbox.
