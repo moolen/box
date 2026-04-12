@@ -77,6 +77,7 @@ type runtimeExecutor struct {
 	startSandboxBuildKitDaemon func(boxruntime.Manifest, int, int, config.Config) (*managedBuildKitDaemon, error)
 	stopSandboxBuildKitDaemon  func(*managedBuildKitDaemon) error
 	ensureRootlessRuntimeDir   func(int, int) error
+	chownTree                  func(string, int, int) error
 }
 
 func (e runtimeExecutor) Run(req runRequest) error {
@@ -134,6 +135,10 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	ensureRootlessRuntimeDirFn := e.ensureRootlessRuntimeDir
 	if ensureRootlessRuntimeDirFn == nil {
 		ensureRootlessRuntimeDirFn = ensureRootlessRuntimeDir
+	}
+	chownTreeFn := e.chownTree
+	if chownTreeFn == nil {
+		chownTreeFn = chownTree
 	}
 
 	stderr := e.stderr
@@ -275,7 +280,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		return err
 	}
 	if cfg.BuildKit.Enabled {
-		if err := chownTree(filepath.Join(manifest.StateDir, "bundle"), callerUID, callerGID); err != nil {
+		if err := chownTreeFn(filepath.Join(manifest.StateDir, "bundle"), callerUID, callerGID); err != nil {
 			_ = stopSandboxBuildKitDaemon(sandboxBuildKit)
 			_ = rt.Cleanup(ctx, deps)
 			return fmt.Errorf("chown bundle for rootless runsc: %w", err)

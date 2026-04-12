@@ -849,6 +849,18 @@ func TestRuntimeExecutorPassesBuildKitRootlessLaunchInputsToSandboxRunner(t *tes
 			}
 			return nil
 		},
+		chownTree: func(root string, uid int, gid int) error {
+			if uid != 1000 {
+				t.Fatalf("chown uid = %d, want %d", uid, 1000)
+			}
+			if gid != 1000 {
+				t.Fatalf("chown gid = %d, want %d", gid, 1000)
+			}
+			if !strings.HasSuffix(root, "/bundle") {
+				t.Fatalf("chown root = %q, want bundle path", root)
+			}
+			return nil
+		},
 		runSandbox: func(req gvisor.RunRequest) error {
 			if !req.BuildKitEnabled {
 				t.Fatalf("BuildKitEnabled = false, want true")
