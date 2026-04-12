@@ -358,18 +358,68 @@ policy:
 }
 
 func TestValidateRejectsInvalidNetworkPolicyRule(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Mode = "enforce"
-	cfg.Network.Policy = []NetworkPolicyRule{{
-		Hostname: "*.bad.*.example",
-		Ports:    []int{0},
-		HTTP: &HTTPPolicyConfig{
-			Path: []string{""},
-		},
-	}}
+	t.Run("rejects invalid wildcard hostname", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			Hostname: "*.bad.*.example",
+			Ports:    []int{443},
+		}}
 
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
-	}
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
+		}
+	})
+
+	t.Run("rejects invalid port", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{0},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
+		}
+	})
+
+	t.Run("rejects empty http.path entry", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &HTTPPolicyConfig{
+				Path: []string{""},
+			},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
+		}
+	})
+
+	t.Run("rejects invalid http.path glob", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &HTTPPolicyConfig{
+				Path: []string{"/["},
+			},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid glob rejection")
+		}
+		if !strings.Contains(err.Error(), "not a valid glob") {
+			t.Fatalf("ValidateRuntime() error = %q, want mention of invalid glob", err.Error())
+		}
+	})
 }
