@@ -142,38 +142,36 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	testenv.RequireCommands(t, "docker", "dockerd", "skopeo")
 
 	binary := testenv.BuildBoxBinary(t)
-	fixture := startLocalHTTPFixture(t)
-	configPath := testenv.WriteEnforceDockerConfigWithHostNetworkNestedContainers(t, fmt.Sprintf(`
-- cidr: %s
-  transport:
-    - protocol: tcp
-      ports: [%d]
-`, fixture.CIDR, fixture.Port), false)
-
 	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-build.")
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
 	alpineArchivePath := filepath.Join(contextDir, "alpine.tar")
 	debianArchivePath := filepath.Join(contextDir, "debian.tar")
-	dockerfile := strings.TrimSpace(fmt.Sprintf(`
+	dockerfile := strings.TrimSpace(`
 FROM alpine:3.20 AS alpine-stage
-RUN wget -qO /build-artifact.txt %s && \
+RUN wget -qO /build-artifact.txt 'http://example.com/' && \
     grep -q 'Example Domain' /build-artifact.txt
 
 FROM debian:bookworm-slim AS debian-stage
 WORKDIR /tmp/app
-RUN printf '%%s\n' '{"name":"box-enforce-test"}' >/tmp/app/package.json
+RUN printf '%s\n' '{"name":"box-enforce-test"}' >/tmp/app/package.json
 
 FROM debian:bookworm-slim
 COPY --from=alpine-stage /build-artifact.txt /build-artifact.txt
 COPY --from=debian-stage /tmp/app/package.json /package.json
 RUN test -s /build-artifact.txt && test -s /package.json
 CMD ["cat", "/build-artifact.txt"]
-`, shellSingleQuote(fixture.URL))) + "\n"
+`) + "\n"
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
 	}
 	copyDockerArchive(t, "docker.io/library/alpine:3.20", alpineArchivePath, "alpine:3.20")
 	copyDockerArchive(t, "docker.io/library/debian:bookworm-slim", debianArchivePath, "debian:bookworm-slim")
+	configPath := testenv.WriteEnforceDockerConfigWithHostNetworkNestedContainers(t, `
+- hostname: example.com
+  transport:
+    - protocol: tcp
+      ports: [80]
+`, true)
 
 	imageTag := "box-enforce-test:" + strconv.FormatInt(time.Now().UnixNano(), 10)
 script := fmt.Sprintf(`
