@@ -52,7 +52,7 @@ func TestBoxDefaultWorkdirOverlayDoesNotWriteHostRepo(t *testing.T) {
 	hostPath := filepath.Join(workdir, sentinel)
 
 	command := fmt.Sprintf("printf isolated >%q", sentinel)
-	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
+	configPath := filepath.Join(binary.ModuleRoot, "box.yaml")
 	args := []string{binary.BinaryPath, "--config", configPath, "--", "bash", "-lc", command}
 	if os.Geteuid() != 0 {
 		args = append([]string{"sudo", "-E"}, args...)
@@ -187,8 +187,7 @@ func runBox(t *testing.T, requireRoot bool, args ...string) (string, string, err
 	}
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
-	return testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, requireRoot, append([]string{"--config", configPath}, args...)...)
+	return testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, requireRoot, args...)
 }
 
 func requireLinuxForIsolation(t *testing.T) {

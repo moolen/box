@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,12 +48,13 @@ type DNSServerFactory func(ctx context.Context, req DNSStartRequest) (Runner, er
 type ProxyFactory func(ctx context.Context, req ProxyStartRequest) (Runner, error)
 
 type Deps struct {
-	Clock            func() time.Time
-	RandomID         func() string
-	CommandExec      CommandExec
-	DNS              DNSServerFactory
-	Proxy            ProxyFactory
-	MonitorPreflight MonitorPreflightFunc
+	Clock                func() time.Time
+	RandomID             func() string
+	CommandExec          CommandExec
+	AllocateNetResources func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error)
+	DNS                  DNSServerFactory
+	Proxy                ProxyFactory
+	MonitorPreflight     MonitorPreflightFunc
 }
 
 type DNSStartRequest struct {
@@ -67,10 +67,11 @@ type DNSStartRequest struct {
 }
 
 type ProxyStartRequest struct {
-	Mode        string
-	Config      config.TransparentProxyConfig
-	OnEvent     func(proxy.Event)
-	AllowTarget func(string, int) bool
+	GatewayIP     string
+	Mode          string
+	Config        config.TransparentProxyConfig
+	OnEvent       func(proxy.Event)
+	AllowHostname func(string) bool
 }
 
 type MonitorPreflightRequest struct {
@@ -91,31 +92,23 @@ type Runtime struct {
 	allowIPs map[string]struct{}
 }
 
-type compiledEgressRule struct {
-	SetName    string
-	Hostname   string
-	CIDR       string
-	Transport  []firewall.TransportMatch
-	ICMP       []firewall.ICMPMatch
-	inputIndex int
-}
-
 type Manifest struct {
-	RuntimeID          string              `json:"runtime_id"`
-	CreatedAtUTC       string              `json:"created_at_utc"`
-	StateRoot          string              `json:"state_root"`
-	StateDir           string              `json:"state_dir"`
-	ManifestPath       string              `json:"manifest_path"`
-	EventLogPath       string              `json:"event_log_path"`
-	WorkdirMountSource string              `json:"workdir_mount_source,omitempty"`
-	NetworkMode        string              `json:"network_mode"`
-	GatewayIP          string              `json:"gateway_ip"`
-	ResolvConf         string              `json:"resolv_conf"`
-	Docker             config.DockerConfig `json:"docker"`
-	Net                NetResources        `json:"net"`
-	StartedRunners     []string            `json:"started_runners"`
-	TeardownCmds       []string            `json:"teardown_cmds"`
-	ManagedPaths       []ManagedPath       `json:"managed_paths"`
+	RuntimeID          string                `json:"runtime_id"`
+	CreatedAtUTC       string                `json:"created_at_utc"`
+	StateRoot          string                `json:"state_root"`
+	StateDir           string                `json:"state_dir"`
+	ManifestPath       string                `json:"manifest_path"`
+	EventLogPath       string                `json:"event_log_path"`
+	WorkdirMountSource string                `json:"workdir_mount_source,omitempty"`
+	NetworkMode        string                `json:"network_mode"`
+	GatewayIP          string                `json:"gateway_ip"`
+	ResolvConf         string                `json:"resolv_conf"`
+	BuildKit           config.BuildKitConfig `json:"buildkit"`
+	Docker             config.DockerConfig   `json:"docker"`
+	Net                NetResources          `json:"net"`
+	StartedRunners     []string              `json:"started_runners"`
+	TeardownCmds       []string              `json:"teardown_cmds"`
+	ManagedPaths       []ManagedPath         `json:"managed_paths"`
 }
 
 type NetResources struct {
@@ -125,6 +118,7 @@ type NetResources struct {
 	TableName  string `json:"table_name"`
 	FWMark     uint32 `json:"fwmark"`
 	RouteTable int    `json:"route_table"`
+	SubnetCIDR string `json:"subnet_cidr,omitempty"`
 }
 
 type PathKind string
@@ -160,6 +154,9 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create runtime state root %q: %w", stateRoot, err)
 	}
+	if err := os.Chmod(stateRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("chmod runtime state root %q: %w", stateRoot, err)
+	}
 	if err := cleanupOrphanedRuntimes(ctx, stateRoot, deps.CommandExec); err != nil {
 		return nil, err
 	}
@@ -178,30 +175,47 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}
 
 	network := strings.TrimSpace(req.Config.Network.Mode)
-	gatewayIP, err := gatewayIPFromSubnet(req.Config.Network.Subnet)
+	allocateNetResources := deps.AllocateNetResources
+	if allocateNetResources == nil {
+		allocateNetResources = func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error) {
+			return netns.AllocateResources(ctx, runtimeID, subnetPool, nil)
+		}
+	}
+	netResources, err := allocateNetResources(ctx, runtimeID, req.Config.Network.Subnet)
+	if err != nil {
+		return nil, fmt.Errorf("allocate net resources: %w", err)
+	}
+	gatewayIP, err := gatewayIPFromSubnet(netResources.SubnetCIDR)
 	if err != nil {
 		return nil, err
 	}
+	runtimeCfg := req.Config
+	runtimeCfg.Network.Subnet = netResources.SubnetCIDR
 
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
-		RootfsMode:     req.Config.Sandbox.Rootfs,
-		RepoPath:       "",
-		Workdir:        req.Config.Sandbox.Workdir,
-		NetworkMode:    network,
-		GatewayIP:      gatewayIP,
-		SandboxHostn:   req.Config.Sandbox.Hostname,
-		DockerEnabled:  req.Config.Docker.Enabled,
-		DockerDataRoot: req.Config.Docker.DataRoot,
-		ExtraRO:        req.Config.Mounts.ExtraRO,
-		ExtraRW:        req.Config.Mounts.ExtraRW,
+		RootfsMode:       runtimeCfg.Sandbox.Rootfs,
+		RepoPath:         "",
+		Workdir:          runtimeCfg.Sandbox.Workdir,
+		NetworkMode:      network,
+		GatewayIP:        gatewayIP,
+		SandboxHostn:     runtimeCfg.Sandbox.Hostname,
+		BuildKitEnabled:  runtimeCfg.BuildKit.Enabled,
+		BuildKitHelper:   runtimeCfg.BuildKit.HelperPathValue(),
+		BuildKitStateDir: runtimeCfg.BuildKit.StateDirValue(),
+		BuildKitRunDir:   runtimeCfg.BuildKit.RunDirValue(),
+		DockerEnabled:    runtimeCfg.Docker.Enabled,
+		DockerUser:       runtimeCfg.Docker.UserValue(),
+		DockerUID:        runtimeCfg.Docker.UIDValue(),
+		DockerGID:        runtimeCfg.Docker.GIDValue(),
+		DockerHomeDir:    runtimeCfg.Docker.HomeDirValue(),
+		DockerRuntimeDir: runtimeCfg.Docker.RuntimeDirValue(),
+		DockerDataRoot:   runtimeCfg.Docker.DataRootValue(),
+		DockerSocketPath: runtimeCfg.Docker.SocketPathValue(),
+		ExtraRO:          runtimeCfg.Mounts.ExtraRO,
+		ExtraRW:          runtimeCfg.Mounts.ExtraRW,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build rootfs plan: %w", err)
-	}
-
-	netResources, err := netns.ResourcesForRuntimeID(runtimeID)
-	if err != nil {
-		return nil, fmt.Errorf("derive net resources: %w", err)
 	}
 
 	manifest := Manifest{
@@ -214,6 +228,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		NetworkMode:    network,
 		GatewayIP:      gatewayIP,
 		ResolvConf:     generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
+		BuildKit:       req.Config.BuildKit,
 		Docker:         req.Config.Docker,
 		Net:            fromNetnsResources(netResources),
 		StartedRunners: nil,
@@ -239,27 +254,27 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}()
 
 	if strings.EqualFold(network, "monitor") {
-		rt.monitor = monitor.NewCollector(req.Config.Policy)
+		rt.monitor = monitor.NewCollector(runtimeCfg.Policy)
 	}
 	if usesManagedNetworkPolicy(network) && deps.CommandExec != nil {
-		if err := monitorPreflightCheck(ctx, rt.Manifest, req.Config, deps); err != nil {
+		if err := monitorPreflightCheck(ctx, rt.Manifest, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	}
-	if err := prepareWorkdirOverlay(ctx, req.Config, &rt.Manifest, deps.CommandExec); err != nil {
+	if err := prepareWorkdirOverlay(ctx, runtimeCfg, &rt.Manifest, deps.CommandExec); err != nil {
 		return nil, err
 	}
 
-	if err := rt.startNetNSResources(ctx, req.Config, deps); err != nil {
+	if err := rt.startNetNSResources(ctx, runtimeCfg, deps); err != nil {
 		return nil, err
 	}
 
 	if strings.EqualFold(network, "monitor") {
-		if err := rt.startMonitorResources(ctx, req.Config, deps); err != nil {
+		if err := rt.startMonitorResources(ctx, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	} else if strings.EqualFold(network, "enforce") {
-		if err := rt.startEnforceResources(ctx, req.Config, deps); err != nil {
+		if err := rt.startEnforceResources(ctx, runtimeCfg, deps); err != nil {
 			return nil, err
 		}
 	}
@@ -358,13 +373,27 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		return fmt.Errorf("apply firewall plan: %w", err)
 	}
 
+	routingPlan, err := firewall.BuildPolicyRoutingPlan(rt.Manifest.Net.FWMark, rt.Manifest.Net.RouteTable)
+	if err != nil {
+		return fmt.Errorf("build policy routing plan: %w", err)
+	}
+	recordedTeardown, err = runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(routingPlan, map[int]string{
+		0: fmt.Sprintf("ip rule del fwmark %d lookup %d", rt.Manifest.Net.FWMark, rt.Manifest.Net.RouteTable),
+		1: fmt.Sprintf("ip route del local 0.0.0.0/0 dev lo table %d", rt.Manifest.Net.RouteTable),
+	}))
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("apply policy routing plan: %w", err)
+	}
+
 	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
 		onEvent := rt.monitorProxyCallback()
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:        cfg.Network.TransparentProxy.Mode,
-			Config:      cfg.Network.TransparentProxy,
-			OnEvent:     onEvent,
-			AllowTarget: nil,
+			GatewayIP:     rt.Manifest.GatewayIP,
+			Mode:          cfg.Network.TransparentProxy.Mode,
+			Config:        cfg.Network.TransparentProxy,
+			OnEvent:       onEvent,
+			AllowHostname: nil,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -379,40 +408,9 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 }
 
 func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config, deps Deps) error {
-	compiledRules := compileRuntimeEgress(cfg.Policy)
-	allowQuery := rt.enforceAllowQuery(compiledRules)
-	onResolved := rt.enforceResolvedCallback(ctx, deps, compiledRules)
-
-	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
-	if err != nil {
-		return err
-	}
-
-	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
-		return err
-	}
-
-	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
-		TableName:  rt.Manifest.Net.TableName,
-		HostVeth:   rt.Manifest.Net.HostVeth,
-		SubnetCIDR: cfg.Network.Subnet,
-		DNSPort:    dnsPort,
-		ProxyPort:  proxyPortForEnforceInput(cfg),
-		Rules:      buildEnforceRules(compiledRules),
-	})
-	if err != nil {
-		return fmt.Errorf("build firewall enforce plan: %w", err)
-	}
-
-	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
-		0: fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName),
-	}))
-	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
-	if err != nil {
-		return fmt.Errorf("apply firewall enforce plan: %w", err)
-	}
-
 	if deps.DNS != nil {
+		allowQuery := rt.enforceAllowQuery(cfg.Policy)
+		onResolved := rt.enforceResolvedCallback(ctx, deps)
 		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
 			Mode:      cfg.Network.Mode,
 			GatewayIP: rt.Manifest.GatewayIP,
@@ -434,11 +432,13 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		}
 	}
 
-	if usesNestedDockerHostNetworkProxy(cfg) && deps.Proxy != nil {
+	if usesEnforceBuildProxy(cfg) && deps.Proxy != nil {
+		allowProxyTarget := rt.enforceAllowProxyTarget(cfg.Policy)
 		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			Mode:        cfg.Network.TransparentProxy.Mode,
-			Config:      cfg.Network.TransparentProxy,
-			AllowTarget: rt.enforceAllowTarget(compiledRules),
+			GatewayIP:     rt.Manifest.GatewayIP,
+			Mode:          cfg.Network.TransparentProxy.Mode,
+			Config:        cfg.Network.TransparentProxy,
+			AllowHostname: allowProxyTarget,
 		})
 		if err != nil {
 			return fmt.Errorf("start proxy: %w", err)
@@ -447,6 +447,34 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 			rt.runners["proxy"] = proxyRunner
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
 		}
+	}
+
+	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
+	if err != nil {
+		return err
+	}
+
+	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
+		return err
+	}
+
+	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
+		TableName:         rt.Manifest.Net.TableName,
+		HostVeth:          rt.Manifest.Net.HostVeth,
+		SubnetCIDR:        cfg.Network.Subnet,
+		DNSPort:           dnsPort,
+		ExtraAllowedCIDRs: append([]string(nil), cfg.Policy.ExtraAllowedCIDRs...),
+	})
+	if err != nil {
+		return fmt.Errorf("build firewall enforce plan: %w", err)
+	}
+
+	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
+		0: fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName),
+	}))
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("apply firewall enforce plan: %w", err)
 	}
 
 	return nil
@@ -460,7 +488,8 @@ func (rt *Runtime) startNetNSResources(ctx context.Context, cfg config.Config, d
 		TableName:  rt.Manifest.Net.TableName,
 		FWMark:     rt.Manifest.Net.FWMark,
 		RouteTable: rt.Manifest.Net.RouteTable,
-	}, cfg.Network.Subnet)
+		SubnetCIDR: rt.Manifest.Net.SubnetCIDR,
+	})
 	if err != nil {
 		return fmt.Errorf("build netns setup plan: %w", err)
 	}
@@ -535,68 +564,72 @@ func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
 	}
 }
 
-func (rt *Runtime) enforceAllowQuery(compiled []compiledEgressRule) func(hostname string) bool {
+func (rt *Runtime) enforceAllowQuery(policyCfg config.PolicyConfig) func(hostname string) bool {
+	policy := monitor.CompilePolicy(policyCfg)
 	return func(hostname string) bool {
-		return anyHostnameRuleMatches(compiled, hostname)
+		return policy.Evaluate(hostname) == monitor.VerdictAllow
 	}
 }
 
-func (rt *Runtime) enforceAllowTarget(compiled []compiledEgressRule) func(string, int) bool {
-	return func(target string, port int) bool {
-		if port < 1 || port > 65535 {
-			return false
+func (rt *Runtime) enforceAllowProxyTarget(policyCfg config.PolicyConfig) func(hostname string) bool {
+	allowHostname := rt.enforceAllowQuery(policyCfg)
+	allowedCIDRs := make([]netip.Prefix, 0, len(policyCfg.ExtraAllowedCIDRs))
+	for _, value := range policyCfg.ExtraAllowedCIDRs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
+		if err != nil {
+			continue
 		}
+		allowedCIDRs = append(allowedCIDRs, prefix.Masked())
+	}
 
-		normalized := config.NormalizeHostname(target)
+	return func(hostname string) bool {
+		host := strings.TrimSpace(hostname)
+		normalized := monitor.NormalizeHostname(host)
 		if normalized == "" {
+			normalized = host
+		}
+		if addr, err := netip.ParseAddr(normalized); err == nil {
+			addr = addr.Unmap()
+			for _, prefix := range allowedCIDRs {
+				if prefix.Contains(addr) {
+					return true
+				}
+			}
 			return false
 		}
-
-		if addr, err := netip.ParseAddr(normalized); err == nil && addr.Is4() {
-			return anyCIDRRuleMatches(compiled, addr.Unmap(), "tcp", port)
-		}
-
-		return anyHostnameRuleMatchesTransport(compiled, normalized, "tcp", port)
+		return allowHostname(normalized)
 	}
 }
 
-func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps, compiled []compiledEgressRule) func(dns.Resolution) {
+func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps) func(dns.Resolution) {
 	return func(event dns.Resolution) {
 		if rt == nil {
 			return
 		}
-		for _, setName := range matchingHostnameRuleSetNames(compiled, event.Hostname) {
-			for _, addr := range event.IPs {
-				if err := rt.allowResolvedIP(ctx, deps.CommandExec, setName, addr); err != nil {
-					continue
-				}
+		for _, addr := range event.IPs {
+			if err := rt.allowResolvedIP(ctx, deps.CommandExec, addr); err != nil {
+				continue
 			}
 		}
 	}
 }
 
-func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, setName string, addr netip.Addr) error {
+func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, addr netip.Addr) error {
 	if rt == nil || execer == nil || !addr.Is4() {
 		return nil
 	}
 
-	setName = strings.TrimSpace(setName)
-	if setName == "" {
-		return nil
-	}
-
 	ip := addr.Unmap().String()
-	key := setName + "|" + ip
 
 	rt.allowMu.Lock()
-	if _, exists := rt.allowIPs[key]; exists {
+	if _, exists := rt.allowIPs[ip]; exists {
 		rt.allowMu.Unlock()
 		return nil
 	}
-	rt.allowIPs[key] = struct{}{}
+	rt.allowIPs[ip] = struct{}{}
 	rt.allowMu.Unlock()
 
-	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, setName, ip)
+	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, ip)
 	if err != nil {
 		return err
 	}
@@ -606,7 +639,7 @@ func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, setN
 	}
 	if err := execer.Run(ctx, fields[0], fields[1:]...); err != nil {
 		rt.allowMu.Lock()
-		delete(rt.allowIPs, key)
+		delete(rt.allowIPs, ip)
 		rt.allowMu.Unlock()
 		return fmt.Errorf("allow resolved ip %q: %w", ip, err)
 	}
@@ -717,274 +750,14 @@ func usesManagedNetworkPolicy(mode string) bool {
 	return strings.EqualFold(mode, "monitor") || strings.EqualFold(mode, "enforce")
 }
 
-func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
-	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
-		cfg.Docker.Enabled &&
-		cfg.Docker.HostNetworkNestedContainers
-}
-
-func proxyPortForEnforceInput(cfg config.Config) int {
-	if !usesNestedDockerHostNetworkProxy(cfg) {
-		return 0
-	}
-	return cfg.Network.TransparentProxy.HTTPPort
-}
-
-func compileRuntimeEgress(policy config.PolicyConfig) []compiledEgressRule {
-	compiled := make([]compiledEgressRule, 0, len(policy.Egress))
-	for idx, rule := range policy.Egress {
-		entry := compiledEgressRule{
-			Hostname:   normalizeRuntimeRuleHostname(rule.Hostname),
-			CIDR:       normalizeRuntimeRuleCIDR(rule.CIDR),
-			Transport:  normalizeRuntimeRuleTransport(rule.Transport),
-			ICMP:       normalizeRuntimeRuleICMP(rule.ICMP),
-			inputIndex: idx,
-		}
-		compiled = append(compiled, entry)
-	}
-
-	sort.Slice(compiled, func(i, j int) bool {
-		ik := runtimeRuleSortKey(compiled[i])
-		jk := runtimeRuleSortKey(compiled[j])
-		if ik != jk {
-			return ik < jk
-		}
-		return compiled[i].inputIndex < compiled[j].inputIndex
-	})
-
-	for idx := range compiled {
-		compiled[idx].SetName = fmt.Sprintf("egress_%d_v4", idx)
-	}
-	return compiled
-}
-
-func normalizeRuntimeRuleHostname(hostname string) string {
-	return config.NormalizeHostname(hostname)
-}
-
-func normalizeRuntimeRuleCIDR(cidr string) string {
-	trimmed := strings.TrimSpace(cidr)
-	if trimmed == "" {
-		return ""
-	}
-	prefix, err := netip.ParsePrefix(trimmed)
-	if err != nil || !prefix.Addr().Is4() {
-		return trimmed
-	}
-	return prefix.Masked().String()
-}
-
-func normalizeRuntimeRuleTransport(rules []config.TransportRule) []firewall.TransportMatch {
-	out := make([]firewall.TransportMatch, 0, len(rules))
-	for _, rule := range rules {
-		ports := append([]int(nil), rule.Ports...)
-		sort.Ints(ports)
-		out = append(out, firewall.TransportMatch{
-			Protocol: strings.ToLower(strings.TrimSpace(rule.Protocol)),
-			Ports:    ports,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		ik := out[i].Protocol + "|" + joinIntList(out[i].Ports)
-		jk := out[j].Protocol + "|" + joinIntList(out[j].Ports)
-		return ik < jk
-	})
-	return out
-}
-
-func normalizeRuntimeRuleICMP(rules []config.ICMPRule) []firewall.ICMPMatch {
-	out := make([]firewall.ICMPMatch, 0, len(rules))
-	for _, rule := range rules {
-		out = append(out, firewall.ICMPMatch{
-			Type: rule.Type,
-			Code: rule.Code,
-		})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Type != out[j].Type {
-			return out[i].Type < out[j].Type
-		}
-		return out[i].Code < out[j].Code
-	})
-	return out
-}
-
-func runtimeRuleSortKey(rule compiledEgressRule) string {
-	selectorKind := "cidr"
-	selector := rule.CIDR
-	if rule.Hostname != "" {
-		selectorKind = "hostname"
-		selector = rule.Hostname
-	}
-	return selectorKind + "|" + selector + "|" + transportSortKey(rule.Transport) + "|" + icmpSortKey(rule.ICMP)
-}
-
-func transportSortKey(matches []firewall.TransportMatch) string {
-	parts := make([]string, 0, len(matches))
-	for _, match := range matches {
-		parts = append(parts, match.Protocol+":"+joinIntList(match.Ports))
-	}
-	return strings.Join(parts, ";")
-}
-
-func icmpSortKey(matches []firewall.ICMPMatch) string {
-	parts := make([]string, 0, len(matches))
-	for _, match := range matches {
-		parts = append(parts, fmt.Sprintf("%d:%d", match.Type, match.Code))
-	}
-	return strings.Join(parts, ";")
-}
-
-func joinIntList(values []int) string {
-	if len(values) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		parts = append(parts, strconv.Itoa(value))
-	}
-	return strings.Join(parts, ",")
-}
-
-func buildEnforceRules(compiled []compiledEgressRule) []firewall.EnforceRule {
-	rules := make([]firewall.EnforceRule, 0, len(compiled))
-	for _, rule := range compiled {
-		cidrs := []string(nil)
-		if rule.CIDR != "" {
-			cidrs = []string{rule.CIDR}
-		}
-		rules = append(rules, firewall.EnforceRule{
-			SetName:   rule.SetName,
-			CIDRs:     cidrs,
-			Transport: cloneTransportMatches(rule.Transport),
-			ICMP:      cloneICMPMatches(rule.ICMP),
-		})
-	}
-	return rules
-}
-
-func cloneTransportMatches(in []firewall.TransportMatch) []firewall.TransportMatch {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]firewall.TransportMatch, 0, len(in))
-	for _, match := range in {
-		out = append(out, firewall.TransportMatch{
-			Protocol: match.Protocol,
-			Ports:    append([]int(nil), match.Ports...),
-		})
-	}
-	return out
-}
-
-func cloneICMPMatches(in []firewall.ICMPMatch) []firewall.ICMPMatch {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]firewall.ICMPMatch, 0, len(in))
-	for _, match := range in {
-		out = append(out, firewall.ICMPMatch{
-			Type: match.Type,
-			Code: match.Code,
-		})
-	}
-	return out
-}
-
-func anyHostnameRuleMatches(compiled []compiledEgressRule, hostname string) bool {
-	normalizedHost := config.NormalizeHostname(hostname)
-	if normalizedHost == "" {
+func usesEnforceBuildProxy(cfg config.Config) bool {
+	if !strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") || !cfg.Network.TransparentProxy.Enabled {
 		return false
 	}
-	for _, rule := range compiled {
-		if rule.Hostname == "" {
-			continue
-		}
-		if matchesRuntimeHostnameRule(normalizedHost, rule.Hostname) {
-			return true
-		}
-	}
-	return false
-}
-
-func anyHostnameRuleMatchesTransport(compiled []compiledEgressRule, hostname string, protocol string, port int) bool {
-	for _, rule := range compiled {
-		if rule.Hostname == "" {
-			continue
-		}
-		if !matchesRuntimeHostnameRule(hostname, rule.Hostname) {
-			continue
-		}
-		if transportRuleAllows(rule.Transport, protocol, port) {
-			return true
-		}
-	}
-	return false
-}
-
-func anyCIDRRuleMatches(compiled []compiledEgressRule, addr netip.Addr, protocol string, port int) bool {
-	if !addr.Is4() {
-		return false
-	}
-	for _, rule := range compiled {
-		if rule.CIDR == "" {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(rule.CIDR)
-		if err != nil {
-			continue
-		}
-		if !prefix.Contains(addr) {
-			continue
-		}
-		if transportRuleAllows(rule.Transport, protocol, port) {
-			return true
-		}
-	}
-	return false
-}
-
-func transportRuleAllows(matches []firewall.TransportMatch, protocol string, port int) bool {
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol == "" || port < 1 || port > 65535 {
-		return false
-	}
-	for _, match := range matches {
-		if strings.ToLower(strings.TrimSpace(match.Protocol)) != protocol {
-			continue
-		}
-		for _, allowedPort := range match.Ports {
-			if allowedPort == port {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func matchingHostnameRuleSetNames(compiled []compiledEgressRule, hostname string) []string {
-	normalizedHost := config.NormalizeHostname(hostname)
-	if normalizedHost == "" {
-		return nil
-	}
-	setNames := make([]string, 0, len(compiled))
-	for _, rule := range compiled {
-		if rule.Hostname == "" || !matchesRuntimeHostnameRule(normalizedHost, rule.Hostname) {
-			continue
-		}
-		setNames = append(setNames, rule.SetName)
-	}
-	return setNames
-}
-
-func matchesRuntimeHostnameRule(host, rule string) bool {
-	if host == "" || rule == "" {
-		return false
-	}
-	if host == rule {
+	if cfg.BuildKit.Enabled {
 		return true
 	}
-	return strings.HasSuffix(host, "."+rule)
+	return cfg.Docker.Enabled && cfg.Docker.HostNetworkNestedContainers
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {
@@ -1027,6 +800,7 @@ func fromNetnsResources(in netns.Resources) NetResources {
 		TableName:  in.TableName,
 		FWMark:     in.FWMark,
 		RouteTable: in.RouteTable,
+		SubnetCIDR: in.SubnetCIDR,
 	}
 }
 

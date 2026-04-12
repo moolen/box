@@ -34,26 +34,8 @@ In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end o
 `box.yaml` supports two network modes:
 
 - `monitor` for observation plus summary output; it does not restrict general egress
-- `enforce` for structured `policy.egress` rules that admit:
-  - hostname-scoped DNS resolutions, then dynamic IPv4 allowlisting into per-rule nft sets
-  - direct IPv4 CIDR destinations for clients that connect by literal IP
-  - TCP/UDP traffic only on explicitly listed destination ports
-  - ICMP traffic only for explicitly listed `type`/`code` tuples
-
-Example `policy.egress`:
-
-```yaml
-policy:
-  egress:
-    - hostname: example.com
-      transport:
-        - protocol: tcp
-          ports: [443]
-    - cidr: 203.0.113.7/32
-      icmp:
-        - type: 8
-          code: 0
-```
+- `enforce` for DNS-gated egress, dynamic IP allowlisting from allowed DNS answers, and
+  `policy.extra_allowed_cidrs` bootstrap exceptions
 
 Integration tests cover:
 
@@ -66,8 +48,16 @@ Integration tests cover:
 - writable sandbox workdir
 - isolation checks for mounts and sandbox privileges
 - enforce-mode blocked DNS resolution
-- enforce-mode nested Docker multi-stage builds on Linux hosts with `docker`, `dockerd`,
-  and `skopeo` available
+- rootless BuildKit Dockerfile builds
+- enforce-mode BuildKit multi-stage builds and blocked remote fetches on Linux hosts with
+  `runsc`, `rootlesskit`, `newuidmap`, `newgidmap`, `buildctl`, `buildkitd`, `nsenter`, and
+  `setpriv` available
+- enforce-mode registry-backed BuildKit builds that are allowed or denied by hostname policy
+
+When `buildkit.enabled: true`, `box` launches `runsc` rootlessly through `rootlesskit` after
+joining the managed sandbox network namespace for normal sandbox execution, but Dockerfile builds
+run through a direct rootless BuildKit launcher inside that same managed network namespace so
+enforce-mode nftables policy still applies. Docker daemon mode is not supported.
 
 ## Repository Automation
 

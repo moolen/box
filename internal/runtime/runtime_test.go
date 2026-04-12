@@ -155,9 +155,72 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 	if !exec.contains("iifname " + resources.HostVeth) {
 		t.Fatalf("firewall setup commands = %#v, want host-veth scoping", exec.calls)
 	}
-	if exec.contains("ip rule add fwmark") || exec.contains("ip route add local 0.0.0.0/0 dev lo table") {
-		t.Fatalf("monitor mode must not install global policy routing commands: %#v", exec.calls)
+	if !exec.contains("ip rule add fwmark") || !exec.contains("lookup") {
+		t.Fatalf("routing setup commands = %#v, want policy routing setup", exec.calls)
 	}
+}
+
+func TestRunUsesInjectedNetworkAllocation(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	cfg.Network.Subnet = "100.96.0.0/24"
+
+	var preflightReq MonitorPreflightRequest
+	exec := &recordingCommandExec{}
+	allocated := netns.Resources{
+		NetNS:      "box-dynamic",
+		HostVeth:   "vethhdynamic",
+		GuestVeth:  "vethgdynamic",
+		TableName:  "box_dynamic",
+		FWMark:     4242,
+		RouteTable: 20042,
+		SubnetCIDR: "100.96.0.4/30",
+	}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-allocated" },
+		CommandExec: exec,
+		AllocateNetResources: func(context.Context, string, string) (netns.Resources, error) {
+			return allocated, nil
+		},
+		MonitorPreflight: func(_ context.Context, req MonitorPreflightRequest) error {
+			preflightReq = req
+			return nil
+		},
+		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	wantNet := NetResources{
+		NetNS:      allocated.NetNS,
+		HostVeth:   allocated.HostVeth,
+		GuestVeth:  allocated.GuestVeth,
+		TableName:  allocated.TableName,
+		FWMark:     allocated.FWMark,
+		RouteTable: allocated.RouteTable,
+		SubnetCIDR: allocated.SubnetCIDR,
+	}
+	if preflightReq.Net != wantNet {
+		t.Fatalf("MonitorPreflightRequest.Net = %#v, want %#v", preflightReq.Net, wantNet)
+	}
+	if rt.Manifest.Net != wantNet {
+		t.Fatalf("Manifest.Net = %#v, want %#v", rt.Manifest.Net, wantNet)
+	}
+	if rt.Manifest.GatewayIP != "100.96.0.5" {
+		t.Fatalf("Manifest.GatewayIP = %q, want %q", rt.Manifest.GatewayIP, "100.96.0.5")
+	}
+	mustContainCall(t, exec.calls, "ip addr add 100.96.0.5/30 dev vethhdynamic")
+	mustContainCall(t, exec.calls, "ip netns exec box-dynamic ip addr add 100.96.0.6/30 dev vethgdynamic")
+	mustContainCall(t, exec.calls, "ip rule add fwmark 4242 lookup 20042")
 }
 
 func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
@@ -262,13 +325,7 @@ func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T)
 	t.Parallel()
 
 	cfg := testConfig("monitor")
-	cfg.Policy.Egress = []config.EgressRule{{
-		Hostname: "example.com",
-		Transport: []config.TransportRule{{
-			Protocol: "tcp",
-			Ports:    []int{443},
-		}},
-	}}
+	cfg.Policy.AllowDomains = []string{"example.com"}
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -390,17 +447,15 @@ func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 	}
 }
 
-func TestDockerSettingsPropagateIntoRuntimeState(t *testing.T) {
+func TestBuildKitSettingsPropagateIntoRuntimeState(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Docker = config.DockerConfig{
-		Enabled:                     true,
-		DataRoot:                    "/sandbox/docker",
-		SocketPath:                  "/sandbox/docker.sock",
-		WaitForSocket:               true,
-		ReadyTimeout:                15 * time.Second,
-		HostNetworkNestedContainers: true,
+	cfg.BuildKit = config.BuildKitConfig{
+		Enabled:    true,
+		HelperPath: "/box/bin/buildctl-daemonless.sh",
+		StateDir:   "/var/cache/buildkit",
+		RunDir:     "/run/buildkit",
 	}
 
 	rt, err := Run(context.Background(), Request{
@@ -414,8 +469,8 @@ func TestDockerSettingsPropagateIntoRuntimeState(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if rt.Manifest.Docker != cfg.Docker {
-		t.Fatalf("Manifest.Docker = %#v, want %#v", rt.Manifest.Docker, cfg.Docker)
+	if rt.Manifest.BuildKit != cfg.BuildKit {
+		t.Fatalf("Manifest.BuildKit = %#v, want %#v", rt.Manifest.BuildKit, cfg.BuildKit)
 	}
 }
 
@@ -737,19 +792,12 @@ func TestRunCreatesMissingStateRootBeforeStartupChecks(t *testing.T) {
 	}
 }
 
-func TestEnforceModeAddsResolvedIPsToMatchingHostnameRuleSets(t *testing.T) {
+func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{
-		{
-			Hostname: "allowed.example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-	}
+	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
 
 	exec := &recordingCommandExec{}
 	var dnsReq DNSStartRequest
@@ -760,7 +808,7 @@ func TestEnforceModeAddsResolvedIPsToMatchingHostnameRuleSets(t *testing.T) {
 		StateRoot: t.TempDir(),
 	}, Deps{
 		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-structured-single" },
+		RandomID:    func() string { return "runtime-enforce" },
 		CommandExec: exec,
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
@@ -809,257 +857,23 @@ func TestEnforceModeAddsResolvedIPsToMatchingHostnameRuleSets(t *testing.T) {
 	}
 
 	mustContainCall(t, exec.calls, "nft add set inet box_")
-	mustContainCall(t, exec.calls, "egress_0_v4")
 	mustContainCall(t, exec.calls, "nft add element inet box_")
-	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.34 }")
-	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.35 }")
-	if countCallsContaining(exec.calls, "egress_0_v4 { 93.184.216.34 }") != 1 {
+	mustContainCall(t, exec.calls, "93.184.216.34")
+	mustContainCall(t, exec.calls, "93.184.216.35")
+	if countCallsContaining(exec.calls, "93.184.216.34") != 1 {
 		t.Fatalf("expected duplicate learned IPs to be de-duplicated; calls=%#v", exec.calls)
 	}
 }
 
-func TestEnforceModeProgramsFirewallBeforeAdmittingResolvedIPs(t *testing.T) {
+func TestEnforceModeStartsProxyForBuildKit(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{
-		{
-			Hostname: "allowed.example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-	}
-
-	exec := &firewallReadyCommandExec{}
-
-	_, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: t.TempDir(),
-	}, Deps{
-		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-firewall-before-dns" },
-		CommandExec: exec,
-		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
-			return nil
-		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			req.OnResolved(dns.Resolution{
-				Hostname: "allowed.example.com",
-				IPs:      []netip.Addr{netip.MustParseAddr("93.184.216.34")},
-			})
-			return noopRunner{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if len(exec.failedBeforeReady) != 0 {
-		t.Fatalf("resolved IP insertion happened before firewall set creation: %#v", exec.failedBeforeReady)
-	}
-	if len(exec.successfulAdds) != 1 {
-		t.Fatalf("successful learned IP insertions = %d, want 1; calls=%#v", len(exec.successfulAdds), exec.calls)
-	}
-}
-
-func TestEnforceModeUnionsOverlappingHostnameRulePermissions(t *testing.T) {
-	t.Parallel()
-
-	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{
-		{
-			Hostname: "example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-		{
-			Hostname: "api.example.com",
-			ICMP: []config.ICMPRule{{
-				Type: 8,
-				Code: 0,
-			}},
-		},
-	}
+	cfg.BuildKit.Enabled = true
+	cfg.Policy.AllowDomains = []string{"docker.io"}
 
 	exec := &recordingCommandExec{}
-
-	_, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: t.TempDir(),
-	}, Deps{
-		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-structured-overlap" },
-		CommandExec: exec,
-		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
-			return nil
-		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			if req.AllowQuery == nil {
-				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
-			}
-			if !req.AllowQuery("api.example.com") {
-				t.Fatalf("AllowQuery(api.example.com) = false, want true")
-			}
-			req.OnResolved(dns.Resolution{
-				Hostname: "api.example.com",
-				IPs:      []netip.Addr{netip.MustParseAddr("93.184.216.34")},
-			})
-			return noopRunner{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.34 }")
-	mustContainCall(t, exec.calls, "egress_1_v4 { 93.184.216.34 }")
-	if countCallsContaining(exec.calls, "93.184.216.34") != 2 {
-		t.Fatalf("expected learned IP to be inserted into both matching hostname rule sets; calls=%#v", exec.calls)
-	}
-}
-
-func TestEnforceModeCIDRRulesDoNotAuthorizeDNSQueries(t *testing.T) {
-	t.Parallel()
-
-	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{
-		{
-			CIDR: "93.184.216.0/24",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-	}
-
-	exec := &recordingCommandExec{}
-
-	_, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: t.TempDir(),
-	}, Deps{
-		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-structured-cidr-only" },
-		CommandExec: exec,
-		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
-			return nil
-		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			if req.AllowQuery == nil {
-				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
-			}
-			if req.AllowQuery("example.com") {
-				t.Fatalf("AllowQuery(example.com) = true, want false")
-			}
-			req.OnResolved(dns.Resolution{
-				Hostname: "example.com",
-				IPs:      []netip.Addr{netip.MustParseAddr("203.0.113.10")},
-			})
-			return noopRunner{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-
-	if countCallsContaining(exec.calls, "203.0.113.10") != 0 {
-		t.Fatalf("unexpected dynamic allow insertion for cidr-only policy; calls=%#v", exec.calls)
-	}
-}
-
-func TestCompileRuntimeEgressPreservesInputOrderForDuplicateNormalizedRules(t *testing.T) {
-	t.Parallel()
-
-	compiled := compileRuntimeEgress(config.PolicyConfig{
-		Egress: []config.EgressRule{
-			{
-				Hostname: " Example.com. ",
-				Transport: []config.TransportRule{{
-					Protocol: "TCP",
-					Ports:    []int{443},
-				}},
-			},
-			{
-				Hostname: "example.com",
-				Transport: []config.TransportRule{{
-					Protocol: "tcp",
-					Ports:    []int{443},
-				}},
-			},
-		},
-	})
-
-	if len(compiled) != 2 {
-		t.Fatalf("compileRuntimeEgress() len = %d, want 2", len(compiled))
-	}
-	if compiled[0].inputIndex != 0 {
-		t.Fatalf("compileRuntimeEgress()[0].inputIndex = %d, want 0", compiled[0].inputIndex)
-	}
-	if compiled[1].inputIndex != 1 {
-		t.Fatalf("compileRuntimeEgress()[1].inputIndex = %d, want 1", compiled[1].inputIndex)
-	}
-	if compiled[0].SetName != "egress_0_v4" {
-		t.Fatalf("compileRuntimeEgress()[0].SetName = %q, want %q", compiled[0].SetName, "egress_0_v4")
-	}
-	if compiled[1].SetName != "egress_1_v4" {
-		t.Fatalf("compileRuntimeEgress()[1].SetName = %q, want %q", compiled[1].SetName, "egress_1_v4")
-	}
-}
-
-func TestCompileRuntimeEgressMasksCIDRHostBits(t *testing.T) {
-	t.Parallel()
-
-	compiled := compileRuntimeEgress(config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			CIDR: "10.0.0.1/24",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
-	})
-
-	if len(compiled) != 1 {
-		t.Fatalf("compileRuntimeEgress() len = %d, want 1", len(compiled))
-	}
-	if compiled[0].CIDR != "10.0.0.0/24" {
-		t.Fatalf("compileRuntimeEgress()[0].CIDR = %q, want %q", compiled[0].CIDR, "10.0.0.0/24")
-	}
-}
-
-func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
-	t.Parallel()
-
-	cfg := testConfig("enforce")
-	cfg.Policy.Egress = []config.EgressRule{
-		{
-			Hostname: "allowed.example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-		{
-			CIDR: "203.0.113.0/24",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		},
-	}
-	cfg.Docker = config.DockerConfig{
-		Enabled:                     true,
-		DataRoot:                    "/var/lib/docker",
-		SocketPath:                  "/var/run/docker.sock",
-		WaitForSocket:               true,
-		ReadyTimeout:                10 * time.Second,
-		HostNetworkNestedContainers: true,
-	}
-
+	var proxyReq ProxyStartRequest
 	var proxyCalled bool
 
 	rt, err := Run(context.Background(), Request{
@@ -1067,33 +881,25 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 		StateRoot: t.TempDir(),
 	}, Deps{
 		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce-proxy" },
-		CommandExec: noopCommandExec{},
+		RandomID:    func() string { return "runtime-enforce-buildkit-proxy" },
+		CommandExec: exec,
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
 			proxyCalled = true
-			if req.AllowTarget == nil {
-				t.Fatalf("ProxyStartRequest.AllowTarget = nil, want callback")
+			proxyReq = req
+			if req.AllowHostname == nil {
+				t.Fatalf("ProxyStartRequest.AllowHostname = nil, want callback")
 			}
-			if req.AllowTarget("blocked.example.com", 443) {
-				t.Fatalf("AllowTarget(blocked.example.com, 443) = true, want false")
+			if req.AllowHostname("blocked.example.com") {
+				t.Fatalf("AllowHostname(blocked.example.com) = true, want false")
 			}
-			if !req.AllowTarget("allowed.example.com", 443) {
-				t.Fatalf("AllowTarget(allowed.example.com, 443) = false, want true")
-			}
-			if req.AllowTarget("allowed.example.com", 8443) {
-				t.Fatalf("AllowTarget(allowed.example.com, 8443) = true, want false")
-			}
-			if req.AllowTarget("198.51.100.8", 443) {
-				t.Fatalf("AllowTarget(198.51.100.8, 443) = true, want false")
-			}
-			if !req.AllowTarget("203.0.113.42", 443) {
-				t.Fatalf("AllowTarget(203.0.113.42, 443) = false, want true for cidr-backed ip literal")
+			if !req.AllowHostname("registry-1.docker.io") {
+				t.Fatalf("AllowHostname(registry-1.docker.io) = false, want true")
 			}
 			return noopRunner{}, nil
 		},
@@ -1102,45 +908,38 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	defer func() {
-		_ = rt.Cleanup(context.Background(), Deps{CommandExec: noopCommandExec{}})
+		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
 	}()
 
 	if !proxyCalled {
-		t.Fatalf("proxy factory was not called in enforce mode for nested docker host networking")
+		t.Fatalf("Proxy factory was not called in enforce mode for BuildKit")
+	}
+	if proxyReq.Config.HTTPPort != 18080 {
+		t.Fatalf("Proxy request http port = %d, want %d", proxyReq.Config.HTTPPort, 18080)
+	}
+	if proxyReq.GatewayIP != "100.96.0.1" {
+		t.Fatalf("Proxy request gateway ip = %q, want %q", proxyReq.GatewayIP, "100.96.0.1")
+	}
+	if proxyReq.Mode != "peek" {
+		t.Fatalf("Proxy request mode = %q, want %q", proxyReq.Mode, "peek")
 	}
 }
 
-func TestEnforceAllowTargetMatchesIPv4LiteralAgainstCIDRRules(t *testing.T) {
+func TestEnforceAllowProxyTargetAllowsConfiguredCIDRAndBlocksOtherIPs(t *testing.T) {
 	t.Parallel()
 
-	compiled := compileRuntimeEgress(config.PolicyConfig{
-		Egress: []config.EgressRule{
-			{
-				CIDR: "203.0.113.0/24",
-				Transport: []config.TransportRule{{
-					Protocol: "tcp",
-					Ports:    []int{443},
-				}},
-			},
-		},
-	})
-
 	rt := &Runtime{}
-	allow := rt.enforceAllowTarget(compiled)
-	if allow == nil {
-		t.Fatal("enforceAllowTarget() = nil")
+	allow := rt.enforceAllowProxyTarget(config.PolicyConfig{
+		ExtraAllowedCIDRs: []string{"1.1.1.1/32"},
+	})
+	if !allow("1.1.1.1") {
+		t.Fatalf("allow(1.1.1.1) = false, want true")
 	}
-	if !allow("203.0.113.44", 443) {
-		t.Fatal("allow(203.0.113.44, 443) = false, want true")
+	if !allow("1.1.1.1:80") {
+		t.Fatalf("allow(1.1.1.1:80) = false, want true")
 	}
-	if !allow("203.0.113.44:443", 443) {
-		t.Fatal("allow(203.0.113.44:443, 443) = false, want true")
-	}
-	if allow("203.0.113.44", 8443) {
-		t.Fatal("allow(203.0.113.44, 8443) = true, want false")
-	}
-	if allow("198.51.100.7", 443) {
-		t.Fatal("allow(198.51.100.7, 443) = true, want false")
+	if allow("1.1.1.2") {
+		t.Fatalf("allow(1.1.1.2) = true, want false")
 	}
 }
 
@@ -1422,30 +1221,6 @@ func (f *failingCommandExec) Run(_ context.Context, name string, args ...string)
 	return nil
 }
 
-type firewallReadyCommandExec struct {
-	calls             []string
-	firewallReady     bool
-	failedBeforeReady []string
-	successfulAdds    []string
-}
-
-func (f *firewallReadyCommandExec) Run(_ context.Context, name string, args ...string) error {
-	call := strings.TrimSpace(strings.Join(append([]string{name}, args...), " "))
-	f.calls = append(f.calls, call)
-
-	if strings.Contains(call, "nft add set inet box_") && strings.Contains(call, "egress_0_v4") {
-		f.firewallReady = true
-	}
-	if strings.Contains(call, "nft add element inet box_") && strings.Contains(call, "egress_0_v4 { 93.184.216.34 }") {
-		if !f.firewallReady {
-			f.failedBeforeReady = append(f.failedBeforeReady, call)
-			return errors.New("egress set not ready")
-		}
-		f.successfulAdds = append(f.successfulAdds, call)
-	}
-	return nil
-}
-
 func fixedClock() time.Time {
 	return time.Date(2026, 4, 11, 9, 0, 0, 0, time.UTC)
 }
@@ -1460,7 +1235,7 @@ func testConfig(networkMode string) config.Config {
 		},
 		Network: config.NetworkConfig{
 			Mode:   networkMode,
-			Subnet: "100.96.0.0/30",
+			Subnet: "100.96.0.0/24",
 			DNS: config.DNSConfig{
 				BindAddr: "auto",
 				Upstream: []string{"1.1.1.1:53"},

@@ -2,8 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -74,32 +72,6 @@ func TestReapChildrenExceptDoesNotReapMainPayloadPID(t *testing.T) {
 	for _, pid := range wait4Calls {
 		if pid != sidePID {
 			t.Fatalf("wait4 called with pid %d, want only side pid %d", pid, sidePID)
-		}
-	}
-}
-
-func TestEnsureDockerRuntimeDirsPrecreatesSearchableLibnetworkDirectory(t *testing.T) {
-	root := t.TempDir()
-	socketPath := filepath.Join(root, "docker.sock")
-
-	if err := ensureDockerRuntimeDirs(socketPath); err != nil {
-		t.Fatalf("ensureDockerRuntimeDirs() error = %v", err)
-	}
-
-	for _, path := range []string{
-		filepath.Join(root, "docker"),
-		filepath.Join(root, "docker", "containerd"),
-		filepath.Join(root, "docker", "libnetwork"),
-	} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("Stat(%q) error = %v", path, err)
-		}
-		if !info.IsDir() {
-			t.Fatalf("%q is not a directory", path)
-		}
-		if info.Mode().Perm()&0o100 == 0 {
-			t.Fatalf("%q mode = %#o, want owner execute bit set", path, info.Mode().Perm())
 		}
 	}
 }

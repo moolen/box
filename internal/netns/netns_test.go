@@ -1,31 +1,32 @@
 package netns
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
 )
 
-func TestRuntimeIDProducesDeterministicResourceNames(t *testing.T) {
-	first, err := ResourcesForRuntimeID("runtime-abc-123")
+func TestAllocateResourcesUsesRuntimeTokenForNames(t *testing.T) {
+	first, err := AllocateResources(context.Background(), "runtime-abc-123", "100.96.0.0/29", fakeProbe{})
 	if err != nil {
-		t.Fatalf("ResourcesForRuntimeID() error: %v", err)
+		t.Fatalf("AllocateResources() error: %v", err)
 	}
-	second, err := ResourcesForRuntimeID("runtime-abc-123")
+	second, err := AllocateResources(context.Background(), "runtime-abc-123", "100.96.0.0/29", fakeProbe{})
 	if err != nil {
-		t.Fatalf("ResourcesForRuntimeID() error: %v", err)
+		t.Fatalf("AllocateResources() error: %v", err)
 	}
-	other, err := ResourcesForRuntimeID("runtime-def-456")
+	other, err := AllocateResources(context.Background(), "runtime-def-456", "100.96.0.0/29", fakeProbe{})
 	if err != nil {
-		t.Fatalf("ResourcesForRuntimeID() error: %v", err)
+		t.Fatalf("AllocateResources() error: %v", err)
 	}
 
-	if first != second {
-		t.Fatalf("same runtime id must produce identical resources: first=%+v second=%+v", first, second)
+	if first.NetNS != second.NetNS || first.HostVeth != second.HostVeth || first.GuestVeth != second.GuestVeth || first.TableName != second.TableName {
+		t.Fatalf("same runtime id must produce stable names: first=%+v second=%+v", first, second)
 	}
-	if first == other {
-		t.Fatalf("different runtime ids must not produce identical resources: first=%+v other=%+v", first, other)
+	if first.NetNS == other.NetNS || first.HostVeth == other.HostVeth || first.GuestVeth == other.GuestVeth || first.TableName == other.TableName {
+		t.Fatalf("different runtime ids must not produce identical names: first=%+v other=%+v", first, other)
 	}
 	if first.NetNS == "" || first.HostVeth == "" || first.GuestVeth == "" || first.TableName == "" {
 		t.Fatalf("resource names must be populated: %+v", first)
@@ -44,37 +45,70 @@ func TestRuntimeIDProducesDeterministicResourceNames(t *testing.T) {
 	}
 }
 
-func TestBuildSetupPlanAssignsGatewayAndSandboxAddress(t *testing.T) {
-	resources, err := ResourcesForRuntimeID("runtime-abc-123")
-	if err != nil {
-		t.Fatalf("ResourcesForRuntimeID() error: %v", err)
+func TestAllocateResourcesSkipsUsedSubnetsRouteTablesAndFWMarks(t *testing.T) {
+	probe := fakeProbe{
+		subnetsInUse: map[string]bool{
+			"100.96.0.0/30": true,
+		},
+		routeTablesInUse: map[int]bool{
+			10000: true,
+		},
+		fwMarksInUse: map[uint32]bool{
+			0x100: true,
+		},
 	}
 
-	plan, err := BuildSetupPlan(resources, "100.96.0.0/30")
+	resources, err := AllocateResources(context.Background(), "runtime-abc-123", "100.96.0.0/29", probe)
+	if err != nil {
+		t.Fatalf("AllocateResources() error: %v", err)
+	}
+
+	if resources.SubnetCIDR != "100.96.0.4/30" {
+		t.Fatalf("SubnetCIDR = %q, want %q", resources.SubnetCIDR, "100.96.0.4/30")
+	}
+	if resources.RouteTable == 10000 {
+		t.Fatalf("RouteTable = %d, want allocator to skip in-use table", resources.RouteTable)
+	}
+	if resources.FWMark == 0x100 {
+		t.Fatalf("FWMark = %d, want allocator to skip in-use fwmark", resources.FWMark)
+	}
+}
+
+func TestBuildSetupPlanAssignsGatewayAndSandboxAddress(t *testing.T) {
+	resources, err := AllocateResources(context.Background(), "runtime-abc-123", "100.96.0.0/29", fakeProbe{
+		subnetsInUse: map[string]bool{
+			"100.96.0.0/30": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AllocateResources() error: %v", err)
+	}
+
+	plan, err := BuildSetupPlan(resources)
 	if err != nil {
 		t.Fatalf("BuildSetupPlan() error: %v", err)
 	}
 
-	if plan.GatewayCIDR != "100.96.0.1/30" {
-		t.Fatalf("GatewayCIDR = %q, want %q", plan.GatewayCIDR, "100.96.0.1/30")
+	if plan.GatewayCIDR != "100.96.0.5/30" {
+		t.Fatalf("GatewayCIDR = %q, want %q", plan.GatewayCIDR, "100.96.0.5/30")
 	}
-	if plan.SandboxCIDR != "100.96.0.2/30" {
-		t.Fatalf("SandboxCIDR = %q, want %q", plan.SandboxCIDR, "100.96.0.2/30")
+	if plan.SandboxCIDR != "100.96.0.6/30" {
+		t.Fatalf("SandboxCIDR = %q, want %q", plan.SandboxCIDR, "100.96.0.6/30")
 	}
-	if plan.GatewayIP != "100.96.0.1" {
-		t.Fatalf("GatewayIP = %q, want %q", plan.GatewayIP, "100.96.0.1")
+	if plan.GatewayIP != "100.96.0.5" {
+		t.Fatalf("GatewayIP = %q, want %q", plan.GatewayIP, "100.96.0.5")
 	}
-	if plan.SandboxIP != "100.96.0.2" {
-		t.Fatalf("SandboxIP = %q, want %q", plan.SandboxIP, "100.96.0.2")
+	if plan.SandboxIP != "100.96.0.6" {
+		t.Fatalf("SandboxIP = %q, want %q", plan.SandboxIP, "100.96.0.6")
 	}
 
 	wantCommands := []string{
 		fmt.Sprintf("ip netns add %s", resources.NetNS),
 		fmt.Sprintf("ip link add %s type veth peer name %s", resources.HostVeth, resources.GuestVeth),
 		fmt.Sprintf("ip link set %s netns %s", resources.GuestVeth, resources.NetNS),
-		fmt.Sprintf("ip addr add 100.96.0.1/30 dev %s", resources.HostVeth),
-		fmt.Sprintf("ip netns exec %s ip addr add 100.96.0.2/30 dev %s", resources.NetNS, resources.GuestVeth),
-		fmt.Sprintf("ip netns exec %s ip route add default via 100.96.0.1 dev %s", resources.NetNS, resources.GuestVeth),
+		fmt.Sprintf("ip addr add 100.96.0.5/30 dev %s", resources.HostVeth),
+		fmt.Sprintf("ip netns exec %s ip addr add 100.96.0.6/30 dev %s", resources.NetNS, resources.GuestVeth),
+		fmt.Sprintf("ip netns exec %s ip route add default via 100.96.0.5 dev %s", resources.NetNS, resources.GuestVeth),
 	}
 	for _, want := range wantCommands {
 		if !slices.Contains(plan.Commands, want) {
@@ -89,4 +123,22 @@ func TestBuildSetupPlanAssignsGatewayAndSandboxAddress(t *testing.T) {
 	if !slices.Equal(plan.Teardown, wantTeardown) {
 		t.Fatalf("Teardown = %#v, want %#v", plan.Teardown, wantTeardown)
 	}
+}
+
+type fakeProbe struct {
+	subnetsInUse     map[string]bool
+	routeTablesInUse map[int]bool
+	fwMarksInUse     map[uint32]bool
+}
+
+func (f fakeProbe) SubnetInUse(_ context.Context, subnet string) (bool, error) {
+	return f.subnetsInUse[subnet], nil
+}
+
+func (f fakeProbe) RouteTableInUse(_ context.Context, routeTable int) (bool, error) {
+	return f.routeTablesInUse[routeTable], nil
+}
+
+func (f fakeProbe) FWMarkInUse(_ context.Context, fwMark uint32) (bool, error) {
+	return f.fwMarksInUse[fwMark], nil
 }

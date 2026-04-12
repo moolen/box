@@ -1,7 +1,6 @@
 package rootfs
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,11 +38,12 @@ func TestHostOverlayPlanIncludesRecoveredReadonlyBinds(t *testing.T) {
 
 func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:     "host-overlay",
-		RepoPath:       "/home/user/repo",
-		Workdir:        "/workspace",
-		DockerEnabled:  true,
-		DockerDataRoot: "/var/lib/docker",
+		RootfsMode:       "host-overlay",
+		RepoPath:         "/home/user/repo",
+		Workdir:          "/workspace",
+		BuildKitEnabled:  true,
+		BuildKitStateDir: "/var/cache/buildkit",
+		BuildKitRunDir:   "/run/buildkit",
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan() error: %v", err)
@@ -56,7 +56,7 @@ func TestHostOverlayPlanCreatesWritableRuntimeDirsWithoutHostBinds(t *testing.T)
 		}
 	}
 
-	wantWritableDirs := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache", "/var/lib/docker"}
+	wantWritableDirs := []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache", "/var/cache/buildkit", "/run/buildkit"}
 	for _, target := range wantWritableDirs {
 		if !slices.Contains(plan.WritableDirs, target) {
 			t.Fatalf("WritableDirs missing %q; got %#v", target, plan.WritableDirs)
@@ -132,106 +132,69 @@ func TestGeneratedEtcFilesUseGatewayDNSInEnforceMode(t *testing.T) {
 	t.Fatalf("generated resolv.conf missing from plan: %#v", plan.GeneratedFiles)
 }
 
-func TestBuildPlanGeneratesDockerDaemonConfigWithProxySettings(t *testing.T) {
+func TestBuildPlanStagesBuildKitDaemonlessHelper(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:       "host-overlay",
-		DockerEnabled:    true,
-		DockerDataRoot:   "/var/lib/docker",
-		DockerSocketPath: "/var/run/docker.sock",
-		DockerHTTPProxy:  "http://100.96.0.1:18080",
-		DockerHTTPSProxy: "http://100.96.0.1:18080",
-		DockerNoProxy:    "127.0.0.1,localhost",
+		RootfsMode:      "host-overlay",
+		BuildKitEnabled: true,
+		BuildKitHelper:  "/box/bin/buildctl-daemonless.sh",
+		BuildKitRunDir:  "/run/buildkit",
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan() error: %v", err)
 	}
 
-	var daemon GeneratedFile
+	var helper GeneratedFile
+	var client GeneratedFile
 	var found bool
+	var foundClient bool
 	for _, file := range plan.GeneratedFiles {
-		if file.Path == "/etc/docker/daemon.json" {
-			daemon = file
+		if file.Path == "/box/bin/buildctl-daemonless.sh" {
+			helper = file
 			found = true
-			break
+		}
+		if file.Path == "/box/bin/buildctl" {
+			client = file
+			foundClient = true
 		}
 	}
 	if !found {
-		t.Fatalf("generated docker daemon config missing; files=%#v", plan.GeneratedFiles)
+		t.Fatalf("generated buildkit helper missing; files=%#v", plan.GeneratedFiles)
 	}
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(daemon.Content), &parsed); err != nil {
-		t.Fatalf("daemon.json decode error: %v\ncontent=%s", err, daemon.Content)
+	if !foundClient {
+		t.Fatalf("generated buildkit client wrapper missing; files=%#v", plan.GeneratedFiles)
 	}
-
-	if got := parsed["data-root"]; got != "/var/lib/docker" {
-		t.Fatalf("data-root = %#v, want %q", got, "/var/lib/docker")
+	if helper.Mode != 0o755 {
+		t.Fatalf("helper mode = %#o, want %#o", helper.Mode, 0o755)
 	}
-	hosts, ok := parsed["hosts"].([]any)
-	if !ok || len(hosts) != 1 || hosts[0] != "unix:///var/run/docker.sock" {
-		t.Fatalf("hosts = %#v, want unix socket host", parsed["hosts"])
+	if !strings.Contains(helper.Content, `if [ -n "${BUILDKIT_HOST:-}" ]`) {
+		t.Fatalf("helper content = %q, want host daemon shortcut", helper.Content)
 	}
-	proxies, ok := parsed["proxies"].(map[string]any)
-	if !ok {
-		t.Fatalf("proxies = %#v, want object", parsed["proxies"])
+	if !strings.Contains(helper.Content, "buildctl --addr=\"$BUILDKIT_HOST\"") {
+		t.Fatalf("helper content = %q, want host socket client invocation", helper.Content)
 	}
-	if got := proxies["http-proxy"]; got != "http://100.96.0.1:18080" {
-		t.Fatalf("http-proxy = %#v, want host proxy URL", got)
+	if !strings.Contains(client.Content, "set -- --addr=\"$BUILDKIT_HOST\" \"$@\"") {
+		t.Fatalf("client wrapper content = %q, want buildctl host socket setup", client.Content)
 	}
-	if got := proxies["https-proxy"]; got != "http://100.96.0.1:18080" {
-		t.Fatalf("https-proxy = %#v, want host proxy URL", got)
+	if !strings.Contains(client.Content, `BOX_BUILDKIT_HTTP_PROXY`) {
+		t.Fatalf("client wrapper content = %q, want buildkit-specific proxy env support", client.Content)
 	}
-	if got := proxies["no-proxy"]; got != "127.0.0.1,localhost" {
-		t.Fatalf("no-proxy = %#v, want localhost bypass list", got)
+	if !strings.Contains(client.Content, `build-arg:HTTP_PROXY=$BOX_BUILDKIT_HTTP_PROXY`) {
+		t.Fatalf("client wrapper content = %q, want build proxy auto-injection", client.Content)
 	}
 }
 
-func TestBuildPlanGeneratesDockerClientConfigWithProxySettings(t *testing.T) {
+func TestBuildPlanDoesNotGenerateDockerDaemonFilesWhenBuildKitEnabled(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
-		RootfsMode:       "host-overlay",
-		DockerEnabled:    true,
-		DockerHTTPProxy:  "http://100.96.0.1:18080",
-		DockerHTTPSProxy: "http://100.96.0.1:18080",
-		DockerNoProxy:    "127.0.0.1,localhost",
+		RootfsMode:      "host-overlay",
+		BuildKitEnabled: true,
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan() error: %v", err)
 	}
-
-	var client GeneratedFile
-	var found bool
 	for _, file := range plan.GeneratedFiles {
-		if file.Path == "/etc/docker/config.json" {
-			client = file
-			found = true
-			break
+		if strings.HasPrefix(file.Path, "/etc/docker/") {
+			t.Fatalf("generated docker file %q present in buildkit mode; files=%#v", file.Path, plan.GeneratedFiles)
 		}
-	}
-	if !found {
-		t.Fatalf("generated docker client config missing; files=%#v", plan.GeneratedFiles)
-	}
-
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(client.Content), &parsed); err != nil {
-		t.Fatalf("config.json decode error: %v\ncontent=%s", err, client.Content)
-	}
-
-	proxies, ok := parsed["proxies"].(map[string]any)
-	if !ok {
-		t.Fatalf("proxies = %#v, want object", parsed["proxies"])
-	}
-	defaults, ok := proxies["default"].(map[string]any)
-	if !ok {
-		t.Fatalf("proxies.default = %#v, want object", proxies["default"])
-	}
-	if got := defaults["httpProxy"]; got != "http://100.96.0.1:18080" {
-		t.Fatalf("httpProxy = %#v, want host proxy URL", got)
-	}
-	if got := defaults["httpsProxy"]; got != "http://100.96.0.1:18080" {
-		t.Fatalf("httpsProxy = %#v, want host proxy URL", got)
-	}
-	if got := defaults["noProxy"]; got != "127.0.0.1,localhost" {
-		t.Fatalf("noProxy = %#v, want localhost bypass list", got)
 	}
 }
 

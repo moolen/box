@@ -1,11 +1,9 @@
 package integration
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -20,6 +18,8 @@ import (
 	"gvisor-net/internal/config"
 )
 
+const buildKitRemoteFetchURL = "http://1.1.1.1/cdn-cgi/trace"
+
 func TestBoxRunsPwd(t *testing.T) {
 	output := runBoxSmoke(t, "/bin/pwd")
 	if strings.TrimSpace(output) == "" {
@@ -28,33 +28,14 @@ func TestBoxRunsPwd(t *testing.T) {
 }
 
 func TestBoxRunsEnv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("integration smoke tests require Linux")
-	}
-
-	requireRootIfNeeded(t)
-
-	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
-	cfg, err := config.Load(configPath, binary.ModuleRoot)
-	if err != nil {
-		t.Fatalf("config.Load(%q) error = %v", configPath, err)
-	}
-
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "/usr/bin/env")
-	if err != nil {
-		t.Fatalf("run box env error = %v; stdout=%q stderr=%q", err, stdout, stderr)
-	}
-	output := stdout
+	output := runBoxSmoke(t, "/usr/bin/env")
 	if !strings.Contains(output, "PATH=") {
 		t.Fatalf("env output = %q, want PATH entry", output)
 	}
-	wantHTTPProxy := fmt.Sprintf("HTTP_PROXY=http://100.96.0.1:%d", cfg.Network.TransparentProxy.HTTPPort)
-	if !strings.Contains(output, wantHTTPProxy) {
+	if !strings.Contains(output, "HTTP_PROXY=http://100.96.0.1:18080") {
 		t.Fatalf("env output = %q, want HTTP_PROXY host intercept env", output)
 	}
-	wantHTTPSProxy := fmt.Sprintf("HTTPS_PROXY=http://100.96.0.1:%d", cfg.Network.TransparentProxy.HTTPPort)
-	if !strings.Contains(output, wantHTTPSProxy) {
+	if !strings.Contains(output, "HTTPS_PROXY=http://100.96.0.1:18080") {
 		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
 	}
 }
@@ -81,8 +62,7 @@ func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
-	cfg, err := config.Load(configPath, binary.ModuleRoot)
+	cfg, err := config.Load("box.yaml", binary.ModuleRoot)
 	if err != nil {
 		t.Fatalf("config.Load() error = %v", err)
 	}
@@ -91,46 +71,64 @@ func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParsePrefix(%q) error = %v", cfg.Network.Subnet, err)
 	}
-	expectedSandboxIP := prefix.Masked().Addr().Next().Next()
-	expectedCIDR := expectedSandboxIP.String() + "/" + strconv.Itoa(prefix.Bits())
-
 	hostIPOutput, err := exec.Command("ip", "-4", "-o", "addr", "show").CombinedOutput()
 	if err != nil {
 		t.Fatalf("host ip command error = %v: %s", err, strings.TrimSpace(string(hostIPOutput)))
 	}
-	if strings.Contains(string(hostIPOutput), expectedCIDR) {
-		t.Skipf("host already exposes expected sandbox address %q; dirty host state", expectedCIDR)
-	}
 
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "ip", "-4", "-o", "addr", "show")
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--", "ip", "-4", "-o", "addr", "show")
 	if err != nil {
 		t.Fatalf("run box ip command error = %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, expectedCIDR) {
-		t.Fatalf("ip output = %q, want sandbox cidr %q", stdout, expectedCIDR)
+
+	sandboxCIDR := firstNonLoopbackIPv4Prefix(t, stdout)
+	if sandboxCIDR.Bits() != 30 {
+		t.Fatalf("sandbox interface prefix = %q, want /30 allocation from subnet pool", sandboxCIDR)
+	}
+	if !prefix.Contains(sandboxCIDR.Addr()) {
+		t.Fatalf("sandbox interface prefix = %q, want address within configured pool %q", sandboxCIDR, prefix)
+	}
+	if strings.Contains(string(hostIPOutput), sandboxCIDR.String()) {
+		t.Skipf("host already exposes sandbox address %q; dirty host state", sandboxCIDR)
 	}
 	if stdout == string(hostIPOutput) {
 		t.Fatalf("sandbox ip output matched host network view exactly; stdout=%q", stdout)
 	}
 }
 
-func TestBoxStartsSandboxDockerDaemon(t *testing.T) {
+func TestBoxBuildsDockerfileWithRootlessBuildKit(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
 	}
 
 	requireRootIfNeeded(t)
-	testenv.RequireCommands(t, "docker", "dockerd")
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteDockerEnabledConfig(t, binary.ModuleRoot)
-
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "docker", "version", "--format", "{{.Server.Version}}")
-	if err != nil {
-		t.Fatalf("run box docker version error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	configPath := testenv.WriteBuildKitEnabledConfig(t, binary.ModuleRoot)
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-buildkit-smoke.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	inputPath := filepath.Join(contextDir, "hello.txt")
+	if err := os.WriteFile(inputPath, []byte("hello from buildkit\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", inputPath, err)
 	}
-	if strings.TrimSpace(stdout) == "" {
-		t.Fatalf("docker version output is empty; stderr=%q", stderr)
+	if err := os.WriteFile(dockerfilePath, []byte("FROM scratch\nCOPY hello.txt /hello.txt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
+	}
+	chownTreeToOriginalUser(t, contextDir)
+
+	script := buildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
+	if err != nil {
+		t.Fatalf("run box buildctl smoke build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	got, err := os.ReadFile(filepath.Join(outputDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v; stdout=%q stderr=%q", filepath.Join(outputDir, "hello.txt"), err, stdout, stderr)
+	}
+	if string(got) != "hello from buildkit\n" {
+		t.Fatalf("built hello.txt = %q, want %q", string(got), "hello from buildkit\n")
 	}
 }
 
@@ -140,217 +138,237 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
-	testenv.RequireCommands(t, "docker", "dockerd", "skopeo")
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
 
 	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, nil, []string{"1.1.1.1/32"})
+
 	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-build.")
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
-	alpineArchivePath := filepath.Join(contextDir, "alpine.tar")
-	debianArchivePath := filepath.Join(contextDir, "debian.tar")
+	outputDir := filepath.Join(contextDir, "out")
 	dockerfile := strings.TrimSpace(`
-FROM alpine:3.20 AS alpine-stage
-RUN wget -qO /build-artifact.txt 'http://example.com/' && \
-    grep -q 'Example Domain' /build-artifact.txt
+FROM scratch AS fetch-stage
+ADD PLACEHOLDER_FIXTURE_URL /build-artifact.txt
 
-FROM debian:bookworm-slim AS debian-stage
-WORKDIR /tmp/app
-RUN printf '%s\n' '{"name":"box-enforce-test"}' >/tmp/app/package.json
-
-FROM debian:bookworm-slim
-COPY --from=alpine-stage /build-artifact.txt /build-artifact.txt
-COPY --from=debian-stage /tmp/app/package.json /package.json
-RUN test -s /build-artifact.txt && test -s /package.json
-CMD ["cat", "/build-artifact.txt"]
+FROM scratch
+COPY --from=fetch-stage /build-artifact.txt /build-artifact.txt
 `) + "\n"
+	dockerfile = strings.ReplaceAll(dockerfile, "PLACEHOLDER_FIXTURE_URL", buildKitRemoteFetchURL)
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
 	}
-	copyDockerArchive(t, "docker.io/library/alpine:3.20", alpineArchivePath, "alpine:3.20")
-	copyDockerArchive(t, "docker.io/library/debian:bookworm-slim", debianArchivePath, "debian:bookworm-slim")
-	configPath := testenv.WriteEnforceDockerConfigWithHostNetworkNestedContainers(t, `
-- hostname: example.com
-  transport:
-    - protocol: tcp
-      ports: [80]
-`, true)
-
-	imageTag := "box-enforce-test:" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	script := fmt.Sprintf(`
-set -e
-docker load -i %s >/dev/null
-docker load -i %s >/dev/null
-DOCKER_BUILDKIT=0 docker build --network=host -t %s -f %s %s
-docker image inspect %s >/dev/null
-echo BOX_BUILD_DONE
-`, shellSingleQuote(relPath(t, binary.ModuleRoot, alpineArchivePath)), shellSingleQuote(relPath(t, binary.ModuleRoot, debianArchivePath)), shellSingleQuote(imageTag), shellSingleQuote(relPath(t, binary.ModuleRoot, dockerfilePath)), shellSingleQuote(relPath(t, binary.ModuleRoot, contextDir)), shellSingleQuote(imageTag))
+	chownTreeToOriginalUser(t, contextDir)
+	script := buildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
 	if err != nil {
-		if strings.Contains(stdout, "BOX_BUILD_DONE") {
-			t.Logf("box returned cleanup noise after successful docker build: %v; stderr=%q", err, stderr)
-			return
-		}
-		t.Fatalf("run box enforce docker build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+		t.Fatalf("run box enforce buildctl build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "BOX_BUILD_DONE") {
-		t.Fatalf("docker build stdout missing completion sentinel: %q", stdout)
+	got, err := os.ReadFile(filepath.Join(outputDir, "build-artifact.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v; stdout=%q stderr=%q", filepath.Join(outputDir, "build-artifact.txt"), err, stdout, stderr)
+	}
+	if !strings.Contains(string(got), "h=1.1.1.1") {
+		t.Fatalf("build artifact = %q, want Cloudflare trace body", string(got))
 	}
 }
 
-func TestBoxEnforceAllowsConfiguredHostnamePortOnly(t *testing.T) {
+func TestBoxEnforceBlocksDisallowedRemoteBuildFetch(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
 	}
 
 	requireRootIfNeeded(t)
-	testenv.RequireCommands(t, "ip", "python3")
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
 
 	binary := testenv.BuildBoxBinary(t)
-	fixture := startRoutedHTTPFixture(t, 18081, 18082)
-	const hostname = "allowed.example.test"
-	dnsUpstream := startDNSAUpstream(t, hostname, []string{fixture.IP})
-	configPath := testenv.WriteEnforceConfigWithDNSUpstreams(t, fmt.Sprintf(`
-- hostname: %s
-  transport:
-    - protocol: tcp
-      ports: [%d]
-`, hostname, fixture.Ports[0]), []string{dnsUpstream})
-
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d", hostname, fixture.Ports[0]))
-	if err == nil {
-		if !strings.Contains(stdout, "Example Domain") {
-			t.Fatalf("allowed hostname request stdout = %q, want fixture body", stdout)
-		}
-	} else {
-		if shouldSkipGitHubActionsEnforceTCP(t, stdout, stderr) {
-			t.Skipf("github actions runner could not reach allowed routed tcp fixture in enforce mode: stdout=%q stderr=%q", stdout, stderr)
-		}
-		t.Fatalf("allowed hostname port request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	configPath := testenv.WriteEnforceConfig(t, nil, nil)
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-deny-build.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	dockerfile := strings.TrimSpace(`
+FROM scratch
+ADD PLACEHOLDER_FIXTURE_URL /blocked.txt
+`) + "\n"
+	dockerfile = strings.ReplaceAll(dockerfile, "PLACEHOLDER_FIXTURE_URL", buildKitRemoteFetchURL)
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
 	}
+	chownTreeToOriginalUser(t, contextDir)
 
-	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d", hostname, fixture.Ports[1]))
+	script := buildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
 	if err == nil {
-		t.Fatalf("expected disallowed hostname port to fail; stdout=%q stderr=%q", stdout, stderr)
+		t.Fatalf("expected enforce mode build to fail without explicit remote CIDR allowlist; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 
-func TestBoxEnforceAllowsDirectIPOnlyWhenCIDRRuleMatches(t *testing.T) {
+func TestBoxEnforceBuildsDockerfileFromAllowedRegistry(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
 	}
 
 	requireRootIfNeeded(t)
-	testenv.RequireCommands(t, "ip", "python3")
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceBuildKitProxyConfig(t, []string{"docker.io", "cloudflarestorage.com"}, nil)
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-registry-build.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	dockerfile := strings.TrimSpace(`
+FROM docker.io/library/busybox:1.36.1
+COPY hello.txt /hello.txt
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(contextDir, "hello.txt"), []byte("hello from registry build\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", filepath.Join(contextDir, "hello.txt"), err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
+	}
+	chownTreeToOriginalUser(t, contextDir)
+
+	script := buildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
+	if err != nil {
+		t.Fatalf("run box enforce registry-backed buildctl build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	got, err := os.ReadFile(filepath.Join(outputDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v; stdout=%q stderr=%q", filepath.Join(outputDir, "hello.txt"), err, stdout, stderr)
+	}
+	if string(got) != "hello from registry build\n" {
+		t.Fatalf("built hello.txt = %q, want %q", string(got), "hello from registry build\n")
+	}
+}
+
+func TestBoxEnforceBlocksDockerfileFromDisallowedRegistry(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceBuildKitProxyConfig(t, []string{"example.com"}, nil)
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-registry-deny-build.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	dockerfile := strings.TrimSpace(`
+FROM docker.io/library/busybox:1.36.1
+COPY hello.txt /hello.txt
+`) + "\n"
+	if err := os.WriteFile(filepath.Join(contextDir, "hello.txt"), []byte("hello from denied registry build\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", filepath.Join(contextDir, "hello.txt"), err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
+	}
+	chownTreeToOriginalUser(t, contextDir)
+
+	script := buildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
+	if err == nil {
+		t.Fatalf("expected enforce mode registry-backed build to fail without registry allowlist; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxSandboxedBuildctlBuildAllowsFromAndNetworkedRunUnderPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
 
 	binary := testenv.BuildBoxBinary(t)
 	fixture := startRoutedHTTPFixture(t, 18081)
+	configPath := testenv.WriteEnforceBuildKitProxyConfig(t, []string{"docker.io", "cloudflarestorage.com"}, []string{fixture.CIDR})
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-sandboxed-buildctl-allow.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	dockerfile := fmt.Sprintf(strings.TrimSpace(`
+FROM docker.io/library/busybox:1.36.1 AS build
+RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" wget -Y on -T 10 -t 1 -qO /run-fetch.txt http://%s:%d/ && grep -q 'Example Domain' /run-fetch.txt
+COPY hello.txt /hello.txt
 
-	blockedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
-- cidr: 198.51.100.7/32
-  transport:
-    - protocol: tcp
-      ports: [%d]
-`, fixture.Ports[0]))
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d/", fixture.IP, fixture.Ports[0]))
-	if err == nil {
-		t.Fatalf("expected direct-ip request with non-matching cidr to fail; stdout=%q stderr=%q", stdout, stderr)
+FROM scratch
+COPY --from=build /hello.txt /hello.txt
+COPY --from=build /run-fetch.txt /run-fetch.txt
+`), fixture.IP, fixture.Port) + "\n"
+	if err := os.WriteFile(filepath.Join(contextDir, "hello.txt"), []byte("hello from sandboxed buildctl\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", filepath.Join(contextDir, "hello.txt"), err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
+	}
+	chownTreeToOriginalUser(t, contextDir)
+	if err := os.MkdirAll(outputDir, 0o777); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", outputDir, err)
+	}
+	if err := os.Chmod(outputDir, 0o777); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", outputDir, err)
 	}
 
-	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
-- cidr: %s
-  transport:
-    - protocol: tcp
-      ports: [%d]
-`, fixture.CIDR, fixture.Ports[0]))
-	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d/", fixture.IP, fixture.Ports[0]))
+	script := sandboxedBuildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
 	if err != nil {
-		if shouldSkipGitHubActionsEnforceTCP(t, stdout, stderr) {
-			t.Skipf("github actions runner could not reach allowed routed tcp fixture in enforce mode: stdout=%q stderr=%q", stdout, stderr)
-		}
-		t.Fatalf("allowed direct-ip request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+		t.Fatalf("run box sandboxed buildctl allow build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "Example Domain") {
-		t.Fatalf("allowed direct-ip stdout = %q, want fixture body", stdout)
+	hello, err := os.ReadFile(filepath.Join(outputDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v; stdout=%q stderr=%q", filepath.Join(outputDir, "hello.txt"), err, stdout, stderr)
+	}
+	if string(hello) != "hello from sandboxed buildctl\n" {
+		t.Fatalf("built hello.txt = %q, want %q", string(hello), "hello from sandboxed buildctl\n")
+	}
+	runFetch, err := os.ReadFile(filepath.Join(outputDir, "run-fetch.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v; stdout=%q stderr=%q", filepath.Join(outputDir, "run-fetch.txt"), err, stdout, stderr)
+	}
+	if !strings.Contains(string(runFetch), "Example Domain") {
+		t.Fatalf("run-fetch.txt = %q, want Example Domain response body", string(runFetch))
 	}
 }
 
-func TestBoxEnforceBlocksHostLocalDirectIPWithoutMatchingPolicy(t *testing.T) {
+func TestBoxSandboxedBuildctlBlocksNetworkedRunWithoutAllowlist(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
 	}
 
 	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "runsc", "rootlesskit", "newuidmap", "newgidmap", "buildctl", "buildkitd", "nsenter", "setpriv")
 
 	binary := testenv.BuildBoxBinary(t)
-	fixture := startLocalHTTPFixture(t)
+	fixture := startRoutedHTTPFixture(t, 18081)
+	configPath := testenv.WriteEnforceBuildKitProxyConfig(t, []string{"docker.io", "cloudflarestorage.com"}, nil)
+	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-sandboxed-buildctl-deny.")
+	outputDir := filepath.Join(contextDir, "out")
+	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
+	dockerfile := fmt.Sprintf(strings.TrimSpace(`
+FROM docker.io/library/busybox:1.36.1
+RUN http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" no_proxy="$NO_PROXY" wget -Y on -T 10 -t 1 -qO /run-fetch.txt http://%s:%d/ && grep -q 'Example Domain' /run-fetch.txt
+COPY hello.txt /hello.txt
+`), fixture.IP, fixture.Port) + "\n"
+	if err := os.WriteFile(filepath.Join(contextDir, "hello.txt"), []byte("hello from denied sandboxed buildctl\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", filepath.Join(contextDir, "hello.txt"), err)
+	}
+	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
+	}
+	chownTreeToOriginalUser(t, contextDir)
+	if err := os.MkdirAll(outputDir, 0o777); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", outputDir, err)
+	}
+	if err := os.Chmod(outputDir, 0o777); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", outputDir, err)
+	}
 
-	blockedConfigPath := testenv.WriteEnforceConfig(t, "[]")
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fixture.URL)
+	script := sandboxedBuildctlBuildScript(t, binary.ModuleRoot, relPath(t, binary.ModuleRoot, contextDir), relPath(t, binary.ModuleRoot, contextDir), "Dockerfile", relPath(t, binary.ModuleRoot, outputDir))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
 	if err == nil {
-		t.Fatalf("expected host-local direct-ip request without matching policy to fail; stdout=%q stderr=%q", stdout, stderr)
-	}
-
-	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
-- cidr: %s
-  transport:
-    - protocol: tcp
-      ports: [%d]
-`, fixture.CIDR, fixture.Port))
-	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fixture.URL)
-	if err != nil {
-		t.Fatalf("allowed host-local direct-ip request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
-	}
-	if !strings.Contains(stdout, "Example Domain") {
-		t.Fatalf("allowed host-local direct-ip stdout = %q, want fixture body", stdout)
-	}
-}
-
-func TestBoxEnforceAllowsConfiguredICMPEchoOnly(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("integration smoke tests require Linux")
-	}
-
-	requireRootIfNeeded(t)
-	testenv.RequireCommands(t, "ping")
-
-	binary := testenv.BuildBoxBinary(t)
-	const targetIP = "1.1.1.1"
-
-	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
-- cidr: %s/32
-  icmp:
-    - type: 8
-      code: 0
-`, targetIP))
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
-		"ping", "-n", "-c", "1", "-W", "2", targetIP)
-	if err != nil {
-		combined := strings.ToLower(stdout + "\n" + stderr)
-		if strings.Contains(combined, "operation not permitted") || strings.Contains(combined, "permission denied") {
-			t.Skipf("sandbox ping requires raw-socket capability not available in this environment: stdout=%q stderr=%q", stdout, stderr)
-		}
-		if strings.Contains(combined, "100% packet loss") || strings.Contains(combined, "network is unreachable") {
-			t.Skipf("icmp target not reachable from this environment: stdout=%q stderr=%q", stdout, stderr)
-		}
-		t.Fatalf("allowed icmp echo request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
-	}
-
-	blockedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
-- cidr: %s/32
-  transport:
-    - protocol: tcp
-      ports: [80]
-`, targetIP))
-	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
-		"ping", "-n", "-c", "1", "-W", "2", targetIP)
-	if err == nil {
-		t.Fatalf("expected icmp echo request without icmp rule to fail; stdout=%q stderr=%q", stdout, stderr)
+		t.Fatalf("expected sandboxed buildctl build to fail when RUN hostname is not allowlisted; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 
@@ -362,7 +380,7 @@ func TestBoxEnforceBlocksDisallowedTraffic(t *testing.T) {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteEnforceConfig(t, "[]")
+	configPath := testenv.WriteEnforceConfig(t, []string{"docker.io"}, nil)
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "getent", "hosts", "example.com")
 	if err == nil {
@@ -437,9 +455,7 @@ func runBoxSmoke(t *testing.T, payload ...string) string {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
 	args := append([]string{"--"}, payload...)
-	args = append([]string{"--config", configPath}, args...)
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, args...)
 	if err != nil {
 		t.Fatalf("run box %v error = %v; stdout=%q stderr=%q", payload, err, stdout, stderr)
@@ -491,114 +507,119 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-type localHTTPFixture struct {
-	URL  string
+func firstNonLoopbackIPv4Prefix(t *testing.T, output string) netip.Prefix {
+	t.Helper()
+
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i < len(fields)-1; i++ {
+			if fields[i] != "inet" {
+				continue
+			}
+			prefix, err := netip.ParsePrefix(fields[i+1])
+			if err != nil || !prefix.Addr().Is4() {
+				continue
+			}
+			if prefix.Addr().IsLoopback() {
+				continue
+			}
+			return prefix.Masked()
+		}
+	}
+
+	t.Fatalf("ip output = %q, want non-loopback ipv4 prefix", output)
+	return netip.Prefix{}
+}
+
+func buildctlBuildScript(t *testing.T, moduleRoot string, contextRel string, dockerfileRel string, filename string, outputRel string) string {
+	t.Helper()
+
+	_ = moduleRoot
+
+	script := strings.TrimSpace(`
+set -e
+buildctl-daemonless.sh build \
+  --frontend=dockerfile.v0 \
+  --local context=CONTEXT_DIR \
+  --local dockerfile=DOCKERFILE_DIR \
+  --opt filename=DOCKERFILE_NAME \
+  --output type=local,dest=OUTPUT_DEST
+`) + "\n"
+	script = strings.ReplaceAll(script, "CONTEXT_DIR", shellSingleQuote(contextRel))
+	script = strings.ReplaceAll(script, "DOCKERFILE_DIR", shellSingleQuote(dockerfileRel))
+	script = strings.ReplaceAll(script, "DOCKERFILE_NAME", shellSingleQuote(filename))
+	script = strings.ReplaceAll(script, "OUTPUT_DEST", shellSingleQuote(outputRel))
+	return script
+}
+
+func sandboxedBuildctlBuildScript(t *testing.T, moduleRoot string, contextRel string, dockerfileRel string, filename string, outputRel string) string {
+	t.Helper()
+
+	_ = moduleRoot
+
+	script := strings.TrimSpace(`
+set -e
+test -n "$BUILDKIT_HOST"
+buildctl debug workers >/dev/null
+buildctl build \
+  --frontend=dockerfile.v0 \
+  --local context=CONTEXT_DIR \
+  --local dockerfile=DOCKERFILE_DIR \
+  --opt filename=DOCKERFILE_NAME \
+  --output type=local,dest=OUTPUT_DEST
+`) + "\n"
+	script = strings.ReplaceAll(script, "CONTEXT_DIR", shellSingleQuote(contextRel))
+	script = strings.ReplaceAll(script, "DOCKERFILE_DIR", shellSingleQuote(dockerfileRel))
+	script = strings.ReplaceAll(script, "DOCKERFILE_NAME", shellSingleQuote(filename))
+	script = strings.ReplaceAll(script, "OUTPUT_DEST", shellSingleQuote(outputRel))
+	return script
+}
+
+func chownTreeToOriginalUser(t *testing.T, root string) {
+	t.Helper()
+
+	uidValue := strings.TrimSpace(os.Getenv("SUDO_UID"))
+	gidValue := strings.TrimSpace(os.Getenv("SUDO_GID"))
+	if uidValue == "" || gidValue == "" {
+		return
+	}
+
+	uid, err := strconv.Atoi(uidValue)
+	if err != nil {
+		t.Fatalf("parse SUDO_UID %q: %v", uidValue, err)
+	}
+	gid, err := strconv.Atoi(gidValue)
+	if err != nil {
+		t.Fatalf("parse SUDO_GID %q: %v", gidValue, err)
+	}
+
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := os.Chown(path, uid, gid); err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if info.IsDir() {
+			mode = 0o755
+		} else if info.Mode()&0o111 != 0 {
+			mode = 0o755
+		}
+		return os.Chmod(path, mode)
+	}); err != nil {
+		t.Fatalf("chown build context %q: %v", root, err)
+	}
+}
+
+type routedHTTPFixture struct {
+	IP   string
 	CIDR string
 	Port int
 }
 
-type routedHTTPFixture struct {
-	IP    string
-	CIDR  string
-	Ports []int
-}
-
-func startLocalHTTPFixture(t *testing.T) localHTTPFixture {
+func startRoutedHTTPFixture(t *testing.T, port int) routedHTTPFixture {
 	t.Helper()
-
-	hostIP := discoverHostIPv4(t)
-	listener, err := net.Listen("tcp4", net.JoinHostPort(hostIP, "0"))
-	if err != nil {
-		t.Fatalf("Listen(%q) error = %v", hostIP, err)
-	}
-
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, err := io.WriteString(w, "Example Domain\n"); err != nil {
-				t.Logf("fixture response write error: %v", err)
-			}
-		}),
-	}
-
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			t.Logf("fixture server error: %v", err)
-		}
-	}()
-
-	t.Cleanup(func() {
-		_ = server.Close()
-	})
-
-	_, portText, err := net.SplitHostPort(listener.Addr().String())
-	if err != nil {
-		t.Fatalf("SplitHostPort(%q) error = %v", listener.Addr().String(), err)
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		t.Fatalf("Atoi(%q) error = %v", portText, err)
-	}
-
-	return localHTTPFixture{
-		URL:  "http://" + net.JoinHostPort(hostIP, portText) + "/",
-		CIDR: hostIP + "/32",
-		Port: port,
-	}
-}
-
-func discoverHostIPv4(t *testing.T) string {
-	t.Helper()
-
-	conn, err := net.Dial("udp4", "1.1.1.1:53")
-	if err != nil {
-		t.Fatalf("Dial udp4 for host IP discovery error = %v", err)
-	}
-	defer conn.Close()
-
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok || addr.IP == nil {
-		t.Fatalf("unexpected local address for host IP discovery: %T %v", conn.LocalAddr(), conn.LocalAddr())
-	}
-	return addr.IP.String()
-}
-
-func copyDockerArchive(t *testing.T, sourceRef string, archivePath string, imageRef string) {
-	t.Helper()
-
-	output, err := exec.Command(
-		"skopeo",
-		"copy",
-		"--insecure-policy",
-		"docker://"+sourceRef,
-		"docker-archive:"+archivePath+":"+imageRef,
-	).CombinedOutput()
-	if err != nil {
-		t.Fatalf("skopeo copy %q -> %q error = %v: %s", sourceRef, archivePath, err, strings.TrimSpace(string(output)))
-	}
-}
-
-func lookupHostIPv4(t *testing.T, hostname string) string {
-	t.Helper()
-
-	addrs, err := net.LookupIP(hostname)
-	if err != nil {
-		t.Fatalf("LookupIP(%q) error = %v", hostname, err)
-	}
-	for _, addr := range addrs {
-		if v4 := addr.To4(); v4 != nil {
-			return v4.String()
-		}
-	}
-	t.Fatalf("LookupIP(%q) returned no IPv4 address", hostname)
-	return ""
-}
-
-func startRoutedHTTPFixture(t *testing.T, ports ...int) routedHTTPFixture {
-	t.Helper()
-
-	if len(ports) == 0 {
-		t.Fatal("startRoutedHTTPFixture() requires at least one port")
-	}
 
 	token := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
 	netns := "itestns" + token[:8]
@@ -631,114 +652,25 @@ func startRoutedHTTPFixture(t *testing.T, ports ...int) routedHTTPFixture {
 		t.Fatalf("WriteFile(%q) error = %v", indexPath, err)
 	}
 
-	for _, port := range ports {
-		cmd := execRootCommand("ip", "netns", "exec", netns, "python3", "-m", "http.server", strconv.Itoa(port), "--bind", guestIP, "--directory", docRoot)
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start routed fixture server on %s:%d error = %v", guestIP, port, err)
-		}
-		t.Cleanup(func() {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_, _ = cmd.Process.Wait()
-			}
-		})
-		waitForTCPListener(t, guestIP, port)
+	cmd := execRootCommand("ip", "netns", "exec", netns, "python3", "-m", "http.server", strconv.Itoa(port), "--bind", guestIP, "--directory", docRoot)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start routed fixture server on %s:%d error = %v", guestIP, port, err)
 	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	waitForTCPListener(t, guestIP, port)
 
 	return routedHTTPFixture{
-		IP:    guestIP,
-		CIDR:  cidr,
-		Ports: append([]int(nil), ports...),
+		IP:   guestIP,
+		CIDR: cidr,
+		Port: port,
 	}
-}
-
-func startDNSAUpstream(t *testing.T, hostname string, ips []string) string {
-	t.Helper()
-
-	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket() error = %v", err)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 2048)
-		for {
-			n, client, err := ln.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-
-			query := make([]byte, n)
-			copy(query, buf[:n])
-			resp := buildDNSAResponse(t, query, hostname, ips)
-			_, _ = ln.WriteTo(resp, client)
-		}
-	}()
-
-	t.Cleanup(func() {
-		_ = ln.Close()
-		<-done
-	})
-
-	return ln.LocalAddr().String()
-}
-
-func buildDNSAResponse(t *testing.T, query []byte, hostname string, ips []string) []byte {
-	t.Helper()
-
-	response := append([]byte(nil), query...)
-	flags := binary.BigEndian.Uint16(response[2:4])
-	flags |= 0x8000
-	flags &^= 0x000f
-	binary.BigEndian.PutUint16(response[2:4], flags)
-	binary.BigEndian.PutUint16(response[6:8], uint16(len(ips)))
-	binary.BigEndian.PutUint16(response[8:10], 0)
-	binary.BigEndian.PutUint16(response[10:12], 0)
-
-	for _, rawIP := range ips {
-		addr, err := netip.ParseAddr(rawIP)
-		if err != nil {
-			t.Fatalf("ParseAddr(%q) error = %v", rawIP, err)
-		}
-		if !addr.Is4() {
-			t.Fatalf("buildDNSAResponse() only supports IPv4 answers, got %q", rawIP)
-		}
-		response = appendDNSName(response, hostname)
-		response = binary.BigEndian.AppendUint16(response, 1)
-		response = binary.BigEndian.AppendUint16(response, 1)
-		response = binary.BigEndian.AppendUint32(response, 60)
-		response = binary.BigEndian.AppendUint16(response, 4)
-		response = append(response, addr.AsSlice()...)
-	}
-
-	return response
-}
-
-func appendDNSName(buf []byte, hostname string) []byte {
-	for _, label := range splitDNSLabels(hostname) {
-		buf = append(buf, byte(len(label)))
-		buf = append(buf, label...)
-	}
-	return append(buf, 0)
-}
-
-func splitDNSLabels(hostname string) [][]byte {
-	parts := make([][]byte, 0, 4)
-	start := 0
-	for i := 0; i <= len(hostname); i++ {
-		if i != len(hostname) && hostname[i] != '.' {
-			continue
-		}
-		if start < i {
-			parts = append(parts, []byte(hostname[start:i]))
-		}
-		start = i + 1
-	}
-	return parts
 }
 
 func waitForTCPListener(t *testing.T, host string, port int) {
@@ -755,19 +687,6 @@ func waitForTCPListener(t *testing.T, host string, port int) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for tcp listener on %s", address)
-}
-
-func shouldSkipGitHubActionsEnforceTCP(t *testing.T, stdout string, stderr string) bool {
-	t.Helper()
-
-	if !strings.EqualFold(os.Getenv("GITHUB_ACTIONS"), "true") {
-		return false
-	}
-	combined := strings.ToLower(stdout + "\n" + stderr)
-	return strings.Contains(combined, "timeout was reached") ||
-		strings.Contains(combined, "timed out") ||
-		strings.Contains(combined, "network is unreachable") ||
-		strings.Contains(combined, "no route to host")
 }
 
 func runRootCommand(t *testing.T, args ...string) {

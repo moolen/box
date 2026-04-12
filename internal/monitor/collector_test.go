@@ -9,18 +9,13 @@ import (
 
 func TestVerdictDenyWinsOverAllow(t *testing.T) {
 	policy := config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			Hostname: "example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
+		AllowDomains: []string{"example.com"},
+		DenyDomains:  []string{"blocked.example.com"},
 	}
 
-	got := EvaluateHostname(policy, "blocked.test")
+	got := EvaluateHostname(policy, "blocked.example.com")
 	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname() = %q, want %q for hostname outside allowlist", got, VerdictDeny)
+		t.Fatalf("EvaluateHostname() = %q, want %q", got, VerdictDeny)
 	}
 
 	got = EvaluateHostname(policy, "api.example.com")
@@ -43,48 +38,22 @@ func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
 		{
 			name: "malformed allow rule",
 			policy: config.PolicyConfig{
-				Egress: []config.EgressRule{{
-					Hostname: "bad rule",
-					Transport: []config.TransportRule{{
-						Protocol: "tcp",
-						Ports:    []int{443},
-					}},
-				}},
+				AllowDomains: []string{"bad rule"},
 			},
 			host: "example.com",
 		},
 		{
 			name: "malformed deny rule",
 			policy: config.PolicyConfig{
-				Egress: []config.EgressRule{{
-					Hostname: "https://blocked.example.com",
-					Transport: []config.TransportRule{{
-						Protocol: "tcp",
-						Ports:    []int{443},
-					}},
-				}},
+				DenyDomains: []string{"https://blocked.example.com"},
 			},
 			host: "example.com",
 		},
 		{
 			name: "mixed valid and malformed rules",
 			policy: config.PolicyConfig{
-				Egress: []config.EgressRule{
-					{
-						Hostname: "example.com",
-						Transport: []config.TransportRule{{
-							Protocol: "tcp",
-							Ports:    []int{443},
-						}},
-					},
-					{
-						Hostname: "bad/deny",
-						Transport: []config.TransportRule{{
-							Protocol: "tcp",
-							Ports:    []int{443},
-						}},
-					},
-				},
+				AllowDomains: []string{"example.com"},
+				DenyDomains:  []string{"bad/deny"},
 			},
 			host: "example.com",
 		},
@@ -97,22 +66,6 @@ func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
 				t.Fatalf("EvaluateHostname() = %q, want %q for conservative handling of malformed rules", got, VerdictDeny)
 			}
 		})
-	}
-}
-
-func TestEvaluateHostnameDeniesWhenStructuredPolicyContainsInvalidHostnameRule(t *testing.T) {
-	policy := config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			Hostname: "https://bad.example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
-	}
-
-	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictDeny {
-		t.Fatalf("EvaluateHostname() = %q, want %q for invalid hostname rule", got, VerdictDeny)
 	}
 }
 
@@ -132,13 +85,7 @@ func TestUnknownHostnameVerdictDefaultsToAllowWithoutAllowlist(t *testing.T) {
 
 func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
 	policy := config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			Hostname: "example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
+		AllowDomains: []string{"example.com"},
 	}
 
 	got := EvaluateHostname(policy, "")
@@ -154,6 +101,8 @@ func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
 
 func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 	policy := config.PolicyConfig{
+		AllowDomains: []string{"legacy-only.example"},
+		DenyDomains:  []string{"example.com"},
 		Egress: []config.EgressRule{
 			{
 				Hostname: "example.com",
@@ -173,35 +122,14 @@ func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
 	}
 
 	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictAllow {
-		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule", got)
-	}
-}
-
-func TestEvaluateHostnameWithCIDROnlyPolicyDefaultsToAllow(t *testing.T) {
-	policy := config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			CIDR: "93.184.216.0/24",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
-	}
-
-	if got := EvaluateHostname(policy, "arbitrary.example.com"); got != VerdictAllow {
-		t.Fatalf("EvaluateHostname() = %q, want %q when hostname allowlist is empty", got, VerdictAllow)
+		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule despite conflicting legacy fields", got)
 	}
 }
 
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector := NewCollector(config.PolicyConfig{
-		Egress: []config.EgressRule{{
-			Hostname: "example.com",
-			Transport: []config.TransportRule{{
-				Protocol: "tcp",
-				Ports:    []int{443},
-			}},
-		}},
+		AllowDomains: []string{"example.com"},
+		DenyDomains:  []string{"blocked.example.com"},
 	})
 
 	collector.AddDNS("Example.COM.")

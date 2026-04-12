@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,9 +57,12 @@ func ValidateRuntime(cfg Config) error {
 	if strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
 		return errors.New("network.transparent_proxy.mode=mitm is not supported by runtime yet")
 	}
-	for idx, rule := range cfg.Policy.Egress {
+	if cfg.Docker.Enabled {
+		return errors.New("docker.enabled=true is unsupported; use buildkit instead")
+	}
+	for i, rule := range cfg.Policy.Egress {
 		if err := validateEgressRule(rule); err != nil {
-			return fmt.Errorf("policy.egress[%d]: %w", idx, err)
+			return fmt.Errorf("policy.egress[%d]: %w", i, err)
 		}
 	}
 	return nil
@@ -74,60 +77,54 @@ func validateEgressRule(rule EgressRule) error {
 	if len(rule.Transport) == 0 && len(rule.ICMP) == 0 {
 		return errors.New("must allow at least one transport or icmp tuple")
 	}
-	if hasHostname && NormalizeHostname(rule.Hostname) == "" {
-		return errors.New("hostname is invalid")
+	if hasHostname {
+		if normalizeHostname(rule.Hostname) == "" {
+			return fmt.Errorf("invalid hostname %q", rule.Hostname)
+		}
 	}
 	if hasCIDR {
-		if err := validateIPv4CIDR(rule.CIDR); err != nil {
-			return err
+		if _, err := netip.ParsePrefix(strings.TrimSpace(rule.CIDR)); err != nil {
+			return fmt.Errorf("invalid cidr %q: %w", rule.CIDR, err)
 		}
 	}
-	for i, transport := range rule.Transport {
-		if err := validateTransportRule(transport); err != nil {
-			return fmt.Errorf("transport[%d]: %w", i, err)
+	for _, transport := range rule.Transport {
+		protocol := strings.ToLower(strings.TrimSpace(transport.Protocol))
+		if protocol != "tcp" && protocol != "udp" {
+			return fmt.Errorf("unsupported transport protocol %q", transport.Protocol)
+		}
+		for _, port := range transport.Ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("invalid port %d", port)
+			}
 		}
 	}
-	for i, icmp := range rule.ICMP {
-		if err := validateICMPRule(icmp); err != nil {
-			return fmt.Errorf("icmp[%d]: %w", i, err)
-		}
-	}
-	return nil
-}
-
-func validateTransportRule(rule TransportRule) error {
-	protocol := strings.ToLower(strings.TrimSpace(rule.Protocol))
-	if protocol != "tcp" && protocol != "udp" {
-		return errors.New("transport protocol must be tcp or udp")
-	}
-	if len(rule.Ports) == 0 {
-		return errors.New("transport ports must be explicitly specified")
-	}
-	for _, port := range rule.Ports {
-		if port < 1 || port > 65535 {
-			return errors.New("transport port must be in range 1..65535")
+	for _, icmp := range rule.ICMP {
+		if icmp.Type < 0 || icmp.Type > 255 || icmp.Code < 0 || icmp.Code > 255 {
+			return fmt.Errorf("invalid icmp tuple type=%d code=%d", icmp.Type, icmp.Code)
 		}
 	}
 	return nil
 }
 
-func validateICMPRule(rule ICMPRule) error {
-	if rule.Type < 0 || rule.Type > 255 {
-		return errors.New("icmp type must be in range 0..255")
+func normalizeHostname(hostname string) string {
+	host := strings.TrimSpace(hostname)
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" {
+		return ""
 	}
-	if rule.Code < 0 || rule.Code > 255 {
-		return errors.New("icmp code must be in range 0..255")
+	for _, label := range strings.Split(host, ".") {
+		if label == "" {
+			return ""
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return ""
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return ""
+		}
 	}
-	return nil
-}
-
-func validateIPv4CIDR(value string) error {
-	ip, _, err := net.ParseCIDR(strings.TrimSpace(value))
-	if err != nil {
-		return errors.New("cidr must be valid ipv4 cidr")
-	}
-	if ip == nil || ip.To4() == nil {
-		return errors.New("cidr must be valid ipv4 cidr")
-	}
-	return nil
+	return host
 }

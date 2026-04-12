@@ -206,7 +206,7 @@ func TestCommandShellForTTYDropsInteractiveFlagWithoutTTY(t *testing.T) {
 	}
 }
 
-func TestSandboxProxyAndDockerEnvOmitsProxyVariablesInEnforceMode(t *testing.T) {
+func TestSandboxProxyAndBuildEnvIncludesProxyVariablesInEnforceModeForBuildKit(t *testing.T) {
 	cfg := config.Config{
 		Network: config.NetworkConfig{
 			Mode: "enforce",
@@ -215,65 +215,60 @@ func TestSandboxProxyAndDockerEnvOmitsProxyVariablesInEnforceMode(t *testing.T) 
 				HTTPPort: 18080,
 			},
 		},
-		Docker: config.DockerConfig{
-			Enabled:       true,
-			SocketPath:    "/var/run/docker.sock",
-			WaitForSocket: true,
-			ReadyTimeout:  10 * time.Second,
+		BuildKit: config.BuildKitConfig{
+			Enabled:  true,
+			StateDir: "/var/cache/buildkit",
 		},
 	}
 
-	env := sandboxProxyAndDockerEnv("100.96.0.1", cfg)
-	if containsString(env, "HTTP_PROXY=http://100.96.0.1:18080") {
-		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want no proxy env in enforce mode", env)
+	env := sandboxProxyAndBuildEnv("100.96.0.1", cfg)
+	for _, want := range []string{
+		"HTTP_PROXY=http://100.96.0.1:18080",
+		"HTTPS_PROXY=http://100.96.0.1:18080",
+		"NO_PROXY=127.0.0.1,localhost",
+	} {
+		if !containsString(env, want) {
+			t.Fatalf("sandboxProxyAndBuildEnv() = %#v, want %q", env, want)
+		}
 	}
-	if !containsString(env, envDockerEnabled+"=1") {
-		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want docker env vars retained", env)
+	if !containsString(env, "BUILDKITD_FLAGS=--root /var/cache/buildkit --rootless --oci-worker-rootless --oci-worker-no-process-sandbox") {
+		t.Fatalf("sandboxProxyAndBuildEnv() = %#v, want BuildKit env retained", env)
 	}
 }
 
-func TestDockerProxyValueUsesProxyForEnforceNestedHostNetwork(t *testing.T) {
+func TestSandboxProxyAndBuildEnvPrependsBuildKitHelperDirToPath(t *testing.T) {
 	cfg := config.Config{
-		Network: config.NetworkConfig{
-			Mode: "enforce",
-			TransparentProxy: config.TransparentProxyConfig{
-				Enabled:  false,
-				HTTPPort: 18080,
-			},
+		Sandbox: config.SandboxConfig{
+			Env: []string{"PATH=/custom/bin:/usr/bin"},
 		},
-		Docker: config.DockerConfig{
-			Enabled:                     true,
-			HostNetworkNestedContainers: true,
+		BuildKit: config.BuildKitConfig{
+			Enabled: true,
 		},
 	}
 
-	got := dockerProxyValue("100.96.0.1", cfg)
-	want := "http://100.96.0.1:18080"
-	if got != want {
-		t.Fatalf("dockerProxyValue() = %q, want %q", got, want)
-	}
-	if got := dockerNoProxyValue(cfg); got != defaultNoProxy {
-		t.Fatalf("dockerNoProxyValue() = %q, want %q", got, defaultNoProxy)
+	env := sandboxProxyAndBuildEnv("100.96.0.1", cfg)
+	if !containsString(env, "PATH=/box/bin:/custom/bin:/usr/bin") {
+		t.Fatalf("sandboxProxyAndBuildEnv() = %#v, want BuildKit helper dir prepended to PATH", env)
 	}
 }
 
-func TestSandboxProxyAndDockerEnvSetsDockerConfigWhenDockerProxyEnabled(t *testing.T) {
+func TestSandboxProxyAndBuildEnvSetsBuildKitRuntimeMetadata(t *testing.T) {
 	cfg := config.Config{
-		Network: config.NetworkConfig{
-			Mode: "enforce",
-			TransparentProxy: config.TransparentProxyConfig{
-				HTTPPort: 18080,
-			},
-		},
-		Docker: config.DockerConfig{
-			Enabled:                     true,
-			HostNetworkNestedContainers: true,
+		BuildKit: config.BuildKitConfig{
+			Enabled:    true,
+			StateDir:   "/var/cache/buildkit",
+			HelperPath: "/box/bin/buildctl-daemonless.sh",
 		},
 	}
 
-	env := sandboxProxyAndDockerEnv("100.96.0.1", cfg)
-	if !containsString(env, "DOCKER_CONFIG=/etc/docker") {
-		t.Fatalf("sandboxProxyAndDockerEnv() = %#v, want DOCKER_CONFIG override", env)
+	env := sandboxProxyAndBuildEnv("100.96.0.1", cfg)
+	for _, want := range []string{
+		"PATH=/box/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"BUILDKITD_FLAGS=--root /var/cache/buildkit --rootless --oci-worker-rootless --oci-worker-no-process-sandbox",
+	} {
+		if !containsString(env, want) {
+			t.Fatalf("sandboxProxyAndBuildEnv() = %#v, want %q", env, want)
+		}
 	}
 }
 
@@ -325,6 +320,68 @@ func TestCheckMonitorOwnershipAllowsMissingResources(t *testing.T) {
 	}
 }
 
+func TestCheckMonitorOwnershipDetectsRouteTableReferencedByExistingPolicyRule(t *testing.T) {
+	t.Parallel()
+
+	req := boxruntime.MonitorPreflightRequest{
+		Net: boxruntime.NetResources{
+			TableName:  "box_deadbeef",
+			FWMark:     0x1234,
+			RouteTable: 12345,
+			NetNS:      "box-deadbeef",
+			HostVeth:   "vethhdeadbeef",
+		},
+	}
+
+	err := checkMonitorOwnership(context.Background(), req, fakePreflightRunner(map[string]preflightCommandResult{
+		"nft list table inet box_deadbeef": {output: "No such file or directory", err: errors.New("exit status 1")},
+		"ip -o route show table 12345":     {output: "", err: nil},
+		"ip -o rule show":                  {output: "1000: from all lookup 12345\n", err: nil},
+		"ip netns list":                    {output: "", err: nil},
+		"ip link show vethhdeadbeef":       {output: "Device \"vethhdeadbeef\" does not exist.", err: errors.New("exit status 1")},
+	}))
+	if err == nil {
+		t.Fatal("checkMonitorOwnership() error = nil, want route table conflict")
+	}
+	if !errors.Is(err, boxruntime.ErrResourceConflict) {
+		t.Fatalf("checkMonitorOwnership() error = %v, want ErrResourceConflict", err)
+	}
+	if !strings.Contains(err.Error(), "route table") {
+		t.Fatalf("checkMonitorOwnership() error = %q, want route table conflict message", err.Error())
+	}
+}
+
+func TestCheckMonitorOwnershipDetectsFWMarkReferencedByExistingPolicyRule(t *testing.T) {
+	t.Parallel()
+
+	req := boxruntime.MonitorPreflightRequest{
+		Net: boxruntime.NetResources{
+			TableName:  "box_deadbeef",
+			FWMark:     0x1234,
+			RouteTable: 12345,
+			NetNS:      "box-deadbeef",
+			HostVeth:   "vethhdeadbeef",
+		},
+	}
+
+	err := checkMonitorOwnership(context.Background(), req, fakePreflightRunner(map[string]preflightCommandResult{
+		"nft list table inet box_deadbeef": {output: "No such file or directory", err: errors.New("exit status 1")},
+		"ip -o route show table 12345":     {output: "", err: nil},
+		"ip -o rule show":                  {output: "1000: from all fwmark 0x1234 lookup 9999\n", err: nil},
+		"ip netns list":                    {output: "", err: nil},
+		"ip link show vethhdeadbeef":       {output: "Device \"vethhdeadbeef\" does not exist.", err: errors.New("exit status 1")},
+	}))
+	if err == nil {
+		t.Fatal("checkMonitorOwnership() error = nil, want fwmark conflict")
+	}
+	if !errors.Is(err, boxruntime.ErrResourceConflict) {
+		t.Fatalf("checkMonitorOwnership() error = %v, want ErrResourceConflict", err)
+	}
+	if !strings.Contains(err.Error(), "fwmark") {
+		t.Fatalf("checkMonitorOwnership() error = %q, want fwmark conflict message", err.Error())
+	}
+}
+
 func TestCheckMonitorOwnershipFailsClosedWhenProbeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -346,6 +403,70 @@ func TestCheckMonitorOwnershipFailsClosedWhenProbeErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "query nft table") {
 		t.Fatalf("checkMonitorOwnership() error = %q, want nft probe context", err.Error())
 	}
+}
+
+func TestManagedBuildKitControlProxyForwardsGatewayTCPToUnixSocket(t *testing.T) {
+	t.Parallel()
+
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("box-buildkit-%d.sock", time.Now().UnixNano()))
+	defer os.Remove(socketPath)
+	upstream, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("Listen(unix) error = %v", err)
+	}
+	defer upstream.Close()
+
+	upstreamDone := make(chan struct{})
+	go func() {
+		defer close(upstreamDone)
+
+		conn, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		buf := make([]byte, 32)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(append([]byte("echo:"), buf[:n]...)); err != nil {
+			return
+		}
+	}()
+
+	daemon := &managedBuildKitDaemon{}
+	if err := startManagedBuildKitControlProxy(daemon, "127.0.0.1", 0, "unix://"+socketPath); err != nil {
+		t.Fatalf("startManagedBuildKitControlProxy() error = %v", err)
+	}
+	defer func() {
+		if err := stopManagedBuildKitDaemon(daemon); err != nil {
+			t.Fatalf("stopManagedBuildKitDaemon() error = %v", err)
+		}
+	}()
+
+	client, err := net.Dial("tcp", daemon.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer client.Close()
+
+	if _, err := client.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if string(resp) != "echo:ping" {
+		t.Fatalf("proxy response = %q, want %q", string(resp), "echo:ping")
+	}
+
+	_ = upstream.Close()
+	<-upstreamDone
 }
 
 func TestRuntimeExecutorPrintsMonitorSummaryToStderr(t *testing.T) {
@@ -658,13 +779,12 @@ func TestRuntimeExecutorFallsBackToHostWorkdirWhenOverlayDisabled(t *testing.T) 
 	}
 }
 
-func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
-	t.Parallel()
-
+func TestRuntimeExecutorPassesBuildKitRootlessLaunchInputsToSandboxRunner(t *testing.T) {
+	stateDir := t.TempDir()
 	rt := &fakeRuntimeHandle{
 		manifest: boxruntime.Manifest{
 			RuntimeID: "runtime-d",
-			StateDir:  "/tmp/runtime-d",
+			StateDir:  stateDir,
 			Net: boxruntime.NetResources{
 				NetNS: "box-cafebabe",
 			},
@@ -676,7 +796,7 @@ func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
 		},
 		loadConfig: func(string, string) (config.Config, error) {
 			return config.Config{
-				Docker: config.DockerConfig{
+				BuildKit: config.BuildKitConfig{
 					Enabled: true,
 				},
 			}, nil
@@ -687,7 +807,10 @@ func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
 		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
 			return rootfs.Plan{}, nil
 		},
-		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+		applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			if err := os.MkdirAll(req.BundleDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%q) error = %v", req.BundleDir, err)
+			}
 			return rootfs.ApplyResult{}, nil
 		},
 		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
@@ -696,19 +819,61 @@ func TestRuntimeExecutorPassesDockerEnabledToSandboxRunner(t *testing.T) {
 		writeBundleSpec: func(string, gvisor.Spec) error {
 			return nil
 		},
+		startSandboxBuildKitDaemon: func(manifest boxruntime.Manifest, uid int, gid int, cfg config.Config) (*managedBuildKitDaemon, error) {
+			if manifest.Net.NetNS != "box-cafebabe" {
+				t.Fatalf("manifest.Net.NetNS = %q, want %q", manifest.Net.NetNS, "box-cafebabe")
+			}
+			if uid != 1000 {
+				t.Fatalf("start buildkit uid = %d, want %d", uid, 1000)
+			}
+			if gid != 1000 {
+				t.Fatalf("start buildkit gid = %d, want %d", gid, 1000)
+			}
+			if !cfg.BuildKit.Enabled {
+				t.Fatal("cfg.BuildKit.Enabled = false, want true")
+			}
+			return &managedBuildKitDaemon{addr: "tcp://127.0.0.1:1234"}, nil
+		},
+		stopSandboxBuildKitDaemon: func(daemon *managedBuildKitDaemon) error {
+			if daemon == nil {
+				t.Fatal("daemon = nil, want managed buildkit daemon")
+			}
+			return nil
+		},
 		runSandbox: func(req gvisor.RunRequest) error {
-			if !req.DockerEnabled {
-				t.Fatalf("DockerEnabled = false, want true")
+			if !req.BuildKitEnabled {
+				t.Fatalf("BuildKitEnabled = false, want true")
+			}
+			if req.CallerUID != 1000 {
+				t.Fatalf("CallerUID = %d, want %d", req.CallerUID, 1000)
+			}
+			if req.CallerGID != 1000 {
+				t.Fatalf("CallerGID = %d, want %d", req.CallerGID, 1000)
 			}
 			return nil
 		},
 	}
 
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1000")
 	if err := exec.Run(runRequest{
 		ConfigPath: "box.yaml",
 		Payload:    []string{"/bin/true"},
 	}); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestSandboxNetworkNamespacePathUsesManagedNetNSForBuildKitSandbox(t *testing.T) {
+	if got := sandboxNetworkNamespacePath(config.Config{
+		BuildKit: config.BuildKitConfig{
+			Enabled: true,
+		},
+	}, "box-buildkit-netns"); got != "/run/netns/box-buildkit-netns" {
+		t.Fatalf("sandboxNetworkNamespacePath() = %q, want %q", got, "/run/netns/box-buildkit-netns")
+	}
+	if got := sandboxNetworkNamespacePath(config.Config{}, "box-runtime-a"); got != "/run/netns/box-runtime-a" {
+		t.Fatalf("sandboxNetworkNamespacePath() = %q, want %q", got, "/run/netns/box-runtime-a")
 	}
 }
 
