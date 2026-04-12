@@ -186,7 +186,7 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 				return EnforcePlan{}, fmt.Errorf("icmp code %d for set %q must be 0-255", tuple.Code, setName)
 			}
 			commands = append(commands,
-				fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @%s icmp type %d code %d accept",
+				fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @%s icmp type %d icmp code %d accept",
 					in.TableName,
 					in.HostVeth,
 					in.SubnetCIDR,

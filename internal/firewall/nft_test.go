@@ -212,7 +212,7 @@ func TestEnforceModeRendersPerRuleSetsAndProtocolAwareAcceptRules(t *testing.T) 
 		"ip daddr @egress_0_v4",
 		"icmp",
 		"type 8",
-		"code 0",
+		"icmp code 0",
 		"accept",
 	)
 	mustContainCommandFragments(t, plan.Commands,

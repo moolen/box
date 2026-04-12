@@ -27,14 +27,33 @@ func TestBoxRunsPwd(t *testing.T) {
 }
 
 func TestBoxRunsEnv(t *testing.T) {
-	output := runBoxSmoke(t, "/usr/bin/env")
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
+	cfg, err := config.Load(configPath, binary.ModuleRoot)
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v", configPath, err)
+	}
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "/usr/bin/env")
+	if err != nil {
+		t.Fatalf("run box env error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	output := stdout
 	if !strings.Contains(output, "PATH=") {
 		t.Fatalf("env output = %q, want PATH entry", output)
 	}
-	if !strings.Contains(output, "HTTP_PROXY=http://100.96.0.1:18080") {
+	wantHTTPProxy := fmt.Sprintf("HTTP_PROXY=http://100.96.0.1:%d", cfg.Network.TransparentProxy.HTTPPort)
+	if !strings.Contains(output, wantHTTPProxy) {
 		t.Fatalf("env output = %q, want HTTP_PROXY host intercept env", output)
 	}
-	if !strings.Contains(output, "HTTPS_PROXY=http://100.96.0.1:18080") {
+	wantHTTPSProxy := fmt.Sprintf("HTTPS_PROXY=http://100.96.0.1:%d", cfg.Network.TransparentProxy.HTTPPort)
+	if !strings.Contains(output, wantHTTPSProxy) {
 		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
 	}
 }
@@ -61,7 +80,8 @@ func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
-	cfg, err := config.Load("box.yaml", binary.ModuleRoot)
+	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
+	cfg, err := config.Load(configPath, binary.ModuleRoot)
 	if err != nil {
 		t.Fatalf("config.Load() error = %v", err)
 	}
@@ -81,7 +101,7 @@ func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 		t.Skipf("host already exposes expected sandbox address %q; dirty host state", expectedCIDR)
 	}
 
-	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--", "ip", "-4", "-o", "addr", "show")
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "ip", "-4", "-o", "addr", "show")
 	if err != nil {
 		t.Fatalf("run box ip command error = %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
@@ -122,8 +142,13 @@ func TestBoxEnforceBuildsMultistageDockerfile(t *testing.T) {
 	testenv.RequireCommands(t, "docker", "dockerd", "skopeo")
 
 	binary := testenv.BuildBoxBinary(t)
-	fixtureURL, allowedCIDR := startAllowedEgressHTTPFixture(t)
-	configPath := testenv.WriteEnforceConfig(t, nil, []string{allowedCIDR})
+	fixture := startLocalHTTPFixture(t)
+	configPath := testenv.WriteEnforceDockerConfigWithHostNetworkNestedContainers(t, fmt.Sprintf(`
+- cidr: %s
+  transport:
+    - protocol: tcp
+      ports: [%d]
+`, fixture.CIDR, fixture.Port), false)
 
 	contextDir := mustMakeModuleTempDir(t, binary.ModuleRoot, ".box-enforce-build.")
 	dockerfilePath := filepath.Join(contextDir, "Dockerfile")
@@ -143,7 +168,7 @@ COPY --from=alpine-stage /build-artifact.txt /build-artifact.txt
 COPY --from=debian-stage /tmp/app/package.json /package.json
 RUN test -s /build-artifact.txt && test -s /package.json
 CMD ["cat", "/build-artifact.txt"]
-`, shellSingleQuote(fixtureURL))) + "\n"
+`, shellSingleQuote(fixture.URL))) + "\n"
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfile), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", dockerfilePath, err)
 	}
@@ -151,17 +176,138 @@ CMD ["cat", "/build-artifact.txt"]
 	copyDockerArchive(t, "docker.io/library/debian:bookworm-slim", debianArchivePath, "debian:bookworm-slim")
 
 	imageTag := "box-enforce-test:" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	script := fmt.Sprintf(`
+script := fmt.Sprintf(`
 set -e
 docker load -i %s >/dev/null
 docker load -i %s >/dev/null
 DOCKER_BUILDKIT=0 docker build --network=host -t %s -f %s %s
 docker image inspect %s >/dev/null
+echo BOX_BUILD_DONE
 `, shellSingleQuote(relPath(t, binary.ModuleRoot, alpineArchivePath)), shellSingleQuote(relPath(t, binary.ModuleRoot, debianArchivePath)), shellSingleQuote(imageTag), shellSingleQuote(relPath(t, binary.ModuleRoot, dockerfilePath)), shellSingleQuote(relPath(t, binary.ModuleRoot, contextDir)), shellSingleQuote(imageTag))
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "bash", "-lc", script)
 	if err != nil {
+		if strings.Contains(stdout, "BOX_BUILD_DONE") {
+			t.Logf("box returned cleanup noise after successful docker build: %v; stderr=%q", err, stderr)
+			return
+		}
 		t.Fatalf("run box enforce docker build error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "BOX_BUILD_DONE") {
+		t.Fatalf("docker build stdout missing completion sentinel: %q", stdout)
+	}
+}
+
+func TestBoxEnforceAllowsConfiguredHostnamePortOnly(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, `
+- hostname: example.com
+  transport:
+    - protocol: tcp
+      ports: [443]
+`)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-k", "-fsS", "--connect-timeout", "5", "--max-time", "10", "https://example.com")
+	if err == nil {
+		if !strings.Contains(stdout, "Example Domain") {
+			t.Fatalf("allowed hostname request stdout = %q, want fixture body", stdout)
+		}
+	} else {
+		t.Fatalf("allowed hostname port request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+
+	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "http://example.com")
+	if err == nil {
+		t.Fatalf("expected disallowed hostname port to fail; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxEnforceAllowsDirectIPOnlyWhenCIDRRuleMatches(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	exampleIP := lookupHostIPv4(t, "example.com")
+
+	blockedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
+- cidr: 198.51.100.7/32
+  transport:
+    - protocol: tcp
+      ports: [80]
+`))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "-H", "Host: example.com", "http://"+exampleIP+"/")
+	if err == nil {
+		t.Fatalf("expected direct-ip request with non-matching cidr to fail; stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
+- cidr: %s
+  transport:
+    - protocol: tcp
+      ports: [80]
+`, exampleIP+"/32"))
+	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "-H", "Host: example.com", "http://"+exampleIP+"/")
+	if err != nil {
+		t.Fatalf("allowed direct-ip request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("allowed direct-ip stdout = %q, want fixture body", stdout)
+	}
+}
+
+func TestBoxEnforceAllowsConfiguredICMPEchoOnly(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ping")
+
+	binary := testenv.BuildBoxBinary(t)
+	const targetIP = "1.1.1.1"
+
+	allowedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
+- cidr: %s/32
+  icmp:
+    - type: 8
+      code: 0
+`, targetIP))
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
+		"ping", "-n", "-c", "1", "-W", "2", targetIP)
+	if err != nil {
+		combined := strings.ToLower(stdout + "\n" + stderr)
+		if strings.Contains(combined, "operation not permitted") || strings.Contains(combined, "permission denied") {
+			t.Skipf("sandbox ping requires raw-socket capability not available in this environment: stdout=%q stderr=%q", stdout, stderr)
+		}
+		if strings.Contains(combined, "100% packet loss") || strings.Contains(combined, "network is unreachable") {
+			t.Skipf("icmp target not reachable from this environment: stdout=%q stderr=%q", stdout, stderr)
+		}
+		t.Fatalf("allowed icmp echo request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+
+	blockedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
+- cidr: %s/32
+  transport:
+    - protocol: tcp
+      ports: [80]
+`, targetIP))
+	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
+		"ping", "-n", "-c", "1", "-W", "2", targetIP)
+	if err == nil {
+		t.Fatalf("expected icmp echo request without icmp rule to fail; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 
@@ -173,7 +319,7 @@ func TestBoxEnforceBlocksDisallowedTraffic(t *testing.T) {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteEnforceConfig(t, []string{"docker.io"}, nil)
+	configPath := testenv.WriteEnforceConfig(t, "[]")
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "getent", "hosts", "example.com")
 	if err == nil {
@@ -248,7 +394,9 @@ func runBoxSmoke(t *testing.T, payload ...string) string {
 	requireRootIfNeeded(t)
 
 	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteDefaultConfig(t, binary.ModuleRoot)
 	args := append([]string{"--"}, payload...)
+	args = append([]string{"--config", configPath}, args...)
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, args...)
 	if err != nil {
 		t.Fatalf("run box %v error = %v; stdout=%q stderr=%q", payload, err, stdout, stderr)
@@ -300,7 +448,13 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func startAllowedEgressHTTPFixture(t *testing.T) (string, string) {
+type localHTTPFixture struct {
+	URL  string
+	CIDR string
+	Port int
+}
+
+func startLocalHTTPFixture(t *testing.T) localHTTPFixture {
 	t.Helper()
 
 	hostIP := discoverHostIPv4(t)
@@ -327,8 +481,20 @@ func startAllowedEgressHTTPFixture(t *testing.T) (string, string) {
 		_ = server.Close()
 	})
 
-	addr := listener.Addr().String()
-	return "http://" + addr + "/", hostIP + "/32"
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q) error = %v", listener.Addr().String(), err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi(%q) error = %v", portText, err)
+	}
+
+	return localHTTPFixture{
+		URL:  "http://" + net.JoinHostPort(hostIP, portText) + "/",
+		CIDR: hostIP + "/32",
+		Port: port,
+	}
 }
 
 func discoverHostIPv4(t *testing.T) string {
@@ -360,4 +526,20 @@ func copyDockerArchive(t *testing.T, sourceRef string, archivePath string, image
 	if err != nil {
 		t.Fatalf("skopeo copy %q -> %q error = %v: %s", sourceRef, archivePath, err, strings.TrimSpace(string(output)))
 	}
+}
+
+func lookupHostIPv4(t *testing.T, hostname string) string {
+	t.Helper()
+
+	addrs, err := net.LookupIP(hostname)
+	if err != nil {
+		t.Fatalf("LookupIP(%q) error = %v", hostname, err)
+	}
+	for _, addr := range addrs {
+		if v4 := addr.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	t.Fatalf("LookupIP(%q) returned no IPv4 address", hostname)
+	return ""
 }

@@ -63,13 +63,12 @@ network:
     tls_port: 18443
 
 policy:
-  # Domain rules drive DNS decisions in `enforce` and label monitor summaries.
-  allow_domains: []
-  deny_domains: []
-
-  # Bootstrap IPv4 exceptions added to the nft allow set before DNS learns
-  # additional destination IPs from allowed domain resolutions.
-  extra_allowed_cidrs: []
+  # Structured egress rules:
+  # - `hostname` rules drive DNS admission and dynamic IPv4 allowlisting in `enforce`
+  # - `cidr` rules allow direct IPv4 destinations without DNS
+  # - `transport` rules are protocol/port-specific
+  # - `icmp` rules are type/code-specific
+  egress: []
 
 mounts:
   # Extra host paths to bind read-only or read-write into the sandbox.

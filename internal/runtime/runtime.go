@@ -97,6 +97,7 @@ type compiledEgressRule struct {
 	CIDR      string
 	Transport []firewall.TransportMatch
 	ICMP      []firewall.ICMPMatch
+	inputIndex int
 }
 
 type Manifest struct {
@@ -395,6 +396,34 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	allowQuery := rt.enforceAllowQuery(compiledRules)
 	onResolved := rt.enforceResolvedCallback(ctx, deps, compiledRules)
 
+	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
+	if err != nil {
+		return err
+	}
+
+	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
+		return err
+	}
+
+	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
+		TableName:  rt.Manifest.Net.TableName,
+		HostVeth:   rt.Manifest.Net.HostVeth,
+		SubnetCIDR: cfg.Network.Subnet,
+		DNSPort:    dnsPort,
+		Rules:      buildEnforceRules(compiledRules),
+	})
+	if err != nil {
+		return fmt.Errorf("build firewall enforce plan: %w", err)
+	}
+
+	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
+		0: fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName),
+	}))
+	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
+	if err != nil {
+		return fmt.Errorf("apply firewall enforce plan: %w", err)
+	}
+
 	if deps.DNS != nil {
 		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
 			Mode:      cfg.Network.Mode,
@@ -430,34 +459,6 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 			rt.runners["proxy"] = proxyRunner
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
 		}
-	}
-
-	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
-	if err != nil {
-		return err
-	}
-
-	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
-		return err
-	}
-
-	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
-		TableName:  rt.Manifest.Net.TableName,
-		HostVeth:   rt.Manifest.Net.HostVeth,
-		SubnetCIDR: cfg.Network.Subnet,
-		DNSPort:    dnsPort,
-		Rules:      buildEnforceRules(compiledRules),
-	})
-	if err != nil {
-		return fmt.Errorf("build firewall enforce plan: %w", err)
-	}
-
-	recordedTeardown, err := runOwnedCommands(ctx, deps.CommandExec, ownedCommandsFromStrings(firewallPlan.Commands, map[int]string{
-		0: fmt.Sprintf("nft delete table inet %s", rt.Manifest.Net.TableName),
-	}))
-	rt.Manifest.TeardownCmds = append(rt.Manifest.TeardownCmds, recordedTeardown...)
-	if err != nil {
-		return fmt.Errorf("apply firewall enforce plan: %w", err)
 	}
 
 	return nil
@@ -717,18 +718,24 @@ func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
 
 func compileRuntimeEgress(policy config.PolicyConfig) []compiledEgressRule {
 	compiled := make([]compiledEgressRule, 0, len(policy.Egress))
-	for _, rule := range policy.Egress {
+	for idx, rule := range policy.Egress {
 		entry := compiledEgressRule{
-			Hostname:  normalizeRuntimeRuleHostname(rule.Hostname),
-			CIDR:      normalizeRuntimeRuleCIDR(rule.CIDR),
-			Transport: normalizeRuntimeRuleTransport(rule.Transport),
-			ICMP:      normalizeRuntimeRuleICMP(rule.ICMP),
+			Hostname:   normalizeRuntimeRuleHostname(rule.Hostname),
+			CIDR:       normalizeRuntimeRuleCIDR(rule.CIDR),
+			Transport:  normalizeRuntimeRuleTransport(rule.Transport),
+			ICMP:       normalizeRuntimeRuleICMP(rule.ICMP),
+			inputIndex: idx,
 		}
 		compiled = append(compiled, entry)
 	}
 
 	sort.Slice(compiled, func(i, j int) bool {
-		return runtimeRuleSortKey(compiled[i]) < runtimeRuleSortKey(compiled[j])
+		ik := runtimeRuleSortKey(compiled[i])
+		jk := runtimeRuleSortKey(compiled[j])
+		if ik != jk {
+			return ik < jk
+		}
+		return compiled[i].inputIndex < compiled[j].inputIndex
 	})
 
 	for idx := range compiled {
@@ -750,7 +757,7 @@ func normalizeRuntimeRuleCIDR(cidr string) string {
 	if err != nil || !prefix.Addr().Is4() {
 		return trimmed
 	}
-	return prefix.String()
+	return prefix.Masked().String()
 }
 
 func normalizeRuntimeRuleTransport(rules []config.TransportRule) []firewall.TransportMatch {
