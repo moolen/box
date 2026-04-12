@@ -150,7 +150,7 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 		}
 
 		for _, match := range rule.Transport {
-			protocol := strings.TrimSpace(match.Protocol)
+			protocol := strings.ToLower(strings.TrimSpace(match.Protocol))
 			if protocol == "" {
 				return EnforcePlan{}, fmt.Errorf("transport protocol is required for set %q", setName)
 			}

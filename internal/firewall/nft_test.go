@@ -282,6 +282,44 @@ func TestEnforceModeRendersMultiPortTransportMatch(t *testing.T) {
 	)
 }
 
+func TestEnforceModeNormalizesProtocolCase(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:  "box_deadbeef",
+		HostVeth:   "vethhdeadbeef",
+		SubnetCIDR: "100.96.0.0/30",
+		DNSPort:    1053,
+		Rules: []EnforceRule{
+			{
+				SetName: "egress_0_v4",
+				Transport: []TransportMatch{
+					{
+						Protocol: "TCP",
+						Ports:    []int{443},
+					},
+					{
+						Protocol: "UdP",
+						Ports:    []int{53},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error = %v", err)
+	}
+
+	mustContainCommandFragments(t, plan.Commands,
+		"ip daddr @egress_0_v4",
+		"tcp dport 443",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"ip daddr @egress_0_v4",
+		"udp dport 53",
+		"accept",
+	)
+}
+
 func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
 	plan, err := BuildEnforcePlan(EnforcePlanInput{
 		TableName:  "box_deadbeef",
