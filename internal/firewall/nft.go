@@ -22,15 +22,32 @@ type MonitorPlan struct {
 }
 
 type EnforcePlanInput struct {
-	TableName         string
-	HostVeth          string
-	SubnetCIDR        string
-	DNSPort           int
-	ExtraAllowedCIDRs []string
+	TableName  string
+	HostVeth   string
+	SubnetCIDR string
+	DNSPort    int
+	Rules      []EnforceRule
 }
 
 type EnforcePlan struct {
 	Commands []string
+}
+
+type EnforceRule struct {
+	SetName   string
+	CIDRs     []string
+	Transport []TransportMatch
+	ICMP      []ICMPMatch
+}
+
+type TransportMatch struct {
+	Protocol string
+	Ports    []int
+}
+
+type ICMPMatch struct {
+	Type int
+	Code int
 }
 
 func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
@@ -94,44 +111,102 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 
 	commands := []string{
 		fmt.Sprintf("nft add table inet %s", in.TableName),
-		fmt.Sprintf("nft add set inet %s allow_v4 { type ipv4_addr; flags interval; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s udp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
 		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s tcp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
-		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @allow_v4 accept", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 	}
 
-	if len(in.ExtraAllowedCIDRs) > 0 {
-		validCIDRs := make([]string, 0, len(in.ExtraAllowedCIDRs))
-		for _, raw := range in.ExtraAllowedCIDRs {
+	for _, rule := range in.Rules {
+		setName := strings.TrimSpace(rule.SetName)
+		if setName == "" {
+			return EnforcePlan{}, errors.New("rule set name is required")
+		}
+
+		commands = append(commands,
+			fmt.Sprintf("nft add set inet %s %s { type ipv4_addr; flags interval; }", in.TableName, setName),
+		)
+
+		validCIDRs := make([]string, 0, len(rule.CIDRs))
+		for _, raw := range rule.CIDRs {
 			trimmed := strings.TrimSpace(raw)
 			if trimmed == "" {
 				continue
 			}
 			prefix, err := netip.ParsePrefix(trimmed)
 			if err != nil {
-				return EnforcePlan{}, fmt.Errorf("parse extra allowed cidr %q: %w", raw, err)
+				return EnforcePlan{}, fmt.Errorf("parse cidr %q for set %q: %w", raw, setName, err)
 			}
 			if !prefix.Addr().Is4() {
-				return EnforcePlan{}, fmt.Errorf("extra allowed cidr %q must be ipv4", raw)
+				return EnforcePlan{}, fmt.Errorf("cidr %q for set %q must be ipv4", raw, setName)
 			}
 			validCIDRs = append(validCIDRs, prefix.String())
 		}
 		if len(validCIDRs) > 0 {
-			commands = append(commands, fmt.Sprintf("nft add element inet %s allow_v4 { %s }", in.TableName, strings.Join(validCIDRs, ", ")))
+			commands = append(commands, fmt.Sprintf("nft add element inet %s %s { %s }", in.TableName, setName, strings.Join(validCIDRs, ", ")))
+		}
+
+		for _, match := range rule.Transport {
+			protocol := strings.ToLower(strings.TrimSpace(match.Protocol))
+			if protocol == "" {
+				return EnforcePlan{}, fmt.Errorf("transport protocol is required for set %q", setName)
+			}
+			if protocol != "tcp" && protocol != "udp" {
+				return EnforcePlan{}, fmt.Errorf("transport protocol %q for set %q must be tcp or udp", protocol, setName)
+			}
+			if len(match.Ports) == 0 {
+				return EnforcePlan{}, fmt.Errorf("transport ports are required for set %q", setName)
+			}
+			for _, port := range match.Ports {
+				if port <= 0 || port > 65535 {
+					return EnforcePlan{}, fmt.Errorf("transport port %d for set %q must be 1-65535", port, setName)
+				}
+			}
+
+			commands = append(commands,
+				fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @%s %s dport %s accept",
+					in.TableName,
+					in.HostVeth,
+					in.SubnetCIDR,
+					setName,
+					protocol,
+					renderPorts(match.Ports),
+				),
+			)
+		}
+
+		for _, tuple := range rule.ICMP {
+			if tuple.Type < 0 || tuple.Type > 255 {
+				return EnforcePlan{}, fmt.Errorf("icmp type %d for set %q must be 0-255", tuple.Type, setName)
+			}
+			if tuple.Code < 0 || tuple.Code > 255 {
+				return EnforcePlan{}, fmt.Errorf("icmp code %d for set %q must be 0-255", tuple.Code, setName)
+			}
+			commands = append(commands,
+				fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @%s icmp type %d icmp code %d accept",
+					in.TableName,
+					in.HostVeth,
+					in.SubnetCIDR,
+					setName,
+					tuple.Type,
+					tuple.Code,
+				),
+			)
 		}
 	}
 
 	return EnforcePlan{Commands: commands}, nil
 }
 
-func BuildEnforceAllowIPCommand(tableName, rawIP string) (string, error) {
+func BuildEnforceAllowIPCommand(tableName, setName, rawIP string) (string, error) {
 	if strings.TrimSpace(tableName) == "" {
 		return "", errors.New("table name is required")
+	}
+	if strings.TrimSpace(setName) == "" {
+		return "", errors.New("set name is required")
 	}
 	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
 	if err != nil {
@@ -140,5 +215,17 @@ func BuildEnforceAllowIPCommand(tableName, rawIP string) (string, error) {
 	if !addr.Is4() {
 		return "", fmt.Errorf("ip %q must be ipv4", rawIP)
 	}
-	return fmt.Sprintf("nft add element inet %s allow_v4 { %s }", tableName, addr.Unmap().String()), nil
+	return fmt.Sprintf("nft add element inet %s %s { %s }", tableName, setName, addr.Unmap().String()), nil
+}
+
+func renderPorts(ports []int) string {
+	if len(ports) == 1 {
+		return fmt.Sprintf("%d", ports[0])
+	}
+
+	values := make([]string, 0, len(ports))
+	for _, port := range ports {
+		values = append(values, fmt.Sprintf("%d", port))
+	}
+	return fmt.Sprintf("{ %s }", strings.Join(values, ", "))
 }

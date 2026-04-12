@@ -262,7 +262,13 @@ func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T)
 	t.Parallel()
 
 	cfg := testConfig("monitor")
-	cfg.Policy.AllowDomains = []string{"example.com"}
+	cfg.Policy.Egress = []config.EgressRule{{
+		Hostname: "example.com",
+		Transport: []config.TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -731,12 +737,19 @@ func TestRunCreatesMissingStateRootBeforeStartupChecks(t *testing.T) {
 	}
 }
 
-func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
+func TestEnforceModeAddsResolvedIPsToMatchingHostnameRuleSets(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
-	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			Hostname: "allowed.example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+	}
 
 	exec := &recordingCommandExec{}
 	var dnsReq DNSStartRequest
@@ -747,7 +760,7 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 		StateRoot: t.TempDir(),
 	}, Deps{
 		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-enforce" },
+		RandomID:    func() string { return "runtime-enforce-structured-single" },
 		CommandExec: exec,
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
@@ -796,11 +809,225 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	}
 
 	mustContainCall(t, exec.calls, "nft add set inet box_")
+	mustContainCall(t, exec.calls, "egress_0_v4")
 	mustContainCall(t, exec.calls, "nft add element inet box_")
-	mustContainCall(t, exec.calls, "93.184.216.34")
-	mustContainCall(t, exec.calls, "93.184.216.35")
-	if countCallsContaining(exec.calls, "93.184.216.34") != 1 {
+	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.34 }")
+	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.35 }")
+	if countCallsContaining(exec.calls, "egress_0_v4 { 93.184.216.34 }") != 1 {
 		t.Fatalf("expected duplicate learned IPs to be de-duplicated; calls=%#v", exec.calls)
+	}
+}
+
+func TestEnforceModeProgramsFirewallBeforeAdmittingResolvedIPs(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			Hostname: "allowed.example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+	}
+
+	exec := &firewallReadyCommandExec{}
+
+	_, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce-firewall-before-dns" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			req.OnResolved(dns.Resolution{
+				Hostname: "allowed.example.com",
+				IPs:      []netip.Addr{netip.MustParseAddr("93.184.216.34")},
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if len(exec.failedBeforeReady) != 0 {
+		t.Fatalf("resolved IP insertion happened before firewall set creation: %#v", exec.failedBeforeReady)
+	}
+	if len(exec.successfulAdds) != 1 {
+		t.Fatalf("successful learned IP insertions = %d, want 1; calls=%#v", len(exec.successfulAdds), exec.calls)
+	}
+}
+
+func TestEnforceModeUnionsOverlappingHostnameRulePermissions(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			Hostname: "example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+		{
+			Hostname: "api.example.com",
+			ICMP: []config.ICMPRule{{
+				Type: 8,
+				Code: 0,
+			}},
+		},
+	}
+
+	exec := &recordingCommandExec{}
+
+	_, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce-structured-overlap" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			if req.AllowQuery == nil {
+				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
+			}
+			if !req.AllowQuery("api.example.com") {
+				t.Fatalf("AllowQuery(api.example.com) = false, want true")
+			}
+			req.OnResolved(dns.Resolution{
+				Hostname: "api.example.com",
+				IPs:      []netip.Addr{netip.MustParseAddr("93.184.216.34")},
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	mustContainCall(t, exec.calls, "egress_0_v4 { 93.184.216.34 }")
+	mustContainCall(t, exec.calls, "egress_1_v4 { 93.184.216.34 }")
+	if countCallsContaining(exec.calls, "93.184.216.34") != 2 {
+		t.Fatalf("expected learned IP to be inserted into both matching hostname rule sets; calls=%#v", exec.calls)
+	}
+}
+
+func TestEnforceModeCIDRRulesDoNotAuthorizeDNSQueries(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			CIDR: "93.184.216.0/24",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+	}
+
+	exec := &recordingCommandExec{}
+
+	_, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce-structured-cidr-only" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
+			if req.AllowQuery == nil {
+				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
+			}
+			if req.AllowQuery("example.com") {
+				t.Fatalf("AllowQuery(example.com) = true, want false")
+			}
+			req.OnResolved(dns.Resolution{
+				Hostname: "example.com",
+				IPs:      []netip.Addr{netip.MustParseAddr("203.0.113.10")},
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if countCallsContaining(exec.calls, "203.0.113.10") != 0 {
+		t.Fatalf("unexpected dynamic allow insertion for cidr-only policy; calls=%#v", exec.calls)
+	}
+}
+
+func TestCompileRuntimeEgressPreservesInputOrderForDuplicateNormalizedRules(t *testing.T) {
+	t.Parallel()
+
+	compiled := compileRuntimeEgress(config.PolicyConfig{
+		Egress: []config.EgressRule{
+			{
+				Hostname: " Example.com. ",
+				Transport: []config.TransportRule{{
+					Protocol: "TCP",
+					Ports:    []int{443},
+				}},
+			},
+			{
+				Hostname: "example.com",
+				Transport: []config.TransportRule{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+			},
+		},
+	})
+
+	if len(compiled) != 2 {
+		t.Fatalf("compileRuntimeEgress() len = %d, want 2", len(compiled))
+	}
+	if compiled[0].inputIndex != 0 {
+		t.Fatalf("compileRuntimeEgress()[0].inputIndex = %d, want 0", compiled[0].inputIndex)
+	}
+	if compiled[1].inputIndex != 1 {
+		t.Fatalf("compileRuntimeEgress()[1].inputIndex = %d, want 1", compiled[1].inputIndex)
+	}
+	if compiled[0].SetName != "egress_0_v4" {
+		t.Fatalf("compileRuntimeEgress()[0].SetName = %q, want %q", compiled[0].SetName, "egress_0_v4")
+	}
+	if compiled[1].SetName != "egress_1_v4" {
+		t.Fatalf("compileRuntimeEgress()[1].SetName = %q, want %q", compiled[1].SetName, "egress_1_v4")
+	}
+}
+
+func TestCompileRuntimeEgressMasksCIDRHostBits(t *testing.T) {
+	t.Parallel()
+
+	compiled := compileRuntimeEgress(config.PolicyConfig{
+		Egress: []config.EgressRule{{
+			CIDR: "10.0.0.1/24",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		}},
+	})
+
+	if len(compiled) != 1 {
+		t.Fatalf("compileRuntimeEgress() len = %d, want 1", len(compiled))
+	}
+	if compiled[0].CIDR != "10.0.0.0/24" {
+		t.Fatalf("compileRuntimeEgress()[0].CIDR = %q, want %q", compiled[0].CIDR, "10.0.0.0/24")
 	}
 }
 
@@ -808,7 +1035,13 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Policy.Egress = []config.EgressRule{{
+		Hostname: "allowed.example.com",
+		Transport: []config.TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
 	cfg.Docker = config.DockerConfig{
 		Enabled:                     true,
 		DataRoot:                    "/var/lib/docker",
@@ -1133,6 +1366,30 @@ func (f *failingCommandExec) Run(_ context.Context, name string, args ...string)
 	f.calls = append(f.calls, call)
 	if err, ok := f.failures[call]; ok {
 		return err
+	}
+	return nil
+}
+
+type firewallReadyCommandExec struct {
+	calls            []string
+	firewallReady    bool
+	failedBeforeReady []string
+	successfulAdds   []string
+}
+
+func (f *firewallReadyCommandExec) Run(_ context.Context, name string, args ...string) error {
+	call := strings.TrimSpace(strings.Join(append([]string{name}, args...), " "))
+	f.calls = append(f.calls, call)
+
+	if strings.Contains(call, "nft add set inet box_") && strings.Contains(call, "egress_0_v4") {
+		f.firewallReady = true
+	}
+	if strings.Contains(call, "nft add element inet box_") && strings.Contains(call, "egress_0_v4 { 93.184.216.34 }") {
+		if !f.firewallReady {
+			f.failedBeforeReady = append(f.failedBeforeReady, call)
+			return errors.New("egress set not ready")
+		}
+		f.successfulAdds = append(f.successfulAdds, call)
 	}
 	return nil
 }

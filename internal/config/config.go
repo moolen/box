@@ -42,9 +42,24 @@ type TransparentProxyConfig struct {
 }
 
 type PolicyConfig struct {
-	AllowDomains      []string `yaml:"allow_domains"`
-	DenyDomains       []string `yaml:"deny_domains"`
-	ExtraAllowedCIDRs []string `yaml:"extra_allowed_cidrs"`
+	Egress []EgressRule `yaml:"egress"`
+}
+
+type EgressRule struct {
+	Hostname  string          `yaml:"hostname"`
+	CIDR      string          `yaml:"cidr"`
+	Transport []TransportRule `yaml:"transport"`
+	ICMP      []ICMPRule      `yaml:"icmp"`
+}
+
+type TransportRule struct {
+	Protocol string `yaml:"protocol"`
+	Ports    []int  `yaml:"ports"`
+}
+
+type ICMPRule struct {
+	Type int `yaml:"type"`
+	Code int `yaml:"code"`
 }
 
 type MountsConfig struct {

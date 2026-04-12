@@ -3,6 +3,7 @@ package testenv
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,13 +87,7 @@ func RequireCommands(t *testing.T, names ...string) {
 func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
 	t.Helper()
 
-	sourcePath := filepath.Join(moduleRoot, "box.yaml")
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
-	}
-
-	content := string(data)
+	content := loadTestConfigTemplate(t, moduleRoot)
 	switch {
 	case strings.Contains(content, "enabled: false"):
 		content = strings.Replace(content, "enabled: false", "enabled: true", 1)
@@ -109,8 +104,44 @@ func WriteDockerEnabledConfig(t *testing.T, moduleRoot string) string {
 	return path
 }
 
-func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
+func WriteDefaultConfig(t *testing.T, moduleRoot string) string {
 	t.Helper()
+
+	content := loadTestConfigTemplate(t, moduleRoot)
+	path := filepath.Join(t.TempDir(), "box-default.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func WriteEnforceConfig(t *testing.T, egressYAML string) string {
+	t.Helper()
+	return writeEnforceConfig(t, egressYAML, nil, false, true)
+}
+
+func WriteEnforceConfigWithDNSUpstreams(t *testing.T, egressYAML string, upstreams []string) string {
+	t.Helper()
+	return writeEnforceConfig(t, egressYAML, upstreams, false, true)
+}
+
+func WriteEnforceDockerConfig(t *testing.T, egressYAML string) string {
+	t.Helper()
+	return writeEnforceConfig(t, egressYAML, nil, true, true)
+}
+
+func WriteEnforceDockerConfigWithHostNetworkNestedContainers(t *testing.T, egressYAML string, enabled bool) string {
+	t.Helper()
+	return writeEnforceConfig(t, egressYAML, nil, true, enabled)
+}
+
+func writeEnforceConfig(t *testing.T, egressYAML string, upstreams []string, dockerEnabled bool, hostNetworkNestedContainers bool) string {
+	t.Helper()
+
+	if len(upstreams) == 0 {
+		upstreams = []string{"1.1.1.1:53", "8.8.8.8:53"}
+	}
+	dnsPort := reserveTCPPort(t)
 
 	content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
@@ -124,36 +155,31 @@ network:
   mode: enforce
   subnet: 100.96.0.0/30
   dns:
-    bind_addr: auto
+    bind_addr: 127.0.0.1:%d
     upstream:
-      - 1.1.1.1:53
-      - 8.8.8.8:53
+%s
   transparent_proxy:
     enabled: false
     mode: peek
     http_port: 18080
     tls_port: 18443
 policy:
-  allow_domains:
-%s
-  deny_domains: []
-  extra_allowed_cidrs:
 %s
 mounts:
   extra_ro: []
   extra_rw: []
 docker:
-  enabled: true
+  enabled: %t
   data_root: /var/lib/docker
   socket_path: /var/run/docker.sock
   wait_for_socket: true
   ready_timeout: 30s
-  host_network_nested_containers: true
+  host_network_nested_containers: %t
 gvisor:
   platform: systrap
   network: sandbox
   debug: false
-`, yamlList(allowDomains, "    "), yamlList(extraAllowedCIDRs, "    "))
+`, dnsPort, yamlList(upstreams, "      "), renderEgressYAML(egressYAML), dockerEnabled, hostNetworkNestedContainers)
 
 	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -165,13 +191,7 @@ gvisor:
 func WriteWorkdirOverlayConfig(t *testing.T, moduleRoot string, enabled bool) string {
 	t.Helper()
 
-	sourcePath := filepath.Join(moduleRoot, "box.yaml")
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
-	}
-
-	content := string(data)
+	content := loadTestConfigTemplate(t, moduleRoot)
 	if strings.Contains(content, "workdir_overlay: true") {
 		if !enabled {
 			content = strings.Replace(content, "workdir_overlay: true", "workdir_overlay: false", 1)
@@ -242,9 +262,7 @@ network:
     http_port: 18080
     tls_port: 18443
 policy:
-  allow_domains: []
-  deny_domains: []
-  extra_allowed_cidrs: []
+  egress: []
 mounts:
   extra_ro:
     - %s
@@ -344,4 +362,68 @@ func yamlList(values []string, indent string) string {
 		lines = append(lines, indent+"- "+value)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderEgressYAML(block string) string {
+	trimmed := strings.TrimSpace(block)
+	if trimmed == "" {
+		return "  egress: []"
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		lines[i] = "    " + strings.TrimRight(line, " \t")
+	}
+	return "  egress:\n" + strings.Join(lines, "\n")
+}
+
+func loadTestConfigTemplate(t *testing.T, moduleRoot string) string {
+	t.Helper()
+
+	sourcePath := filepath.Join(moduleRoot, "box.yaml")
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", sourcePath, err)
+	}
+
+	content := string(data)
+	dnsPort := reserveTCPPort(t)
+	httpPort := reserveTCPPort(t)
+	tlsPort := reserveTCPPort(t)
+
+	if !strings.Contains(content, "bind_addr: auto") {
+		t.Fatalf("config template missing dns bind setting")
+	}
+	content = strings.Replace(content, "bind_addr: auto", fmt.Sprintf("bind_addr: 127.0.0.1:%d", dnsPort), 1)
+
+	if !strings.Contains(content, "http_port: 18080") {
+		t.Fatalf("config template missing http proxy port setting")
+	}
+	content = strings.Replace(content, "http_port: 18080", fmt.Sprintf("http_port: %d", httpPort), 1)
+
+	if !strings.Contains(content, "tls_port: 18443") {
+		t.Fatalf("config template missing tls proxy port setting")
+	}
+	content = strings.Replace(content, "tls_port: 18443", fmt.Sprintf("tls_port: %d", tlsPort), 1)
+	return content
+}
+
+func reserveTCPPort(t *testing.T) int {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q) error = %v", listener.Addr().String(), err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("Sscanf(%q) error = %v", portText, err)
+	}
+	return port
 }

@@ -34,8 +34,26 @@ In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end o
 `box.yaml` supports two network modes:
 
 - `monitor` for observation plus summary output; it does not restrict general egress
-- `enforce` for DNS-gated egress, dynamic IP allowlisting from allowed DNS answers, and
-  `policy.extra_allowed_cidrs` bootstrap exceptions
+- `enforce` for structured `policy.egress` rules that admit:
+  - hostname-scoped DNS resolutions, then dynamic IPv4 allowlisting into per-rule nft sets
+  - direct IPv4 CIDR destinations for clients that connect by literal IP
+  - TCP/UDP traffic only on explicitly listed destination ports
+  - ICMP traffic only for explicitly listed `type`/`code` tuples
+
+Example `policy.egress`:
+
+```yaml
+policy:
+  egress:
+    - hostname: example.com
+      transport:
+        - protocol: tcp
+          ports: [443]
+    - cidr: 203.0.113.7/32
+      icmp:
+        - type: 8
+          code: 0
+```
 
 Integration tests cover:
 

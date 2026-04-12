@@ -1,10 +1,7 @@
 package monitor
 
 import (
-	"net"
-	"strconv"
 	"strings"
-	"unicode"
 
 	"gvisor-net/internal/config"
 )
@@ -18,30 +15,11 @@ const (
 
 type Policy struct {
 	allow   []string
-	deny    []string
 	invalid bool
 }
 
 func NormalizeHostname(hostname string) string {
-	normalized := strings.TrimSpace(hostname)
-	if normalized == "" {
-		return ""
-	}
-
-	if parsedHost, parsedPort, err := net.SplitHostPort(normalized); err == nil {
-		port, portErr := strconv.Atoi(parsedPort)
-		if portErr != nil || port < 0 || port > 65535 || parsedHost == "" {
-			return ""
-		}
-		normalized = parsedHost
-	}
-
-	normalized = strings.ToLower(normalized)
-	normalized = strings.TrimSuffix(normalized, ".")
-	if !isValidHostname(normalized) {
-		return ""
-	}
-	return normalized
+	return config.NormalizeHostname(hostname)
 }
 
 func EvaluateHostname(policy config.PolicyConfig, hostname string) Verdict {
@@ -50,8 +28,7 @@ func EvaluateHostname(policy config.PolicyConfig, hostname string) Verdict {
 
 func CompilePolicy(policy config.PolicyConfig) Policy {
 	compiled := Policy{}
-	compiled.allow, compiled.invalid = normalizeRules(policy.AllowDomains)
-	compiled.deny, compiled.invalid = appendNormalizedRules(policy.DenyDomains, compiled.invalid)
+	compiled.allow, compiled.invalid = hostnamePolicyRules(policy)
 	return compiled
 }
 
@@ -70,34 +47,27 @@ func (p Policy) EvaluateNormalized(host string) Verdict {
 		}
 		return VerdictAllow
 	}
-	if matchesAny(host, p.deny) {
-		return VerdictDeny
-	}
 	if len(p.allow) > 0 && !matchesAny(host, p.allow) {
 		return VerdictDeny
 	}
 	return VerdictAllow
 }
 
-func normalizeRules(rules []string) ([]string, bool) {
-	return appendNormalizedRules(rules, false)
-}
-
-func appendNormalizedRules(rules []string, invalid bool) ([]string, bool) {
-	out := make([]string, 0, len(rules))
-	for _, rule := range rules {
-		trimmed := strings.TrimSpace(rule)
+func hostnamePolicyRules(policy config.PolicyConfig) (allow []string, invalid bool) {
+	allow = make([]string, 0, len(policy.Egress))
+	for _, rule := range policy.Egress {
+		trimmed := strings.TrimSpace(rule.Hostname)
 		if trimmed == "" {
 			continue
 		}
-		normalized := NormalizeHostname(rule)
+		normalized := NormalizeHostname(trimmed)
 		if normalized == "" {
 			invalid = true
 			continue
 		}
-		out = append(out, normalized)
+		allow = append(allow, normalized)
 	}
-	return out, invalid
+	return allow, invalid
 }
 
 func matchesAny(host string, rules []string) bool {
@@ -117,32 +87,4 @@ func matchHostnameRule(host string, rule string) bool {
 		return true
 	}
 	return strings.HasSuffix(host, "."+rule)
-}
-
-func isValidHostname(host string) bool {
-	if host == "" {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return true
-	}
-	if len(host) > 253 {
-		return false
-	}
-	labels := strings.Split(host, ".")
-	for _, label := range labels {
-		if label == "" || len(label) > 63 {
-			return false
-		}
-		if label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for _, r := range label {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' {
-				continue
-			}
-			return false
-		}
-	}
-	return true
 }
