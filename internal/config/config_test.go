@@ -423,3 +423,16 @@ func TestValidateRejectsInvalidNetworkPolicyRule(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateAcceptsValidWildcardHostname(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Network.Policy = []NetworkPolicyRule{{
+		Hostname: "*.example.com",
+		Ports:    []int{443},
+	}}
+
+	if err := ValidateRuntime(cfg); err != nil {
+		t.Fatalf("ValidateRuntime() error = %v, want nil", err)
+	}
+}
