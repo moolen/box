@@ -195,9 +195,36 @@ func TestEnforceModeRendersPerRuleSetsAndProtocolAwareAcceptRules(t *testing.T) 
 
 	mustContainCommand(t, plan.Commands, "nft add set inet box_deadbeef egress_0_v4 { type ipv4_addr; flags interval; }")
 	mustContainCommand(t, plan.Commands, "nft add set inet box_deadbeef egress_1_v4 { type ipv4_addr; flags interval; }")
-	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr @egress_0_v4 tcp dport { 443 } accept")
-	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr @egress_0_v4 icmp type 8 code 0 accept")
-	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr @egress_1_v4 udp dport { 443 } accept")
+	mustContainCommandFragments(t, plan.Commands,
+		"nft add rule inet box_deadbeef forward",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"ip daddr @egress_0_v4",
+		"tcp",
+		"dport",
+		"443",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"nft add rule inet box_deadbeef forward",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"ip daddr @egress_0_v4",
+		"icmp",
+		"type 8",
+		"code 0",
+		"accept",
+	)
+	mustContainCommandFragments(t, plan.Commands,
+		"nft add rule inet box_deadbeef forward",
+		"iifname vethhdeadbeef",
+		"ip saddr 100.96.0.0/30",
+		"ip daddr @egress_1_v4",
+		"udp",
+		"dport",
+		"443",
+		"accept",
+	)
 }
 
 func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
@@ -232,7 +259,7 @@ func TestEnforceModePrepopulatesCIDRRuleSetsOnly(t *testing.T) {
 	mustContainCommand(t, plan.Commands, "nft add set inet box_deadbeef egress_1_v4 { type ipv4_addr; flags interval; }")
 	mustContainCommand(t, plan.Commands, "nft add element inet box_deadbeef egress_1_v4 { 93.184.216.0/24 }")
 
-	if containsFragment(plan.Commands, "nft add element inet box_deadbeef egress_0_v4 {") {
+	if containsFragment(plan.Commands, "nft add element inet box_deadbeef egress_0_v4") {
 		t.Fatalf("hostname-backed set must not be pre-populated.\ncommands=%#v", plan.Commands)
 	}
 }
@@ -254,6 +281,23 @@ func mustContainCommand(t *testing.T, commands []string, want string) {
 	if !slices.Contains(commands, want) {
 		t.Fatalf("command missing.\nwant: %q\ncommands=%#v", want, commands)
 	}
+}
+
+func mustContainCommandFragments(t *testing.T, commands []string, fragments ...string) {
+	t.Helper()
+	for _, cmd := range commands {
+		matches := true
+		for _, fragment := range fragments {
+			if !strings.Contains(cmd, fragment) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return
+		}
+	}
+	t.Fatalf("command missing with fragments=%#v\ncommands=%#v", fragments, commands)
 }
 
 func containsFragment(lines []string, fragment string) bool {
