@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -202,17 +203,21 @@ func TestBoxEnforceAllowsConfiguredHostnamePortOnly(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ip", "python3")
 
 	binary := testenv.BuildBoxBinary(t)
-	configPath := testenv.WriteEnforceConfig(t, `
-- hostname: example.com
+	fixture := startRoutedHTTPFixture(t, 18081, 18082)
+	const hostname = "allowed.example.test"
+	dnsUpstream := startDNSAUpstream(t, hostname, []string{fixture.IP})
+	configPath := testenv.WriteEnforceConfigWithDNSUpstreams(t, fmt.Sprintf(`
+- hostname: %s
   transport:
     - protocol: tcp
-      ports: [443]
-`)
+      ports: [%d]
+`, hostname, fixture.Ports[0]), []string{dnsUpstream})
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
-		"curl", "-k", "-fsS", "--connect-timeout", "5", "--max-time", "10", "https://example.com")
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d", hostname, fixture.Ports[0]))
 	if err == nil {
 		if !strings.Contains(stdout, "Example Domain") {
 			t.Fatalf("allowed hostname request stdout = %q, want fixture body", stdout)
@@ -222,7 +227,7 @@ func TestBoxEnforceAllowsConfiguredHostnamePortOnly(t *testing.T) {
 	}
 
 	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "http://example.com")
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d", hostname, fixture.Ports[1]))
 	if err == nil {
 		t.Fatalf("expected disallowed hostname port to fail; stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -234,18 +239,19 @@ func TestBoxEnforceAllowsDirectIPOnlyWhenCIDRRuleMatches(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ip", "python3")
 
 	binary := testenv.BuildBoxBinary(t)
-	exampleIP := lookupHostIPv4(t, "example.com")
+	fixture := startRoutedHTTPFixture(t, 18081)
 
 	blockedConfigPath := testenv.WriteEnforceConfig(t, fmt.Sprintf(`
 - cidr: 198.51.100.7/32
   transport:
     - protocol: tcp
-      ports: [80]
-`))
+      ports: [%d]
+`, fixture.Ports[0]))
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", blockedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "-H", "Host: example.com", "http://"+exampleIP+"/")
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d/", fixture.IP, fixture.Ports[0]))
 	if err == nil {
 		t.Fatalf("expected direct-ip request with non-matching cidr to fail; stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -254,10 +260,10 @@ func TestBoxEnforceAllowsDirectIPOnlyWhenCIDRRuleMatches(t *testing.T) {
 - cidr: %s
   transport:
     - protocol: tcp
-      ports: [80]
-`, exampleIP+"/32"))
+      ports: [%d]
+`, fixture.CIDR, fixture.Ports[0]))
 	stdout, stderr, err = testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", allowedConfigPath, "--",
-		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", "-H", "Host: example.com", "http://"+exampleIP+"/")
+		"curl", "-fsS", "--connect-timeout", "5", "--max-time", "10", fmt.Sprintf("http://%s:%d/", fixture.IP, fixture.Ports[0]))
 	if err != nil {
 		t.Fatalf("allowed direct-ip request error = %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
@@ -452,6 +458,12 @@ type localHTTPFixture struct {
 	Port int
 }
 
+type routedHTTPFixture struct {
+	IP    string
+	CIDR  string
+	Ports []int
+}
+
 func startLocalHTTPFixture(t *testing.T) localHTTPFixture {
 	t.Helper()
 
@@ -540,4 +552,193 @@ func lookupHostIPv4(t *testing.T, hostname string) string {
 	}
 	t.Fatalf("LookupIP(%q) returned no IPv4 address", hostname)
 	return ""
+}
+
+func startRoutedHTTPFixture(t *testing.T, ports ...int) routedHTTPFixture {
+	t.Helper()
+
+	if len(ports) == 0 {
+		t.Fatal("startRoutedHTTPFixture() requires at least one port")
+	}
+
+	token := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	netns := "itestns" + token[:8]
+	hostVeth := "itesth" + token[:8]
+	guestVeth := "itestg" + token[:8]
+	octet := int(time.Now().UnixNano()%200) + 20
+	hostIP := fmt.Sprintf("198.19.%d.1", octet)
+	guestIP := fmt.Sprintf("198.19.%d.2", octet)
+	cidr := guestIP + "/30"
+
+	runRootCommand(t, "ip", "netns", "add", netns)
+	t.Cleanup(func() {
+		runRootCommandIgnoreError("ip", "netns", "del", netns)
+	})
+	runRootCommand(t, "ip", "link", "add", hostVeth, "type", "veth", "peer", "name", guestVeth)
+	t.Cleanup(func() {
+		runRootCommandIgnoreError("ip", "link", "del", hostVeth)
+	})
+	runRootCommand(t, "ip", "addr", "add", hostIP+"/30", "dev", hostVeth)
+	runRootCommand(t, "ip", "link", "set", hostVeth, "up")
+	runRootCommand(t, "ip", "link", "set", guestVeth, "netns", netns)
+	runRootCommand(t, "ip", "netns", "exec", netns, "ip", "link", "set", "lo", "up")
+	runRootCommand(t, "ip", "netns", "exec", netns, "ip", "addr", "add", cidr, "dev", guestVeth)
+	runRootCommand(t, "ip", "netns", "exec", netns, "ip", "link", "set", guestVeth, "up")
+	runRootCommand(t, "ip", "netns", "exec", netns, "ip", "route", "add", "default", "via", hostIP)
+
+	docRoot := t.TempDir()
+	indexPath := filepath.Join(docRoot, "index.html")
+	if err := os.WriteFile(indexPath, []byte("Example Domain\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", indexPath, err)
+	}
+
+	for _, port := range ports {
+		cmd := execRootCommand("ip", "netns", "exec", netns, "python3", "-m", "http.server", strconv.Itoa(port), "--bind", guestIP, "--directory", docRoot)
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start routed fixture server on %s:%d error = %v", guestIP, port, err)
+		}
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_, _ = cmd.Process.Wait()
+			}
+		})
+		waitForTCPListener(t, guestIP, port)
+	}
+
+	return routedHTTPFixture{
+		IP:    guestIP,
+		CIDR:  cidr,
+		Ports: append([]int(nil), ports...),
+	}
+}
+
+func startDNSAUpstream(t *testing.T, hostname string, ips []string) string {
+	t.Helper()
+
+	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 2048)
+		for {
+			n, client, err := ln.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+
+			query := make([]byte, n)
+			copy(query, buf[:n])
+			resp := buildDNSAResponse(t, query, hostname, ips)
+			_, _ = ln.WriteTo(resp, client)
+		}
+	}()
+
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+
+	return ln.LocalAddr().String()
+}
+
+func buildDNSAResponse(t *testing.T, query []byte, hostname string, ips []string) []byte {
+	t.Helper()
+
+	response := append([]byte(nil), query...)
+	flags := binary.BigEndian.Uint16(response[2:4])
+	flags |= 0x8000
+	flags &^= 0x000f
+	binary.BigEndian.PutUint16(response[2:4], flags)
+	binary.BigEndian.PutUint16(response[6:8], uint16(len(ips)))
+	binary.BigEndian.PutUint16(response[8:10], 0)
+	binary.BigEndian.PutUint16(response[10:12], 0)
+
+	for _, rawIP := range ips {
+		addr, err := netip.ParseAddr(rawIP)
+		if err != nil {
+			t.Fatalf("ParseAddr(%q) error = %v", rawIP, err)
+		}
+		if !addr.Is4() {
+			t.Fatalf("buildDNSAResponse() only supports IPv4 answers, got %q", rawIP)
+		}
+		response = appendDNSName(response, hostname)
+		response = binary.BigEndian.AppendUint16(response, 1)
+		response = binary.BigEndian.AppendUint16(response, 1)
+		response = binary.BigEndian.AppendUint32(response, 60)
+		response = binary.BigEndian.AppendUint16(response, 4)
+		response = append(response, addr.AsSlice()...)
+	}
+
+	return response
+}
+
+func appendDNSName(buf []byte, hostname string) []byte {
+	for _, label := range splitDNSLabels(hostname) {
+		buf = append(buf, byte(len(label)))
+		buf = append(buf, label...)
+	}
+	return append(buf, 0)
+}
+
+func splitDNSLabels(hostname string) [][]byte {
+	parts := make([][]byte, 0, 4)
+	start := 0
+	for i := 0; i <= len(hostname); i++ {
+		if i != len(hostname) && hostname[i] != '.' {
+			continue
+		}
+		if start < i {
+			parts = append(parts, []byte(hostname[start:i]))
+		}
+		start = i + 1
+	}
+	return parts
+}
+
+func waitForTCPListener(t *testing.T, host string, port int) {
+	t.Helper()
+
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp4", address, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for tcp listener on %s", address)
+}
+
+func runRootCommand(t *testing.T, args ...string) {
+	t.Helper()
+
+	output, err := execRootCommand(args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run %q error = %v: %s", strings.Join(rootCommand(args...), " "), err, strings.TrimSpace(string(output)))
+	}
+}
+
+func runRootCommandIgnoreError(args ...string) {
+	_, _ = execRootCommand(args...).CombinedOutput()
+}
+
+func rootCommand(args ...string) []string {
+	if os.Geteuid() == 0 {
+		return append([]string(nil), args...)
+	}
+	return append([]string{"sudo", "-n"}, args...)
+}
+
+func execRootCommand(args ...string) *exec.Cmd {
+	command := rootCommand(args...)
+	return exec.Command(command[0], command[1:]...)
 }
