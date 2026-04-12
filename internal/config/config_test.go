@@ -116,6 +116,85 @@ policy:
 	}
 }
 
+func TestLoadStructuredEgressPolicy(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: enforce
+policy:
+  egress:
+    - hostname: example.com
+      transport:
+        - protocol: tcp
+          ports: [443]
+      icmp:
+        - type: 8
+          code: 0
+    - cidr: 93.184.216.0/24
+      transport:
+        - protocol: udp
+          ports: [443]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got.Policy.Egress) != 2 {
+		t.Fatalf("policy.egress len = %d, want 2", len(got.Policy.Egress))
+	}
+}
+
+func TestValidateRejectsEgressRuleWithHostnameAndCIDR(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Policy.Egress = []EgressRule{{
+		Hostname: "example.com",
+		CIDR:     "93.184.216.0/24",
+		Transport: []TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want selector rejection")
+	}
+}
+
+func TestValidateRejectsEgressRuleWithInvalidProtocolAndICMPData(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Policy.Egress = []EgressRule{
+		{
+			Hostname: "example.com",
+			Transport: []TransportRule{{
+				Protocol: "sctp",
+				Ports:    []int{443},
+			}},
+		},
+		{
+			CIDR: "93.184.216.0/24",
+			ICMP: []ICMPRule{{
+				Type: 300,
+				Code: -1,
+			}},
+		},
+	}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want invalid protocol/icmp rejection")
+	}
+}
+
 func TestLoadHonorsExplicitDisabledWorkdirOverlay(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `

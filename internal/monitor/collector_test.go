@@ -99,6 +99,33 @@ func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
 	}
 }
 
+func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
+	policy := config.PolicyConfig{
+		AllowDomains: []string{"legacy-only.example.com"},
+		DenyDomains:  []string{"example.com"},
+		Egress: []config.EgressRule{
+			{
+				Hostname: "example.com",
+				Transport: []config.TransportRule{{
+					Protocol: "tcp",
+					Ports:    []int{443},
+				}},
+			},
+			{
+				CIDR: "93.184.216.0/24",
+				Transport: []config.TransportRule{{
+					Protocol: "tcp",
+					Ports:    []int{80},
+				}},
+			},
+		},
+	}
+
+	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictAllow {
+		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule despite conflicting legacy fields", got)
+	}
+}
+
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector := NewCollector(config.PolicyConfig{
 		AllowDomains: []string{"example.com"},
