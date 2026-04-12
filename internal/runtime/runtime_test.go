@@ -262,7 +262,13 @@ func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T)
 	t.Parallel()
 
 	cfg := testConfig("monitor")
-	cfg.Policy.AllowDomains = []string{"example.com"}
+	cfg.Policy.Egress = []config.EgressRule{{
+		Hostname: "example.com",
+		Transport: []config.TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -735,8 +741,22 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
-	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
+	cfg.Policy.Egress = []config.EgressRule{
+		{
+			Hostname: "allowed.example.com",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+		{
+			CIDR: "10.0.0.0/8",
+			Transport: []config.TransportRule{{
+				Protocol: "tcp",
+				Ports:    []int{443},
+			}},
+		},
+	}
 
 	exec := &recordingCommandExec{}
 	var dnsReq DNSStartRequest
@@ -808,7 +828,13 @@ func TestEnforceModeStartsProxyForNestedDockerHostNetwork(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Policy.Egress = []config.EgressRule{{
+		Hostname: "allowed.example.com",
+		Transport: []config.TransportRule{{
+			Protocol: "tcp",
+			Ports:    []int{443},
+		}},
+	}}
 	cfg.Docker = config.DockerConfig{
 		Enabled:                     true,
 		DataRoot:                    "/var/lib/docker",

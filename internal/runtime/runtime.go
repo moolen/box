@@ -435,7 +435,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		HostVeth:          rt.Manifest.Net.HostVeth,
 		SubnetCIDR:        cfg.Network.Subnet,
 		DNSPort:           dnsPort,
-		ExtraAllowedCIDRs: append([]string(nil), cfg.Policy.ExtraAllowedCIDRs...),
+		ExtraAllowedCIDRs: egressCIDRs(cfg.Policy),
 	})
 	if err != nil {
 		return fmt.Errorf("build firewall enforce plan: %w", err)
@@ -695,6 +695,16 @@ func usesNestedDockerHostNetworkProxy(cfg config.Config) bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "enforce") &&
 		cfg.Docker.Enabled &&
 		cfg.Docker.HostNetworkNestedContainers
+}
+
+func egressCIDRs(policy config.PolicyConfig) []string {
+	cidrs := make([]string, 0, len(policy.Egress))
+	for _, rule := range policy.Egress {
+		if cidr := strings.TrimSpace(rule.CIDR); cidr != "" {
+			cidrs = append(cidrs, cidr)
+		}
+	}
+	return cidrs
 }
 
 func ensureIPv4Forwarding(ctx context.Context, execer CommandExec, manifest *Manifest) error {
