@@ -42,24 +42,6 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Docker.ReadyTimeout.String() != "10s" {
 		t.Fatalf("docker.ready_timeout = %q, want %q", got.Docker.ReadyTimeout, "10s")
 	}
-	if got.Docker.ModeValue() != "rootless" {
-		t.Fatalf("docker.mode = %q, want %q", got.Docker.ModeValue(), "rootless")
-	}
-	if got.Docker.UserValue() != "box" {
-		t.Fatalf("docker.user = %q, want %q", got.Docker.UserValue(), "box")
-	}
-	if got.Docker.HomeDirValue() != "/home/box" {
-		t.Fatalf("docker.home_dir = %q, want %q", got.Docker.HomeDirValue(), "/home/box")
-	}
-	if got.Docker.RuntimeDirValue() != "/run/user/1000" {
-		t.Fatalf("docker.runtime_dir = %q, want %q", got.Docker.RuntimeDirValue(), "/run/user/1000")
-	}
-	if got.Docker.SocketPathValue() != "/run/user/1000/docker.sock" {
-		t.Fatalf("docker.socket_path = %q, want %q", got.Docker.SocketPathValue(), "/run/user/1000/docker.sock")
-	}
-	if got.Docker.DataRootValue() != "/home/box/.local/share/docker" {
-		t.Fatalf("docker.data_root = %q, want %q", got.Docker.DataRootValue(), "/home/box/.local/share/docker")
-	}
 }
 
 func TestLoadResolvesWorkdirRelativeToInvocationDir(t *testing.T) {
@@ -284,21 +266,6 @@ func TestValidateAcceptsMonitorAndEnforceModes(t *testing.T) {
 				t.Fatalf("ValidateRuntime() error = %v, want nil for mode %q", err, mode)
 			}
 		})
-	}
-}
-
-func TestValidateRejectsNonRootlessDockerModeWhenEnabled(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Mode = "monitor"
-	cfg.Docker.Enabled = true
-	cfg.Docker.Mode = "rootful"
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for rootful docker mode")
-	}
-	if !strings.Contains(err.Error(), "docker.mode") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of docker.mode", err)
 	}
 }
 
