@@ -33,6 +33,23 @@ func TestResolveContainerRuntimePrefersDockerThenPodman(t *testing.T) {
 	}
 }
 
+func TestBundledImageRefUsesDigestOnlyReference(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(BundledImageRef, "@sha256:") {
+		t.Fatalf("BundledImageRef = %q, want digest-pinned reference", BundledImageRef)
+	}
+
+	repo, _, ok := strings.Cut(BundledImageRef, "@")
+	if !ok {
+		t.Fatalf("BundledImageRef = %q, want @sha256 separator", BundledImageRef)
+	}
+	nameOnly := repo[strings.LastIndex(repo, "/")+1:]
+	if strings.Contains(nameOnly, ":") {
+		t.Fatalf("BundledImageRef = %q, want digest-only reference without tag suffix", BundledImageRef)
+	}
+}
+
 func TestStageBundledBinaryUsesPinnedImageAndCopiesBinary(t *testing.T) {
 	t.Parallel()
 
