@@ -558,11 +558,11 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 	summary := rt.MonitorSummary()
 	mustContain(t, summary, "Monitor summary")
 	mustContain(t, summary, "DNS:")
-	mustContain(t, summary, "dns.example.com [ALLOW]: 1")
+	mustContain(t, summary, "dns.example.com [WOULD_ALLOW]: 1")
 	mustContain(t, summary, "HTTP:")
-	mustContain(t, summary, "GET api.example.com [ALLOW]: 1")
+	mustContain(t, summary, "GET api.example.com [WOULD_ALLOW]: 1")
 	mustContain(t, summary, "TLS:")
-	mustContain(t, summary, "tls.example.com [ALLOW]: 1")
+	mustContain(t, summary, "tls.example.com [WOULD_ALLOW]: 1")
 	mustContain(t, summary, "Total events: 3")
 }
 
@@ -613,11 +613,13 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 	text := string(eventLog)
 	mustContain(t, text, `"type":"dns"`)
 	mustContain(t, text, `"hostname":"dns.example.com"`)
+	mustContain(t, text, `"verdict":"would_block"`)
 	mustContain(t, text, `"type":"http"`)
 	mustContain(t, text, `"protocol":"http"`)
 	mustContain(t, text, `"hostname":"api.example.com"`)
 	mustContain(t, text, `"method":"POST"`)
 	mustContain(t, text, `"path":"/submit"`)
+	mustContain(t, text, `"verdict":"would_allow"`)
 }
 
 func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {

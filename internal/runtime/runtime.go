@@ -25,15 +25,15 @@ import (
 )
 
 const (
-	defaultStateRoot = "/run/box"
-	eventLogName     = "events.log"
-	manifestFileName = "manifest.json"
-	caDirName        = "ca"
-	caCertFileName   = "root-ca.pem"
-	caKeyFileName    = "root-ca-key.pem"
+	defaultStateRoot            = "/run/box"
+	eventLogName                = "events.log"
+	manifestFileName            = "manifest.json"
+	caDirName                   = "ca"
+	caCertFileName              = "root-ca.pem"
+	caKeyFileName               = "root-ca-key.pem"
 	upstreamTrustBundleFileName = "upstream-trust-bundle.crt"
-	envoyDirName     = "envoy"
-	bootstrapName    = "bootstrap.yaml"
+	envoyDirName                = "envoy"
+	bootstrapName               = "bootstrap.yaml"
 )
 
 var systemTrustBundlePaths = []string{
@@ -83,15 +83,15 @@ type PolicyServiceStartRequest struct {
 }
 
 type EnvoyStartRequest struct {
-	RuntimeID        string
-	GatewayIP        string
-	ExplicitPort     int
-	TransparentPort  int
-	DNSPort          int
-	DNSUpstream      []string
-	BootstrapPath    string
-	LogPath          string
-	PolicyListenAddr string
+	RuntimeID                  string
+	GatewayIP                  string
+	ExplicitPort               int
+	TransparentPort            int
+	DNSPort                    int
+	DNSUpstream                []string
+	BootstrapPath              string
+	LogPath                    string
+	PolicyListenAddr           string
 	TransparentTLSCertificates []TransparentTLSCertificate
 	UpstreamTrustBundlePath    string
 }
@@ -139,10 +139,10 @@ type EnvoyRuntime struct {
 }
 
 type CARuntime struct {
-	CertPath        string `json:"cert_path"`
-	KeyPath         string `json:"key_path"`
-	SandboxCertPath string `json:"sandbox_cert_path"`
-	UpstreamTrustBundlePath string `json:"upstream_trust_bundle_path,omitempty"`
+	CertPath                   string                      `json:"cert_path"`
+	KeyPath                    string                      `json:"key_path"`
+	SandboxCertPath            string                      `json:"sandbox_cert_path"`
+	UpstreamTrustBundlePath    string                      `json:"upstream_trust_bundle_path,omitempty"`
 	TransparentTLSCertificates []TransparentTLSCertificate `json:"transparent_tls_certificates,omitempty"`
 }
 
@@ -428,17 +428,17 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
-			RuntimeID:                 rt.Manifest.RuntimeID,
-			GatewayIP:                 rt.Manifest.GatewayIP,
-			ExplicitPort:              rt.Manifest.Envoy.ExplicitPort,
-			TransparentPort:           rt.Manifest.Envoy.TransparentPort,
-			DNSPort:                   rt.Manifest.Envoy.DNSPort,
-			DNSUpstream:               []string{dnsUpstreamAddr},
-			BootstrapPath:             rt.Manifest.Envoy.BootstrapPath,
-			LogPath:                   filepath.Join(rt.Manifest.StateDir, "envoy.log"),
-			PolicyListenAddr:          policyListenAddr,
+			RuntimeID:                  rt.Manifest.RuntimeID,
+			GatewayIP:                  rt.Manifest.GatewayIP,
+			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:            rt.Manifest.Envoy.TransparentPort,
+			DNSPort:                    rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:                []string{dnsUpstreamAddr},
+			BootstrapPath:              rt.Manifest.Envoy.BootstrapPath,
+			LogPath:                    filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr:           policyListenAddr,
 			TransparentTLSCertificates: append([]TransparentTLSCertificate(nil), rt.Manifest.CA.TransparentTLSCertificates...),
-			UpstreamTrustBundlePath:   rt.Manifest.CA.UpstreamTrustBundlePath,
+			UpstreamTrustBundlePath:    rt.Manifest.CA.UpstreamTrustBundlePath,
 		})
 		if err != nil {
 			return fmt.Errorf("start envoy: %w", err)
@@ -522,17 +522,17 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
-			RuntimeID:                 rt.Manifest.RuntimeID,
-			GatewayIP:                 rt.Manifest.GatewayIP,
-			ExplicitPort:              rt.Manifest.Envoy.ExplicitPort,
-			TransparentPort:           rt.Manifest.Envoy.TransparentPort,
-			DNSPort:                   rt.Manifest.Envoy.DNSPort,
-			DNSUpstream:               []string{dnsUpstreamAddr},
-			BootstrapPath:             rt.Manifest.Envoy.BootstrapPath,
-			LogPath:                   filepath.Join(rt.Manifest.StateDir, "envoy.log"),
-			PolicyListenAddr:          policyListenAddr,
+			RuntimeID:                  rt.Manifest.RuntimeID,
+			GatewayIP:                  rt.Manifest.GatewayIP,
+			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:            rt.Manifest.Envoy.TransparentPort,
+			DNSPort:                    rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:                []string{dnsUpstreamAddr},
+			BootstrapPath:              rt.Manifest.Envoy.BootstrapPath,
+			LogPath:                    filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr:           policyListenAddr,
 			TransparentTLSCertificates: append([]TransparentTLSCertificate(nil), rt.Manifest.CA.TransparentTLSCertificates...),
-			UpstreamTrustBundlePath:   rt.Manifest.CA.UpstreamTrustBundlePath,
+			UpstreamTrustBundlePath:    rt.Manifest.CA.UpstreamTrustBundlePath,
 		})
 		if err != nil {
 			return fmt.Errorf("start envoy: %w", err)
@@ -641,6 +641,8 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 			Path:     event.Path,
 			Host:     event.Host,
 			SNI:      event.SNI,
+			Verdict:  string(event.Verdict),
+			Reason:   event.Reason,
 		})
 	}
 }
@@ -653,6 +655,8 @@ type rawMonitorEvent struct {
 	Path     string `json:"path,omitempty"`
 	Host     string `json:"host,omitempty"`
 	SNI      string `json:"sni,omitempty"`
+	Verdict  string `json:"verdict,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 func (rt *Runtime) logRawMonitorEvent(event rawMonitorEvent) {
@@ -679,8 +683,12 @@ func nowUTC(deps Deps) time.Time {
 
 func monitorVerdict(verdict policyd.Verdict) monitor.Verdict {
 	switch verdict {
-	case policyd.VerdictAllow, policyd.VerdictWouldAllow:
+	case policyd.VerdictAllow:
 		return monitor.VerdictAllow
+	case policyd.VerdictWouldAllow:
+		return monitor.VerdictWouldAllow
+	case policyd.VerdictWouldBlock:
+		return monitor.VerdictWouldBlock
 	default:
 		return monitor.VerdictDeny
 	}
@@ -889,10 +897,10 @@ func writeRuntimeCAAssets(stateDir, runtimeID string, rules []config.NetworkPoli
 	}
 
 	return CARuntime{
-		CertPath:                  certPath,
-		KeyPath:                   keyPath,
-		SandboxCertPath:           rootfs.TrustedCABundlePath,
-		UpstreamTrustBundlePath:   upstreamTrustBundlePath,
+		CertPath:                   certPath,
+		KeyPath:                    keyPath,
+		SandboxCertPath:            rootfs.TrustedCABundlePath,
+		UpstreamTrustBundlePath:    upstreamTrustBundlePath,
 		TransparentTLSCertificates: transparentTLSCertificates,
 	}, string(runtimeCA.RootCertPEM), nil
 }

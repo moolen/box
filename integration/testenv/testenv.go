@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"gvisor-net/internal/config"
 	"gopkg.in/yaml.v3"
+	"gvisor-net/internal/config"
 )
 
 type BuiltBox struct {
@@ -123,6 +123,14 @@ func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs [
 }
 
 func WriteEnforceConfigWithRules(t *testing.T, rules []config.NetworkPolicyRule) string {
+	return writeManagedConfigWithRules(t, "enforce", rules)
+}
+
+func WriteMonitorConfigWithRules(t *testing.T, rules []config.NetworkPolicyRule) string {
+	return writeManagedConfigWithRules(t, "monitor", rules)
+}
+
+func writeManagedConfigWithRules(t *testing.T, mode string, rules []config.NetworkPolicyRule) string {
 	t.Helper()
 	subnet := uniqueTestSubnet(t)
 
@@ -145,7 +153,7 @@ func WriteEnforceConfigWithRules(t *testing.T, rules []config.NetworkPolicyRule)
     - TERM=xterm
   command_shell: /bin/bash -lc
 network:
-  mode: enforce
+  mode: %s
   subnet: %s
   dns:
     bind_addr: auto
@@ -165,9 +173,9 @@ gvisor:
   platform: ptrace
   network: sandbox
   debug: false
-`, subnet, policySection)
+`, mode, subnet, policySection)
 
-	path := filepath.Join(t.TempDir(), "box-enforce.yaml")
+	path := filepath.Join(t.TempDir(), "box-"+mode+".yaml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}

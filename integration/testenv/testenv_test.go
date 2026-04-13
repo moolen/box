@@ -105,6 +105,30 @@ func TestWriteEnforceConfigEmitsNetworkPolicyRules(t *testing.T) {
 	}
 }
 
+func TestWriteMonitorConfigWithRulesEmitsMonitorModePolicy(t *testing.T) {
+	t.Parallel()
+
+	path := WriteMonitorConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "example.com",
+		Ports:    []int{443},
+	}})
+
+	cfg, err := config.Load(path, t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v", path, err)
+	}
+
+	if cfg.Network.Mode != "monitor" {
+		t.Fatalf("network.mode = %q, want monitor", cfg.Network.Mode)
+	}
+	if len(cfg.Network.Policy) != 1 {
+		t.Fatalf("network.policy = %#v, want 1 rule", cfg.Network.Policy)
+	}
+	if cfg.Network.Policy[0].Hostname != "example.com" {
+		t.Fatalf("network.policy[0].Hostname = %q, want example.com", cfg.Network.Policy[0].Hostname)
+	}
+}
+
 func TestStageBundledEnvoyCopiesBinaryNextToBuiltBox(t *testing.T) {
 	t.Parallel()
 

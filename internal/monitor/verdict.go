@@ -10,8 +10,10 @@ import (
 type Verdict string
 
 const (
-	VerdictAllow Verdict = "allow"
-	VerdictDeny  Verdict = "deny"
+	VerdictAllow      Verdict = "allow"
+	VerdictDeny       Verdict = "deny"
+	VerdictWouldAllow Verdict = "would_allow"
+	VerdictWouldBlock Verdict = "would_block"
 )
 
 func NormalizeHostname(hostname string) string {

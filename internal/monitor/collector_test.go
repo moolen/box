@@ -80,19 +80,19 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 		DNS: map[string]Row{
 			"example.com": {
 				Count:   2,
-				Verdict: VerdictAllow,
+				Verdict: VerdictWouldAllow,
 			},
 		},
 		HTTP: map[HTTPKey]Row{
 			{Method: "GET", Hostname: "example.com"}: {
 				Count:   3,
-				Verdict: VerdictAllow,
+				Verdict: VerdictWouldAllow,
 			},
 		},
 		TLS: map[string]Row{
 			UnknownHostname: {
 				Count:   1,
-				Verdict: VerdictDeny,
+				Verdict: VerdictWouldBlock,
 			},
 		},
 	})
@@ -104,8 +104,8 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 	mustContain(t, summary, "GET example.com")
 	mustContain(t, summary, "TLS")
 	mustContain(t, summary, UnknownHostname)
-	mustContain(t, summary, "ALLOW")
-	mustContain(t, summary, "DENY")
+	mustContain(t, summary, "WOULD_ALLOW")
+	mustContain(t, summary, "WOULD_BLOCK")
 	mustContain(t, summary, "Total events: 6")
 
 	dnsOnly := RenderSummary(Snapshot{

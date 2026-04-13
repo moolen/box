@@ -122,6 +122,10 @@ func normalizeVerdict(verdict Verdict) Verdict {
 		return VerdictAllow
 	case VerdictDeny:
 		return VerdictDeny
+	case VerdictWouldAllow:
+		return VerdictWouldAllow
+	case VerdictWouldBlock:
+		return VerdictWouldBlock
 	default:
 		return VerdictDeny
 	}
