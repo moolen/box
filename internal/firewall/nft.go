@@ -3,7 +3,6 @@ package firewall
 import (
 	"errors"
 	"fmt"
-	"net/netip"
 	"strings"
 )
 
@@ -27,9 +26,6 @@ type EnforcePlanInput struct {
 	SubnetCIDR      string
 	DNSPort         int
 	TransparentPort int
-	// ExtraAllowedCIDRs is a temporary compatibility shim for older callers.
-	// It is intentionally ignored: enforce mode no longer renders allowsets.
-	ExtraAllowedCIDRs []string
 }
 
 type EnforcePlan struct {
@@ -121,20 +117,4 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 	}
 
 	return EnforcePlan{Commands: commands}, nil
-}
-
-// BuildEnforceAllowIPCommand is a temporary compatibility shim for older callers.
-// Enforce mode no longer renders per-IP allowsets; callers treat an empty command as a no-op.
-func BuildEnforceAllowIPCommand(tableName, rawIP string) (string, error) {
-	if strings.TrimSpace(tableName) == "" {
-		return "", errors.New("table name is required")
-	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
-	if err != nil {
-		return "", fmt.Errorf("parse ip %q: %w", rawIP, err)
-	}
-	if !addr.Is4() {
-		return "", fmt.Errorf("ip %q must be ipv4", rawIP)
-	}
-	return "", nil
 }

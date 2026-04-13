@@ -3,8 +3,6 @@ package monitor
 import (
 	"strings"
 	"sync"
-
-	"gvisor-net/internal/config"
 )
 
 const UnknownHostname = "<unknown>"
@@ -26,23 +24,21 @@ type Snapshot struct {
 }
 
 type Collector struct {
-	mu     sync.Mutex
-	policy Policy
-	dns    map[string]Row
-	http   map[HTTPKey]Row
-	tls    map[string]Row
+	mu   sync.Mutex
+	dns  map[string]Row
+	http map[HTTPKey]Row
+	tls  map[string]Row
 }
 
-func NewCollector(policy config.PolicyConfig) *Collector {
+func NewCollector() *Collector {
 	return &Collector{
-		policy: CompilePolicy(policy),
-		dns:    make(map[string]Row),
-		http:   make(map[HTTPKey]Row),
-		tls:    make(map[string]Row),
+		dns:  make(map[string]Row),
+		http: make(map[HTTPKey]Row),
+		tls:  make(map[string]Row),
 	}
 }
 
-func (c *Collector) AddDNS(hostname string) {
+func (c *Collector) AddDNS(hostname string, verdict Verdict) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	normalized := NormalizeHostname(hostname)
@@ -50,11 +46,11 @@ func (c *Collector) AddDNS(hostname string) {
 
 	row := c.dns[display]
 	row.Count++
-	row.Verdict = c.policy.EvaluateNormalized(normalized)
+	row.Verdict = normalizeVerdict(verdict)
 	c.dns[display] = row
 }
 
-func (c *Collector) AddTLS(hostname string) {
+func (c *Collector) AddTLS(hostname string, verdict Verdict) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	normalized := NormalizeHostname(hostname)
@@ -62,11 +58,11 @@ func (c *Collector) AddTLS(hostname string) {
 
 	row := c.tls[display]
 	row.Count++
-	row.Verdict = c.policy.EvaluateNormalized(normalized)
+	row.Verdict = normalizeVerdict(verdict)
 	c.tls[display] = row
 }
 
-func (c *Collector) AddHTTP(method string, hostname string) {
+func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -78,7 +74,7 @@ func (c *Collector) AddHTTP(method string, hostname string) {
 
 	row := c.http[key]
 	row.Count++
-	row.Verdict = c.policy.EvaluateNormalized(normalized)
+	row.Verdict = normalizeVerdict(verdict)
 	c.http[key] = row
 }
 
@@ -118,4 +114,15 @@ func normalizeMethod(method string) string {
 		return "UNKNOWN"
 	}
 	return strings.ToUpper(normalized)
+}
+
+func normalizeVerdict(verdict Verdict) Verdict {
+	switch verdict {
+	case VerdictAllow:
+		return VerdictAllow
+	case VerdictDeny:
+		return VerdictDeny
+	default:
+		return VerdictDeny
+	}
 }

@@ -279,7 +279,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	}()
 
 	if strings.EqualFold(network, "monitor") {
-		rt.monitor = monitor.NewCollector(runtimeCfg.Policy)
+		rt.monitor = monitor.NewCollector()
 	}
 	if usesManagedNetworkPolicy(network) && deps.CommandExec != nil {
 		if err := monitorPreflightCheck(ctx, rt.Manifest, runtimeCfg, deps); err != nil {
@@ -514,12 +514,11 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 
 	firewallPlan, err := firewall.BuildEnforcePlan(firewall.EnforcePlanInput{
-		TableName:         rt.Manifest.Net.TableName,
-		HostVeth:          rt.Manifest.Net.HostVeth,
-		SubnetCIDR:        cfg.Network.Subnet,
-		DNSPort:           rt.Manifest.Envoy.DNSPort,
-		TransparentPort:   rt.Manifest.Envoy.TransparentPort,
-		ExtraAllowedCIDRs: append([]string(nil), cfg.Policy.ExtraAllowedCIDRs...),
+		TableName:       rt.Manifest.Net.TableName,
+		HostVeth:        rt.Manifest.Net.HostVeth,
+		SubnetCIDR:      cfg.Network.Subnet,
+		DNSPort:         rt.Manifest.Envoy.DNSPort,
+		TransparentPort: rt.Manifest.Envoy.TransparentPort,
 	})
 	if err != nil {
 		return fmt.Errorf("build firewall enforce plan: %w", err)
@@ -588,13 +587,14 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 	}
 	return func(event policyd.Event) {
 		hostname := strings.TrimSpace(event.Hostname)
+		verdict := monitorVerdict(event.Verdict)
 		switch strings.ToLower(strings.TrimSpace(event.Type)) {
 		case "dns":
-			rt.monitor.AddDNS(hostname)
+			rt.monitor.AddDNS(hostname, verdict)
 		case "http":
-			rt.monitor.AddHTTP(event.Method, hostname)
+			rt.monitor.AddHTTP(event.Method, hostname, verdict)
 		case "tls":
-			rt.monitor.AddTLS(hostname)
+			rt.monitor.AddTLS(hostname, verdict)
 		}
 
 		rt.logRawMonitorEvent(rawMonitorEvent{
@@ -606,43 +606,6 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 			Host:     event.Host,
 			SNI:      event.SNI,
 		})
-	}
-}
-
-func (rt *Runtime) enforceAllowQuery(policyCfg config.PolicyConfig) func(hostname string) bool {
-	policy := monitor.CompilePolicy(policyCfg)
-	return func(hostname string) bool {
-		return policy.Evaluate(hostname) == monitor.VerdictAllow
-	}
-}
-
-func (rt *Runtime) enforceAllowProxyTarget(policyCfg config.PolicyConfig) func(hostname string) bool {
-	allowHostname := rt.enforceAllowQuery(policyCfg)
-	allowedCIDRs := make([]netip.Prefix, 0, len(policyCfg.ExtraAllowedCIDRs))
-	for _, value := range policyCfg.ExtraAllowedCIDRs {
-		prefix, err := netip.ParsePrefix(strings.TrimSpace(value))
-		if err != nil {
-			continue
-		}
-		allowedCIDRs = append(allowedCIDRs, prefix.Masked())
-	}
-
-	return func(hostname string) bool {
-		host := strings.TrimSpace(hostname)
-		normalized := monitor.NormalizeHostname(host)
-		if normalized == "" {
-			normalized = host
-		}
-		if addr, err := netip.ParseAddr(normalized); err == nil {
-			addr = addr.Unmap()
-			for _, prefix := range allowedCIDRs {
-				if prefix.Contains(addr) {
-					return true
-				}
-			}
-			return false
-		}
-		return allowHostname(normalized)
 	}
 }
 
@@ -676,6 +639,15 @@ func nowUTC(deps Deps) time.Time {
 		return deps.Clock().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func monitorVerdict(verdict policyd.Verdict) monitor.Verdict {
+	switch verdict {
+	case policyd.VerdictAllow, policyd.VerdictWouldAllow:
+		return monitor.VerdictAllow
+	default:
+		return monitor.VerdictDeny
+	}
 }
 
 func allocateLoopbackTCPAddr() (string, error) {

@@ -3,147 +3,23 @@ package monitor
 import (
 	"strings"
 	"testing"
-
-	"gvisor-net/internal/config"
 )
 
-func TestVerdictDenyWinsOverAllow(t *testing.T) {
-	policy := config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
-		DenyDomains:  []string{"blocked.example.com"},
-	}
-
-	got := EvaluateHostname(policy, "blocked.example.com")
-	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname() = %q, want %q", got, VerdictDeny)
-	}
-
-	got = EvaluateHostname(policy, "api.example.com")
-	if got != VerdictAllow {
-		t.Fatalf("EvaluateHostname() = %q, want %q", got, VerdictAllow)
-	}
-
-	got = EvaluateHostname(policy, "other.test")
-	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname() = %q, want %q when allow list is non-empty", got, VerdictDeny)
-	}
-}
-
-func TestMalformedPolicyRulesDenyConservatively(t *testing.T) {
-	tests := []struct {
-		name   string
-		policy config.PolicyConfig
-		host   string
-	}{
-		{
-			name: "malformed allow rule",
-			policy: config.PolicyConfig{
-				AllowDomains: []string{"bad rule"},
-			},
-			host: "example.com",
-		},
-		{
-			name: "malformed deny rule",
-			policy: config.PolicyConfig{
-				DenyDomains: []string{"https://blocked.example.com"},
-			},
-			host: "example.com",
-		},
-		{
-			name: "mixed valid and malformed rules",
-			policy: config.PolicyConfig{
-				AllowDomains: []string{"example.com"},
-				DenyDomains:  []string{"bad/deny"},
-			},
-			host: "example.com",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := EvaluateHostname(tc.policy, tc.host)
-			if got != VerdictDeny {
-				t.Fatalf("EvaluateHostname() = %q, want %q for conservative handling of malformed rules", got, VerdictDeny)
-			}
-		})
-	}
-}
-
-func TestUnknownHostnameVerdictDefaultsToAllowWithoutAllowlist(t *testing.T) {
-	policy := config.PolicyConfig{}
-
-	got := EvaluateHostname(policy, "")
-	if got != VerdictAllow {
-		t.Fatalf("EvaluateHostname(empty) = %q, want %q with empty allowlist", got, VerdictAllow)
-	}
-
-	got = EvaluateHostname(policy, "bad host")
-	if got != VerdictAllow {
-		t.Fatalf("EvaluateHostname(malformed) = %q, want %q with empty allowlist", got, VerdictAllow)
-	}
-}
-
-func TestUnknownHostnameVerdictDeniesWhenAllowlistPresent(t *testing.T) {
-	policy := config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
-	}
-
-	got := EvaluateHostname(policy, "")
-	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname(empty) = %q, want %q with non-empty allowlist", got, VerdictDeny)
-	}
-
-	got = EvaluateHostname(policy, "bad host")
-	if got != VerdictDeny {
-		t.Fatalf("EvaluateHostname(malformed) = %q, want %q with non-empty allowlist", got, VerdictDeny)
-	}
-}
-
-func TestEvaluateHostnameUsesStructuredHostnameRules(t *testing.T) {
-	policy := config.PolicyConfig{
-		AllowDomains: []string{"legacy-only.example"},
-		DenyDomains:  []string{"example.com"},
-		Egress: []config.EgressRule{
-			{
-				Hostname: "example.com",
-				Transport: []config.TransportRule{{
-					Protocol: "tcp",
-					Ports:    []int{443},
-				}},
-			},
-			{
-				CIDR: "93.184.216.0/24",
-				Transport: []config.TransportRule{{
-					Protocol: "tcp",
-					Ports:    []int{80},
-				}},
-			},
-		},
-	}
-
-	if got := EvaluateHostname(policy, "api.example.com"); got != VerdictAllow {
-		t.Fatalf("EvaluateHostname() = %q, want allow from structured hostname rule despite conflicting legacy fields", got)
-	}
-}
-
 func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
-	collector := NewCollector(config.PolicyConfig{
-		AllowDomains: []string{"example.com"},
-		DenyDomains:  []string{"blocked.example.com"},
-	})
+	collector := NewCollector()
 
-	collector.AddDNS("Example.COM.")
-	collector.AddDNS("example.com")
-	collector.AddDNS("")
-	collector.AddDNS("bad host")
-	collector.AddTLS("api.Example.com.")
-	collector.AddTLS("   ")
-	collector.AddTLS("https://api.example.com")
-	collector.AddHTTP("GET", "example.com")
-	collector.AddHTTP("get", "example.com.")
-	collector.AddHTTP("", "example.com")
-	collector.AddHTTP("POST", "")
-	collector.AddHTTP("PUT", "bad/host")
+	collector.AddDNS("Example.COM.", VerdictAllow)
+	collector.AddDNS("example.com", VerdictAllow)
+	collector.AddDNS("", VerdictDeny)
+	collector.AddDNS("bad host", VerdictDeny)
+	collector.AddTLS("api.Example.com.", VerdictAllow)
+	collector.AddTLS("   ", VerdictDeny)
+	collector.AddTLS("https://api.example.com", VerdictDeny)
+	collector.AddHTTP("GET", "example.com", VerdictAllow)
+	collector.AddHTTP("get", "example.com.", VerdictAllow)
+	collector.AddHTTP("", "example.com", VerdictAllow)
+	collector.AddHTTP("POST", "", VerdictDeny)
+	collector.AddHTTP("PUT", "bad/host", VerdictDeny)
 
 	snapshot := collector.Snapshot()
 

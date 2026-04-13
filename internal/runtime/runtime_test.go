@@ -449,7 +449,6 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("monitor")
-	cfg.Policy.AllowDomains = []string{"example.com"}
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -469,6 +468,7 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 				Type:     "dns",
 				Protocol: "dns",
 				Hostname: "dns.example.com",
+				Verdict:  policyd.VerdictWouldAllow,
 			})
 			req.OnEvent(policyd.Event{
 				Type:     "http",
@@ -476,11 +476,13 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 				Hostname: "api.example.com",
 				Method:   "GET",
 				Path:     "/hello",
+				Verdict:  policyd.VerdictWouldAllow,
 			})
 			req.OnEvent(policyd.Event{
 				Type:     "tls",
 				Protocol: "https",
 				Hostname: "tls.example.com",
+				Verdict:  policyd.VerdictWouldAllow,
 			})
 			return noopRunner{}, nil
 		},
@@ -523,6 +525,7 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 				Type:     "dns",
 				Protocol: "dns",
 				Hostname: "dns.example.com",
+				Verdict:  policyd.VerdictWouldBlock,
 			})
 			req.OnEvent(policyd.Event{
 				Type:     "http",
@@ -530,6 +533,7 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 				Hostname: "api.example.com",
 				Method:   "POST",
 				Path:     "/submit",
+				Verdict:  policyd.VerdictWouldAllow,
 			})
 			return noopRunner{}, nil
 		},
@@ -864,7 +868,6 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 		Hostname: "allowed.example.com",
 		Ports:    []int{443},
 	}}
-	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
 
 	exec := &recordingCommandExec{}
 	var policyReq PolicyServiceStartRequest
@@ -1238,14 +1241,7 @@ func testConfig(networkMode string) config.Config {
 				HTTPPort: 18080,
 				TLSPort:  18443,
 			},
-			TransparentProxy: config.TransparentProxyConfig{
-				Enabled:  true,
-				Mode:     "peek",
-				HTTPPort: 18080,
-				TLSPort:  18443,
-			},
 		},
-		Policy: config.PolicyConfig{},
 	}
 }
 

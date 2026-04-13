@@ -13,8 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const legacyFailClosedSentinelHostname = "deny-all://legacy-shim"
-
 func Load(path, cwd string) (Config, error) {
 	var cfg Config
 
@@ -52,16 +50,6 @@ func Load(path, cwd string) (Config, error) {
 		cfg.Network.Mode = mode
 	}
 
-	// Transitional compatibility shims: keep the new YAML contract
-	// (`network.envoy` + `network.policy`) while maintaining the old in-memory API.
-	cfg.Network.TransparentProxy = TransparentProxyConfig{
-		Enabled:  cfg.Network.Envoy.Enabled,
-		Mode:     cfg.Network.Envoy.Mode,
-		HTTPPort: cfg.Network.Envoy.HTTPPort,
-		TLSPort:  cfg.Network.Envoy.TLSPort,
-	}
-	cfg.Policy = deriveLegacyPolicy(cfg.Network.Policy)
-
 	return cfg, nil
 }
 
@@ -88,7 +76,7 @@ func ValidateRuntime(cfg Config) error {
 			return fmt.Errorf("network.envoy.tls_port=%d is invalid; must be between 1 and 65535", cfg.Network.Envoy.TLSPort)
 		}
 	}
-	if strings.EqualFold(cfg.Network.Envoy.Mode, "mitm") || strings.EqualFold(cfg.Network.TransparentProxy.Mode, "mitm") {
+	if strings.EqualFold(cfg.Network.Envoy.Mode, "mitm") {
 		return errors.New("network.envoy.mode=mitm (aka network.transparent_proxy.mode=mitm) is not supported by runtime yet")
 	}
 	for i, rule := range cfg.Network.Policy {
@@ -97,34 +85,6 @@ func ValidateRuntime(cfg Config) error {
 		}
 	}
 	return nil
-}
-
-func deriveLegacyPolicy(rules []NetworkPolicyRule) PolicyConfig {
-	var out PolicyConfig
-	for _, rule := range rules {
-		// Fail-closed bridge: wildcard hostname rules are representable in the new
-		// config, but not in the legacy policy evaluator. If present, force the
-		// legacy policy into an "invalid" state so legacy callers deny by default.
-		if strings.Contains(rule.Hostname, "*") {
-			return PolicyConfig{AllowDomains: []string{legacyFailClosedSentinelHostname}}
-		}
-		// CIDR rules are representable in the new config, but not in the legacy
-		// hostname policy evaluation path. Fail closed to avoid widening behavior.
-		if strings.TrimSpace(rule.CIDR) != "" {
-			return PolicyConfig{AllowDomains: []string{legacyFailClosedSentinelHostname}}
-		}
-		if h := strings.TrimSpace(rule.Hostname); h != "" {
-			out.AllowDomains = append(out.AllowDomains, h)
-		}
-		out.Egress = append(out.Egress, EgressRule{
-			Hostname: strings.TrimSpace(rule.Hostname),
-			Transport: []TransportRule{{
-				Protocol: "tcp",
-				Ports:    append([]int(nil), rule.Ports...),
-			}},
-		})
-	}
-	return out
 }
 
 func validateNetworkPolicyRule(rule NetworkPolicyRule) error {
