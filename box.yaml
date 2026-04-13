@@ -29,10 +29,10 @@ sandbox:
     - "PS1=box# "
     - TERM=xterm
     # Example when using mounts.staged_rw for Codex config projection:
-    # - CODEX_HOME=/run/box/codex-home
+    - CODEX_HOME=/run/box/codex-home
 
   # Everything after `box --` is shell-escaped and passed as one command string here.
-  command_shell: /bin/bash -ilc
+  command_shell: /bin/bash -lc
 
 network:
   # `monitor` records policy verdicts and prints a traffic summary.
@@ -67,6 +67,16 @@ network:
 
   # Egress policy rules enforced by the host-managed network layer.
   policy:
+    - hostname: "*.openai.azure.com"
+      ports: [443]
+    - hostname: "*.chatgpt.com"
+      ports: [443]
+    - hostname: "chatgpt.com"
+      ports: [443]
+    - hostname: "*.github.com"
+      ports: [443]
+    - hostname: "github.com"
+      ports: [443]
     - hostname: example.com
       ports: [443]
     - hostname: zeit.de
@@ -100,7 +110,14 @@ mounts:
   #     mode: 0600
   #     optional: true
   staged_ro: []
-  staged_rw: []
+  staged_rw:
+    - source: ~/.codex/config.toml
+      target: /run/box/codex-home/config.toml
+      mode: 0600
+    - source: ~/.codex/auth.json
+      target: /run/box/codex-home/auth.json
+      mode: 0600
+      optional: true
 
 gvisor:
   # gVisor platform passed to `runsc`.

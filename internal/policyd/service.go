@@ -21,18 +21,18 @@ import (
 )
 
 type Event struct {
-	Type     string
-	Protocol string
-	Hostname string
+	Type        string
+	Protocol    string
+	Hostname    string
 	Destination string
-	Method   string
-	Path     string
-	Host     string
-	SNI      string
-	ICMPType *int
-	ICMPCode *int
-	Verdict  Verdict
-	Reason   string
+	Method      string
+	Path        string
+	Host        string
+	SNI         string
+	ICMPType    *int
+	ICMPCode    *int
+	Verdict     Verdict
+	Reason      string
 }
 
 type ServiceConfig struct {
@@ -52,6 +52,7 @@ type Server struct {
 	dnsServer     *dns.Server
 	dnsConn       net.PacketConn
 	proxyListener net.Listener
+	proxySlots    chan struct{}
 	stopOnce      sync.Once
 	stopErr       error
 }
@@ -135,6 +136,9 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, pro
 		dnsServer:     dnsServer,
 		dnsConn:       dnsConn,
 		proxyListener: proxyListener,
+	}
+	if proxyListener != nil {
+		runner.proxySlots = make(chan struct{}, explicitProxyMaxConcurrent)
 	}
 
 	go func() {
@@ -373,15 +377,16 @@ func (s *Service) handleDNS(w dns.ResponseWriter, req *dns.Msg) {
 }
 
 func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
+	trustedOriginalMetadata := hasTrustedOriginalMetadataHTTP(r.Header)
 	authority := firstNonEmpty(
-		r.Header.Get("X-Box-Original-Authority"),
+		trustedHeaderValue(trustedOriginalMetadata, r.Header.Get(headerOriginalAuthority)),
 		connectAuthority(r),
 		r.Header.Get("Host"),
 		r.Header.Get("X-Forwarded-Host"),
 		r.Header.Get("Authority"),
 	)
 	rawPath := firstNonEmpty(
-		r.Header.Get("X-Box-Original-Target"),
+		trustedHeaderValue(trustedOriginalMetadata, r.Header.Get(headerOriginalTarget)),
 		r.Header.Get("Path"),
 		r.Header.Get("X-Envoy-Original-Path"),
 		"/",

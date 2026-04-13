@@ -72,15 +72,16 @@ func httpCheckRequestFromGRPC(req *authv3.CheckRequest) (HTTPCheckRequest, error
 
 	dstIP, dstPort := parseGRPCDestination(attrs.GetDestination())
 	headers := httpReq.GetHeaders()
+	trustedOriginalMetadata := hasTrustedOriginalMetadataGRPC(headers)
 	authority := firstNonEmpty(
-		grpcHeaderValue(headers, "x-box-original-authority"),
+		trustedHeaderValue(trustedOriginalMetadata, grpcHeaderValue(headers, headerOriginalAuthority)),
 		strings.TrimSpace(httpReq.GetHost()),
 		grpcHeaderValue(headers, ":authority"),
 		grpcHeaderValue(headers, "host"),
 		grpcHeaderValue(headers, "x-forwarded-host"),
 	)
 	rawPath := firstNonEmpty(
-		grpcHeaderValue(headers, "x-box-original-target"),
+		trustedHeaderValue(trustedOriginalMetadata, grpcHeaderValue(headers, headerOriginalTarget)),
 		httpReq.GetPath(),
 		"/",
 	)
@@ -147,6 +148,13 @@ func grpcHeaderValue(headers map[string]string, key string) string {
 		}
 	}
 	return ""
+}
+
+func trustedHeaderValue(trusted bool, value string) string {
+	if !trusted {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func tcpCheckRequestFromGRPC(req *authv3.CheckRequest) (TCPCheckRequest, error) {

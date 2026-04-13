@@ -1,6 +1,7 @@
 package policyd
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
@@ -13,6 +14,9 @@ import (
 const (
 	explicitProxyHeaderLimit   = 64 * 1024
 	explicitProxyHeaderTimeout = 10 * time.Second
+	explicitProxyStreamTimeout = 2 * time.Minute
+	explicitProxyMaxConcurrent = 128
+	explicitProxyReadBuffer    = 4096
 )
 
 func (s *Server) serveExplicitProxy(upstreamAddr string) {
@@ -28,7 +32,36 @@ func (s *Server) serveExplicitProxy(upstreamAddr string) {
 			_ = s.Stop()
 			return
 		}
-		go proxyExplicitRequest(conn, upstreamAddr)
+		if !s.tryAcquireProxySlot() {
+			_ = conn.Close()
+			continue
+		}
+		go func() {
+			defer s.releaseProxySlot()
+			proxyExplicitRequest(conn, upstreamAddr)
+		}()
+	}
+}
+
+func (s *Server) tryAcquireProxySlot() bool {
+	if s == nil || s.proxySlots == nil {
+		return true
+	}
+	select {
+	case s.proxySlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseProxySlot() {
+	if s == nil || s.proxySlots == nil {
+		return
+	}
+	select {
+	case <-s.proxySlots:
+	default:
 	}
 }
 
@@ -41,7 +74,8 @@ func proxyExplicitRequest(downstream net.Conn, upstreamAddr string) {
 	if err := downstream.SetReadDeadline(time.Now().Add(explicitProxyHeaderTimeout)); err != nil {
 		return
 	}
-	header, err := readProxyHeader(downstream, explicitProxyHeaderLimit)
+	reader := bufio.NewReaderSize(downstream, explicitProxyReadBuffer)
+	header, err := readProxyHeader(reader, explicitProxyHeaderLimit)
 	if err != nil {
 		return
 	}
@@ -59,14 +93,35 @@ func proxyExplicitRequest(downstream net.Conn, upstreamAddr string) {
 		return
 	}
 
+	bufferedDownstream := &bufferedConn{
+		Conn:   downstream,
+		reader: reader,
+	}
 	copyDone := make(chan struct{}, 2)
-	go proxyStream(upstream, downstream, copyDone)
-	go proxyStream(downstream, upstream, copyDone)
+	go proxyStream(upstream, bufferedDownstream, copyDone)
+	go proxyStream(bufferedDownstream, upstream, copyDone)
 	<-copyDone
 }
 
 func proxyStream(dst net.Conn, src net.Conn, done chan<- struct{}) {
-	_, _ = io.Copy(dst, src)
+	buf := make([]byte, 32*1024)
+	for {
+		if err := src.SetReadDeadline(time.Now().Add(explicitProxyStreamTimeout)); err != nil {
+			break
+		}
+		n, err := src.Read(buf)
+		if n > 0 {
+			if setErr := dst.SetWriteDeadline(time.Now().Add(explicitProxyStreamTimeout)); setErr != nil {
+				break
+			}
+			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 	type closeWriter interface {
 		CloseWrite() error
 	}
@@ -76,9 +131,21 @@ func proxyStream(dst net.Conn, src net.Conn, done chan<- struct{}) {
 	done <- struct{}{}
 }
 
-func readProxyHeader(conn net.Conn, limit int) ([]byte, error) {
-	if conn == nil {
-		return nil, errors.New("proxy connection is required")
+type bufferedConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedConn) Read(p []byte) (int, error) {
+	if c == nil || c.reader == nil {
+		return 0, io.EOF
+	}
+	return c.reader.Read(p)
+}
+
+func readProxyHeader(reader *bufio.Reader, limit int) ([]byte, error) {
+	if reader == nil {
+		return nil, errors.New("proxy reader is required")
 	}
 	if limit <= 0 {
 		return nil, errors.New("proxy header limit must be positive")
@@ -86,16 +153,21 @@ func readProxyHeader(conn net.Conn, limit int) ([]byte, error) {
 
 	header := make([]byte, 0, 1024)
 	needle := []byte("\r\n\r\n")
-	single := make([]byte, 1)
 	for len(header) < limit {
-		n, err := conn.Read(single)
-		if n > 0 {
-			header = append(header, single[:n]...)
-			if len(header) >= len(needle) && bytes.Equal(header[len(header)-len(needle):], needle) {
+		chunk, err := reader.ReadSlice('\n')
+		if len(chunk) > 0 {
+			if len(header)+len(chunk) > limit {
+				return nil, errors.New("proxy header incomplete or exceeds limit")
+			}
+			header = append(header, chunk...)
+			if len(header) >= len(needle) && bytes.Contains(header, needle) {
 				return header, nil
 			}
 		}
 		if err != nil {
+			if errors.Is(err, bufio.ErrBufferFull) {
+				continue
+			}
 			if errors.Is(err, io.EOF) && len(header) > 0 {
 				break
 			}
@@ -106,19 +178,20 @@ func readProxyHeader(conn net.Conn, limit int) ([]byte, error) {
 }
 
 func rewriteWebSocketProxyHeader(header []byte) ([]byte, bool) {
-	if len(header) == 0 || !hasWebSocketUpgrade(header) {
-		return header, false
+	sanitized := stripInternalProxyHeaders(header)
+	if len(sanitized) == 0 || !hasWebSocketUpgrade(sanitized) {
+		return sanitized, false
 	}
 
-	lineEnd := bytes.Index(header, []byte("\r\n"))
+	lineEnd := bytes.Index(sanitized, []byte("\r\n"))
 	if lineEnd <= 0 {
-		return header, false
+		return sanitized, false
 	}
 
-	requestLine := string(header[:lineEnd])
+	requestLine := string(sanitized[:lineEnd])
 	parts := strings.SplitN(requestLine, " ", 3)
 	if len(parts) != 3 {
-		return header, false
+		return sanitized, false
 	}
 
 	target := parts[1]
@@ -130,11 +203,56 @@ func rewriteWebSocketProxyHeader(header []byte) ([]byte, bool) {
 	case strings.HasPrefix(strings.ToLower(target), "wss://"):
 		parts[1] = "https://" + target[len("wss://"):]
 	default:
-		return header, false
+		return sanitized, false
 	}
 
-	rewritten := append([]byte(strings.Join(parts, " ")), injectOriginalTargetHeaders(header[lineEnd:], originalTarget, originalAuthority)...)
+	rewritten := append([]byte(strings.Join(parts, " ")), injectOriginalTargetHeaders(sanitized[lineEnd:], originalTarget, originalAuthority)...)
 	return rewritten, true
+}
+
+func stripInternalProxyHeaders(header []byte) []byte {
+	if len(header) == 0 {
+		return header
+	}
+
+	lineEnd := bytes.Index(header, []byte("\r\n"))
+	if lineEnd <= 0 {
+		return header
+	}
+	rest := header[lineEnd+2:]
+	headerEnd := bytes.Index(rest, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		return header
+	}
+
+	lines := bytes.Split(rest[:headerEnd], []byte("\r\n"))
+	var sanitized bytes.Buffer
+	sanitized.Write(header[:lineEnd])
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		nameEnd := bytes.IndexByte(line, ':')
+		if nameEnd <= 0 {
+			sanitized.WriteString("\r\n")
+			sanitized.Write(line)
+			continue
+		}
+		if isInternalProxyHeader(string(line[:nameEnd])) {
+			continue
+		}
+		sanitized.WriteString("\r\n")
+		sanitized.Write(line)
+	}
+	sanitized.Write(rest[headerEnd:])
+	return sanitized.Bytes()
+}
+
+func isInternalProxyHeader(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	return strings.EqualFold(trimmed, headerOriginalTarget) ||
+		strings.EqualFold(trimmed, headerOriginalAuthority) ||
+		strings.EqualFold(trimmed, headerTrustedMetadata)
 }
 
 func hasWebSocketUpgrade(header []byte) bool {
@@ -180,13 +298,21 @@ func injectOriginalTargetHeaders(rest []byte, originalTarget string, originalAut
 	var injected bytes.Buffer
 	injected.Write(rest[:headerEnd])
 	if strings.TrimSpace(originalTarget) != "" {
-		injected.WriteString("\r\nX-Box-Original-Target: ")
+		injected.WriteString("\r\n")
+		injected.WriteString(headerOriginalTarget)
+		injected.WriteString(": ")
 		injected.WriteString(originalTarget)
 	}
 	if strings.TrimSpace(originalAuthority) != "" {
-		injected.WriteString("\r\nX-Box-Original-Authority: ")
+		injected.WriteString("\r\n")
+		injected.WriteString(headerOriginalAuthority)
+		injected.WriteString(": ")
 		injected.WriteString(originalAuthority)
 	}
+	injected.WriteString("\r\n")
+	injected.WriteString(headerTrustedMetadata)
+	injected.WriteString(": ")
+	injected.WriteString(trustedExplicitWebsocket)
 	injected.Write(rest[headerEnd:])
 	return injected.Bytes()
 }

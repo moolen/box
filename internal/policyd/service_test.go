@@ -398,6 +398,7 @@ func TestCheckGRPCUsesOriginalTargetHeadersForExplicitWebSocketCIDRRule(t *testi
 					Host:   "127.0.0.1:19001",
 					Path:   "/chat",
 					Headers: map[string]string{
+						"x-box-trusted-metadata":   "explicit-proxy-websocket-v1",
 						"x-box-original-target":    "ws://203.0.113.7:8443/chat",
 						"x-box-original-authority": "203.0.113.7:8443",
 					},
@@ -410,6 +411,53 @@ func TestCheckGRPCUsesOriginalTargetHeadersForExplicitWebSocketCIDRRule(t *testi
 	}
 	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
 		t.Fatalf("status = %v, want %v; denied=%#v", got, codes.OK, resp.GetDeniedResponse())
+	}
+}
+
+func TestCheckGRPCIgnoresUntrustedOriginalTargetHeaders(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "allowed.example.com",
+			Ports:    []int{443},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/allowed/*"},
+			},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "127.0.0.1",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 19001,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodGet,
+					Host:   "blocked.example.com",
+					Path:   "/blocked",
+					Headers: map[string]string{
+						"x-box-original-target":    "https://allowed.example.com/allowed/value",
+						"x-box-original-authority": "allowed.example.com:443",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.PermissionDenied {
+		t.Fatalf("status = %v, want %v; ok=%#v", got, codes.PermissionDenied, resp.GetOkResponse())
 	}
 }
 
