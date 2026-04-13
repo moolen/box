@@ -181,6 +181,59 @@ func TestBoxProxiedHTTPSPathRuleBlocksMismatchedPath(t *testing.T) {
 	}
 }
 
+func TestBoxProxiedHTTPSAllowsWildcardHostnameRule(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "*.github.com",
+			Ports:    []int{443},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-sS", "https://api.github.com/",
+	)
+	if err != nil {
+		t.Fatalf("run box proxied wildcard https curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"current_user_url"`) {
+		t.Fatalf("proxied wildcard https output = %q, want GitHub API body marker", stdout)
+	}
+}
+
+func TestBoxTransparentHTTPSAllowsWildcardHostnameRule(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "*.github.com",
+			Ports:    []int{443},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"curl", "-sS", "https://api.github.com/",
+	)
+	if err != nil {
+		t.Fatalf("run box transparent wildcard https curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"current_user_url"`) {
+		t.Fatalf("transparent wildcard https output = %q, want GitHub API body marker", stdout)
+	}
+}
+
 func TestBoxBlocksNonHTTPTCPForAllowedCIDRRule(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
@@ -227,6 +280,47 @@ func TestBoxAllowsICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "1 received") && !strings.Contains(stdout, "1 packets received") {
 		t.Fatalf("icmp output = %q, want successful echo response; stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxBlocksUDPForOtherwiseAllowedHostnameRule(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "python3")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "time.cloudflare.com",
+			Ports:    []int{123},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"python3", "-c", `
+import socket, sys
+query = b"\x1b" + (47 * b"\0")
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.settimeout(2)
+sock.sendto(query, ("time.cloudflare.com", 123))
+try:
+    data, _ = sock.recvfrom(512)
+    print("unexpected-response", len(data))
+    sys.exit(0)
+except TimeoutError:
+    print("udp-blocked")
+    sys.exit(0)
+`,
+	)
+	if err != nil {
+		t.Fatalf("udp probe command failed; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "udp-blocked") {
+		t.Fatalf("udp to otherwise allowed hostname unexpectedly succeeded; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 

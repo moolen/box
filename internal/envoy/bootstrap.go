@@ -200,7 +200,7 @@ func renderTransparentFilterChains(certs []TLSCertificate) (string, error) {
 			"            server_names:",
 		)
 		for _, serverName := range cert.ServerNames {
-			lines = append(lines, "              - "+serverName)
+			lines = append(lines, "              - "+strconv.Quote(serverName))
 		}
 		lines = append(lines,
 			"          transport_socket:",
