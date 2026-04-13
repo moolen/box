@@ -207,6 +207,29 @@ func TestBoxBlocksNonHTTPTCPForAllowedCIDRRule(t *testing.T) {
 	}
 }
 
+func TestBoxAllowsICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ping")
+
+	exampleIPv4 := mustLookupIPv4(t, "example.com")
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, []string{"allowed.example"}, nil)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"ping", "-c", "1", "-W", "5", exampleIPv4,
+	)
+	if err != nil {
+		t.Fatalf("icmp to literal ip failed despite pass-through behavior; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "1 received") && !strings.Contains(stdout, "1 packets received") {
+		t.Fatalf("icmp output = %q, want successful echo response; stderr=%q", stdout, stderr)
+	}
+}
+
 func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")

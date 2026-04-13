@@ -23,8 +23,10 @@ func TestEnforceModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr 100.96.0.1 meta l4proto tcp tcp dport 18080 return")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp udp dport 53 redirect to :15353")
+	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef forward { type filter hook forward priority filter; policy accept; }")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp drop")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto icmp accept")
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 drop")
 }
 
 func TestMonitorModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
@@ -47,8 +49,10 @@ func TestMonitorModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp udp dport 53 redirect to :53")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward ct state established,related accept")
+	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef forward { type filter hook forward priority filter; policy accept; }")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp drop")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto icmp accept")
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 drop")
 }
 
 func TestIIFNameTokenIsNotQuoted(t *testing.T) {
@@ -117,10 +121,12 @@ func TestEnforceModeRendersEnvoyRedirectAndDropsNonDNSUDP(t *testing.T) {
 	}
 
 	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef prerouting_envoy")
+	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef forward { type filter hook forward priority filter; policy accept; }")
 	mustContainCommand(t, plan.Commands, "udp dport 53 redirect to :1053")
 	mustContainCommand(t, plan.Commands, "tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "meta l4proto udp drop")
 	mustContainCommand(t, plan.Commands, "meta l4proto icmp accept")
+	mustContainCommand(t, plan.Commands, "iifname vethhdeadbeef ip saddr 100.96.0.0/30 drop")
 	mustContainCommand(t, plan.Commands, "masquerade")
 	for _, cmd := range plan.Commands {
 		if strings.Contains(cmd, "allow_v4") {

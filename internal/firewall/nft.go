@@ -83,11 +83,12 @@ func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
 		Commands: []string{
 			fmt.Sprintf("nft add table inet %s", in.TableName),
 			fmt.Sprintf("nft add chain inet %s prerouting_envoy { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
-			fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
+			fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy accept; }", in.TableName),
 			fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 			fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
 			fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
 			fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
+			fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 			fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 		},
 	}
@@ -114,11 +115,12 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 	commands := []string{
 		fmt.Sprintf("nft add table inet %s", in.TableName),
 		fmt.Sprintf("nft add chain inet %s prerouting_envoy { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
-		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
+		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
+		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 	}
 	preroutingRules := []string{
