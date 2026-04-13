@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/gvisor"
@@ -870,6 +873,68 @@ func TestRuntimeExecutorSuppliesPolicyServiceAndEnvoyFactories(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestStartPolicyServiceServesHTTPAuthorizationEndpoint(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("ln.Close() error = %v", err)
+	}
+	dnsLn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.ListenPacket() error = %v", err)
+	}
+	dnsAddr := dnsLn.LocalAddr().String()
+	if err := dnsLn.Close(); err != nil {
+		t.Fatalf("dnsLn.Close() error = %v", err)
+	}
+
+	runner, err := startPolicyService(context.Background(), boxruntime.PolicyServiceStartRequest{
+		ListenAddr:    addr,
+		DNSListenAddr: dnsAddr,
+		Mode:          "enforce",
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{80},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/allowed/*"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("startPolicyService() error = %v", err)
+	}
+	defer func() {
+		if stopErr := runner.Stop(); stopErr != nil {
+			t.Fatalf("runner.Stop() error = %v", stopErr)
+		}
+	}()
+
+	client := &http.Client{Timeout: time.Second}
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/authorize/http", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	req.Header.Set("Method", http.MethodGet)
+	req.Header.Set("Host", "example.com")
+	req.Header.Set("Path", "http://example.com/allowed/value")
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("client.Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
 

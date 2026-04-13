@@ -203,18 +203,17 @@ func writeMonitorSummary(stderr io.Writer, summary string) error {
 	return err
 }
 
-func startPolicyService(_ context.Context, req boxruntime.PolicyServiceStartRequest) (boxruntime.Runner, error) {
+func startPolicyService(ctx context.Context, req boxruntime.PolicyServiceStartRequest) (boxruntime.Runner, error) {
 	mode := policyd.ModeEnforce
 	if strings.EqualFold(strings.TrimSpace(req.Mode), "monitor") {
 		mode = policyd.ModeObserve
 	}
-	_ = policyd.NewService(policyd.ServiceConfig{
+	return policyd.Start(ctx, req.ListenAddr, req.DNSListenAddr, policyd.NewService(policyd.ServiceConfig{
 		Mode:        mode,
 		Rules:       append([]config.NetworkPolicyRule(nil), req.Rules...),
 		DNSUpstream: append([]string(nil), req.DNSUpstream...),
 		OnEvent:     req.OnEvent,
-	})
-	return stopFunc(func() error { return nil }), nil
+	}))
 }
 
 func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (boxruntime.Runner, error) {
@@ -233,6 +232,7 @@ func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (bo
 		ExplicitPort:    req.ExplicitPort,
 		TransparentPort: req.TransparentPort,
 		DNSPort:         req.DNSPort,
+		DNSUpstream:     append([]string(nil), req.DNSUpstream...),
 		AuthzAddress:    req.PolicyListenAddr,
 	})
 	if err != nil {

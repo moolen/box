@@ -186,6 +186,9 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	if strings.TrimSpace(policyReq.ListenAddr) == "" {
 		t.Fatalf("PolicyService ListenAddr = %q, want non-empty", policyReq.ListenAddr)
 	}
+	if strings.TrimSpace(policyReq.DNSListenAddr) == "" {
+		t.Fatalf("PolicyService DNSListenAddr = %q, want non-empty", policyReq.DNSListenAddr)
+	}
 	if envoyReq.ExplicitPort != rt.Manifest.Envoy.ExplicitPort {
 		t.Fatalf("Envoy request explicit port = %d, want %d", envoyReq.ExplicitPort, rt.Manifest.Envoy.ExplicitPort)
 	}
@@ -194,6 +197,9 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	}
 	if envoyReq.DNSPort != rt.Manifest.Envoy.DNSPort {
 		t.Fatalf("Envoy request dns port = %d, want %d", envoyReq.DNSPort, rt.Manifest.Envoy.DNSPort)
+	}
+	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr}) {
+		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr})
 	}
 	if envoyReq.PolicyListenAddr != policyReq.ListenAddr {
 		t.Fatalf("Envoy request policy addr = %q, want %q", envoyReq.PolicyListenAddr, policyReq.ListenAddr)
@@ -912,8 +918,14 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	if !reflect.DeepEqual(policyReq.DNSUpstream, cfg.Network.DNS.Upstream) {
 		t.Fatalf("PolicyService DNSUpstream = %#v, want %#v", policyReq.DNSUpstream, cfg.Network.DNS.Upstream)
 	}
+	if strings.TrimSpace(policyReq.DNSListenAddr) == "" {
+		t.Fatalf("PolicyService DNSListenAddr = %q, want non-empty", policyReq.DNSListenAddr)
+	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
+	}
+	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr}) {
+		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr})
 	}
 
 	for _, call := range exec.calls {

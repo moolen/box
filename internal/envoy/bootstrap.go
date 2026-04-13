@@ -12,6 +12,7 @@ type BootstrapConfig struct {
 	ExplicitPort    int
 	TransparentPort int
 	DNSPort         int
+	DNSUpstream     []string
 	AuthzAddress    string
 }
 
@@ -33,6 +34,11 @@ func RenderBootstrap(cfg BootstrapConfig) (string, error) {
 	if err != nil || authzPort <= 0 {
 		return "", fmt.Errorf("invalid authz port %q", port)
 	}
+	dnsResolvers, err := renderDNSResolvers(cfg.DNSUpstream)
+	if err != nil {
+		return "", err
+	}
+	authzURI := "http://" + net.JoinHostPort(host, port)
 
 	return fmt.Sprintf(`node:
   id: %s
@@ -62,9 +68,20 @@ static_resources:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-                      grpc_service:
-                        envoy_grpc:
-                          cluster_name: ext_authz
+                      http_service:
+                        server_uri:
+                          uri: %s
+                          cluster: ext_authz
+                          timeout: 0.25s
+                        path_prefix: /authorize/http
+                        authorization_request:
+                          allowed_headers:
+                            patterns:
+                              - exact: host
+                              - exact: path
+                              - exact: x-forwarded-proto
+                              - exact: x-forwarded-host
+                              - exact: x-envoy-original-dst-host
                   - name: envoy.filters.http.dynamic_forward_proxy
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -98,9 +115,20 @@ static_resources:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-                      grpc_service:
-                        envoy_grpc:
-                          cluster_name: ext_authz
+                      http_service:
+                        server_uri:
+                          uri: %s
+                          cluster: ext_authz
+                          timeout: 0.25s
+                        path_prefix: /authorize/http
+                        authorization_request:
+                          allowed_headers:
+                            patterns:
+                              - exact: host
+                              - exact: path
+                              - exact: x-forwarded-proto
+                              - exact: x-forwarded-host
+                              - exact: x-envoy-original-dst-host
                   - name: envoy.filters.http.dynamic_forward_proxy
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -118,6 +146,17 @@ static_resources:
           protocol: UDP
       listener_filters:
         - name: envoy.filters.udp.dns_filter
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.udp.dns_filter.v3.DnsFilterConfig
+            stat_prefix: dns_listener
+            client_config:
+              max_pending_lookups: 1024
+              dns_resolution_config:
+                resolvers:
+%s
+            server_config:
+              inline_dns_table:
+                virtual_domains: []
   clusters:
     - name: ext_authz
       type: STATIC
@@ -145,5 +184,32 @@ admin:
     socket_address:
       address: 127.0.0.1
       port_value: 0
-`, cfg.NodeID, cfg.ExplicitPort, cfg.TransparentPort, cfg.DNSPort, host, authzPort), nil
+`, cfg.NodeID, cfg.ExplicitPort, authzURI, cfg.TransparentPort, authzURI, cfg.DNSPort, dnsResolvers, host, authzPort), nil
+}
+
+func renderDNSResolvers(upstreams []string) (string, error) {
+	if len(upstreams) == 0 {
+		return "", fmt.Errorf("at least one dns upstream is required")
+	}
+
+	lines := make([]string, 0, len(upstreams)*4)
+	for _, upstream := range upstreams {
+		host, port, err := net.SplitHostPort(strings.TrimSpace(upstream))
+		if err != nil {
+			return "", fmt.Errorf("parse dns upstream %q: %w", upstream, err)
+		}
+		if strings.TrimSpace(host) == "" {
+			return "", fmt.Errorf("dns upstream host is required")
+		}
+		portValue, err := strconv.Atoi(port)
+		if err != nil || portValue <= 0 {
+			return "", fmt.Errorf("invalid dns upstream port %q", port)
+		}
+		lines = append(lines,
+			"                  - socket_address:",
+			"                      address: "+host,
+			"                      port_value: "+strconv.Itoa(portValue),
+		)
+	}
+	return strings.Join(lines, "\n"), nil
 }

@@ -11,6 +11,7 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		ExplicitPort:    19001,
 		TransparentPort: 19002,
 		DNSPort:         19053,
+		DNSUpstream:     []string{"1.1.1.1:53", "8.8.8.8:53"},
 		AuthzAddress:    "127.0.0.1:20001",
 	}
 
@@ -25,13 +26,27 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"19053",
 		"ext_authz",
 		"dynamic_forward_proxy",
+		"http_service",
+		"path_prefix: /authorize/http",
+		"allowed_headers",
 		"envoy.filters.http.dynamic_forward_proxy",
 		"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
 		"dns_cache_config",
+		"type.googleapis.com/envoy.extensions.filters.udp.dns_filter.v3.DnsFilterConfig",
+		"inline_dns_table",
+		"1.1.1.1",
+		"8.8.8.8",
+		"max_pending_lookups",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("bootstrap missing %q\ncontent=%s", want, content)
 		}
+	}
+	if strings.Contains(content, "grpc_service:") {
+		t.Fatalf("bootstrap unexpectedly still uses grpc ext_authz\ncontent=%s", content)
+	}
+	if strings.Contains(content, "resolution_timeout") {
+		t.Fatalf("bootstrap unexpectedly includes unsupported dns client_config.resolution_timeout\ncontent=%s", content)
 	}
 }
 

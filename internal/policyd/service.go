@@ -2,8 +2,17 @@ package policyd
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/miekg/dns"
 
 	"gvisor-net/internal/config"
 )
@@ -29,6 +38,15 @@ type ServiceConfig struct {
 
 type Service struct {
 	cfg ServiceConfig
+}
+
+type Server struct {
+	httpServer   *http.Server
+	httpListener net.Listener
+	dnsServer    *dns.Server
+	dnsConn      net.PacketConn
+	stopOnce     sync.Once
+	stopErr      error
 }
 
 type HTTPCheckRequest struct {
@@ -71,6 +89,86 @@ type DNSCheckResponse struct {
 
 func NewService(cfg ServiceConfig) *Service {
 	return &Service{cfg: cfg}
+}
+
+func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc *Service) (*Server, error) {
+	if svc == nil {
+		return nil, errors.New("service is required")
+	}
+	httpListener, err := net.Listen("tcp", strings.TrimSpace(httpListenAddr))
+	if err != nil {
+		return nil, err
+	}
+	dnsConn, err := net.ListenPacket("udp", strings.TrimSpace(dnsListenAddr))
+	if err != nil {
+		_ = httpListener.Close()
+		return nil, err
+	}
+
+	httpServer := &http.Server{
+		Handler: svc.Handler(),
+	}
+	dnsServer := &dns.Server{
+		PacketConn: dnsConn,
+		Handler:    dns.HandlerFunc(svc.handleDNS),
+	}
+	runner := &Server{
+		httpServer:   httpServer,
+		httpListener: httpListener,
+		dnsServer:    dnsServer,
+		dnsConn:      dnsConn,
+	}
+
+	go func() {
+		<-ctx.Done()
+		_ = runner.Stop()
+	}()
+	go func() {
+		err := httpServer.Serve(httpListener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			_ = runner.Stop()
+		}
+	}()
+	go func() {
+		err := dnsServer.ActivateAndServe()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			_ = runner.Stop()
+		}
+	}()
+
+	return runner, nil
+}
+
+func (s *Server) Stop() error {
+	if s == nil {
+		return nil
+	}
+
+	s.stopOnce.Do(func() {
+		var errs []error
+		if s.httpServer != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			err := s.httpServer.Shutdown(shutdownCtx)
+			cancel()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errs = append(errs, err)
+			}
+		}
+		if s.dnsServer != nil {
+			if err := s.dnsServer.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) && err.Error() != "dns: server not started" {
+				errs = append(errs, err)
+			}
+		}
+		s.stopErr = errors.Join(errs...)
+	})
+	return s.stopErr
+}
+
+func (s *Service) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/authorize/http", s.handleAuthorizeHTTP)
+	mux.HandleFunc("/", s.handleAuthorizeHTTP)
+	return mux
 }
 
 func (s *Service) CheckHTTP(_ context.Context, req HTTPCheckRequest) (HTTPCheckResponse, error) {
@@ -145,6 +243,223 @@ func (s *Service) emit(event Event) {
 		return
 	}
 	s.cfg.OnEvent(event)
+}
+
+func (s *Service) handleAuthorizeHTTP(w http.ResponseWriter, r *http.Request) {
+	checkReq, err := httpCheckRequestFromAuthz(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	resp, err := s.CheckHTTP(r.Context(), checkReq)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("X-Policy-Verdict", string(resp.Decision.Verdict))
+	if resp.Decision.Reason != "" {
+		w.Header().Set("X-Policy-Reason", resp.Decision.Reason)
+	}
+	if resp.Allowed {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	http.Error(w, resp.Decision.Reason, http.StatusForbidden)
+}
+
+func (s *Service) handleDNS(w dns.ResponseWriter, req *dns.Msg) {
+	reply := new(dns.Msg)
+	reply.SetReply(req)
+	if len(req.Question) == 0 {
+		reply.Rcode = dns.RcodeFormatError
+		_ = w.WriteMsg(reply)
+		return
+	}
+
+	for _, question := range req.Question {
+		resp, err := s.CheckDNS(context.Background(), DNSCheckRequest{
+			Hostname: strings.TrimSuffix(question.Name, "."),
+		})
+		if err != nil {
+			reply.Rcode = dns.RcodeServerFailure
+			_ = w.WriteMsg(reply)
+			return
+		}
+		if !resp.Allowed {
+			reply.Rcode = dns.RcodeRefused
+			_ = w.WriteMsg(reply)
+			return
+		}
+	}
+
+	upstreamResp, err := exchangeDNSQuery(req, s.cfg.DNSUpstream)
+	if err != nil {
+		reply.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(reply)
+		return
+	}
+	upstreamResp.Id = req.Id
+	_ = w.WriteMsg(upstreamResp)
+}
+
+func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
+	authority := firstNonEmpty(
+		r.Header.Get("Host"),
+		r.Header.Get("X-Forwarded-Host"),
+		r.Header.Get("Authority"),
+	)
+	rawPath := firstNonEmpty(r.Header.Get("Path"), r.Header.Get("X-Envoy-Original-Path"), "/")
+	protocol := inferHTTPProtocol(
+		r.Header.Get("X-Forwarded-Proto"),
+		rawPath,
+		authority,
+		r.Header.Get("X-Envoy-Original-Dst-Host"),
+	)
+
+	path, authorityFromPath, pathPort, pathIP := normalizeAuthzPath(rawPath)
+	if strings.TrimSpace(authority) == "" {
+		authority = authorityFromPath
+	}
+
+	dstIP, dstPort := parseOriginalDestination(r.Header.Get("X-Envoy-Original-Dst-Host"))
+	if !dstIP.IsValid() {
+		dstIP = pathIP
+	}
+
+	_, authorityPort, authorityIP := parseAuthorityDestination(authority)
+	if !dstIP.IsValid() {
+		dstIP = authorityIP
+	}
+
+	port := dstPort
+	if port == 0 {
+		port = authorityPort
+	}
+	if port == 0 {
+		port = pathPort
+	}
+	if port == 0 {
+		port = defaultPortForProtocol(protocol)
+	}
+
+	return HTTPCheckRequest{
+		Protocol:        protocol,
+		DestinationIP:   dstIP,
+		DestinationPort: port,
+		Authority:       authority,
+		Method:          firstNonEmpty(r.Header.Get("Method"), r.Header.Get("X-Envoy-Original-Method")),
+		Path:            path,
+	}, nil
+}
+
+func inferHTTPProtocol(forwardedProto string, rawPath string, authority string, originalDst string) Protocol {
+	switch strings.ToLower(strings.TrimSpace(forwardedProto)) {
+	case string(ProtocolHTTPS):
+		return ProtocolHTTPS
+	case string(ProtocolHTTP):
+		return ProtocolHTTP
+	}
+
+	if parsed, err := url.Parse(strings.TrimSpace(rawPath)); err == nil {
+		switch strings.ToLower(strings.TrimSpace(parsed.Scheme)) {
+		case string(ProtocolHTTPS):
+			return ProtocolHTTPS
+		case string(ProtocolHTTP):
+			return ProtocolHTTP
+		}
+	}
+
+	if _, port, _ := parseAuthorityDestination(authority); port == 443 {
+		return ProtocolHTTPS
+	}
+	if _, port := parseOriginalDestination(originalDst); port == 443 {
+		return ProtocolHTTPS
+	}
+
+	return ProtocolHTTP
+}
+
+func normalizeAuthzPath(rawPath string) (path string, authority string, port int, ip netip.Addr) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return "/", "", 0, netip.Addr{}
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err == nil && strings.TrimSpace(parsed.Scheme) != "" && strings.TrimSpace(parsed.Host) != "" {
+		host, hostPort, hostIP := parseAuthorityDestination(parsed.Host)
+		path = parsed.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
+		if parsed.RawQuery != "" {
+			path += "?" + parsed.RawQuery
+		}
+		return path, firstNonEmpty(parsed.Host, host), hostPort, hostIP
+	}
+
+	return trimmed, "", 0, netip.Addr{}
+}
+
+func parseOriginalDestination(value string) (netip.Addr, int) {
+	host, port, ip := parseAuthorityDestination(value)
+	if host == "" {
+		return netip.Addr{}, 0
+	}
+	return ip, port
+}
+
+func parseAuthorityDestination(authority string) (host string, port int, ip netip.Addr) {
+	trimmed := strings.TrimSpace(authority)
+	if trimmed == "" {
+		return "", 0, netip.Addr{}
+	}
+
+	host = trimmed
+	if splitHost, splitPort, err := net.SplitHostPort(trimmed); err == nil {
+		host = splitHost
+		port, _ = strconv.Atoi(splitPort)
+	}
+
+	unbracketed := strings.Trim(host, "[]")
+	if parsedIP, err := netip.ParseAddr(unbracketed); err == nil {
+		ip = parsedIP
+	}
+	return host, port, ip
+}
+
+func defaultPortForProtocol(protocol Protocol) int {
+	if protocol == ProtocolHTTPS {
+		return 443
+	}
+	return 80
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func exchangeDNSQuery(req *dns.Msg, upstreams []string) (*dns.Msg, error) {
+	client := &dns.Client{Net: "udp", Timeout: time.Second}
+	var lastErr error
+	for _, upstream := range upstreams {
+		resp, _, err := client.Exchange(req.Copy(), strings.TrimSpace(upstream))
+		if err == nil && resp != nil {
+			return resp, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no dns upstreams configured")
+	}
+	return nil, lastErr
 }
 
 func allowedFromDecision(mode Mode, decision Decision) bool {

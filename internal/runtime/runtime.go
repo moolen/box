@@ -63,13 +63,14 @@ type Deps struct {
 }
 
 type PolicyServiceStartRequest struct {
-	RuntimeID   string
-	Mode        string
-	GatewayIP   string
-	ListenAddr  string
-	Rules       []config.NetworkPolicyRule
-	DNSUpstream []string
-	OnEvent     func(policyd.Event)
+	RuntimeID     string
+	Mode          string
+	GatewayIP     string
+	ListenAddr    string
+	DNSListenAddr string
+	Rules         []config.NetworkPolicyRule
+	DNSUpstream   []string
+	OnEvent       func(policyd.Event)
 }
 
 type EnvoyStartRequest struct {
@@ -78,6 +79,7 @@ type EnvoyStartRequest struct {
 	ExplicitPort     int
 	TransparentPort  int
 	DNSPort          int
+	DNSUpstream      []string
 	BootstrapPath    string
 	LogPath          string
 	PolicyListenAddr string
@@ -377,15 +379,20 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
+	dnsListenAddr, err := allocateLoopbackUDPAddr()
+	if err != nil {
+		return fmt.Errorf("allocate policyd dns addr: %w", err)
+	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
-			RuntimeID:   rt.Manifest.RuntimeID,
-			Mode:        cfg.Network.Mode,
-			GatewayIP:   rt.Manifest.GatewayIP,
-			ListenAddr:  policyListenAddr,
-			Rules:       append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
-			DNSUpstream: append([]string(nil), cfg.Network.DNS.Upstream...),
-			OnEvent:     rt.monitorPolicyEventCallback(),
+			RuntimeID:     rt.Manifest.RuntimeID,
+			Mode:          cfg.Network.Mode,
+			GatewayIP:     rt.Manifest.GatewayIP,
+			ListenAddr:    policyListenAddr,
+			DNSListenAddr: dnsListenAddr,
+			Rules:         append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream:   append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:       rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
 			return fmt.Errorf("start policyd: %w", err)
@@ -402,6 +409,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
 			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
 			DNSPort:          rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:      []string{dnsListenAddr},
 			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
 			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
 			PolicyListenAddr: policyListenAddr,
@@ -457,15 +465,20 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
+	dnsListenAddr, err := allocateLoopbackUDPAddr()
+	if err != nil {
+		return fmt.Errorf("allocate policyd dns addr: %w", err)
+	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
-			RuntimeID:   rt.Manifest.RuntimeID,
-			Mode:        cfg.Network.Mode,
-			GatewayIP:   rt.Manifest.GatewayIP,
-			ListenAddr:  policyListenAddr,
-			Rules:       append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
-			DNSUpstream: append([]string(nil), cfg.Network.DNS.Upstream...),
-			OnEvent:     rt.monitorPolicyEventCallback(),
+			RuntimeID:     rt.Manifest.RuntimeID,
+			Mode:          cfg.Network.Mode,
+			GatewayIP:     rt.Manifest.GatewayIP,
+			ListenAddr:    policyListenAddr,
+			DNSListenAddr: dnsListenAddr,
+			Rules:         append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream:   append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:       rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
 			return fmt.Errorf("start policyd: %w", err)
@@ -482,6 +495,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
 			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
 			DNSPort:          rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:      []string{dnsListenAddr},
 			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
 			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
 			PolicyListenAddr: policyListenAddr,
@@ -671,6 +685,18 @@ func allocateLoopbackTCPAddr() (string, error) {
 	}
 	addr := ln.Addr().String()
 	if err := ln.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
+}
+
+func allocateLoopbackUDPAddr() (string, error) {
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := conn.LocalAddr().String()
+	if err := conn.Close(); err != nil {
 		return "", err
 	}
 	return addr, nil
