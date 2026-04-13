@@ -1,6 +1,6 @@
-.PHONY: build test bin
+.PHONY: build test bin envoy
 
-build: bin
+build: bin envoy
 	go build -o ./bin/box ./cmd/box
 	go build -o ./bin/box-initshim ./internal/initshim
 
@@ -9,3 +9,6 @@ test:
 
 bin:
 	mkdir -p ./bin
+
+envoy: bin
+	test -x ./bin/envoy
