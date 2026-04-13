@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,21 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"gvisor-net/internal/config"
-	"gvisor-net/internal/dns"
+	ienvoy "gvisor-net/internal/envoy"
 	"gvisor-net/internal/gvisor"
-	"gvisor-net/internal/proxy"
+	"gvisor-net/internal/policyd"
 	"gvisor-net/internal/rootfs"
 	boxruntime "gvisor-net/internal/runtime"
-)
-
-const (
-	ipTransparent   = 19
-	ipv6Transparent = 75
-	soOriginalDst   = 80
 )
 
 type runtimeHandle interface {
@@ -111,10 +102,10 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	cfg.Sandbox.CommandShell = commandShellForTTY(cfg.Sandbox.CommandShell, req.TTY)
 
 	deps := boxruntime.Deps{
-		CommandExec:      hostCommandExec{},
-		DNS:              startDNSRunner,
-		Proxy:            startTransparentProxy,
-		MonitorPreflight: monitorPreflight,
+		CommandExec:        hostCommandExec{},
+		StartPolicyService: startPolicyService,
+		StartEnvoy:         startEnvoyRunner,
+		MonitorPreflight:   monitorPreflight,
 	}
 
 	rt, err := startRuntime(ctx, cfg, deps)
@@ -212,264 +203,49 @@ func writeMonitorSummary(stderr io.Writer, summary string) error {
 	return err
 }
 
-func startDNSRunner(ctx context.Context, req boxruntime.DNSStartRequest) (boxruntime.Runner, error) {
-	cfg := req.Config
-	if cfg.OnQuery == nil {
-		cfg.OnQuery = req.OnQuery
+func startPolicyService(_ context.Context, req boxruntime.PolicyServiceStartRequest) (boxruntime.Runner, error) {
+	mode := policyd.ModeEnforce
+	if strings.EqualFold(strings.TrimSpace(req.Mode), "monitor") {
+		mode = policyd.ModeObserve
 	}
-	if cfg.AllowQuery == nil {
-		cfg.AllowQuery = req.AllowQuery
-	}
-	if cfg.OnResolved == nil {
-		cfg.OnResolved = req.OnResolved
-	}
+	_ = policyd.NewService(policyd.ServiceConfig{
+		Mode:        mode,
+		Rules:       append([]config.NetworkPolicyRule(nil), req.Rules...),
+		DNSUpstream: append([]string(nil), req.DNSUpstream...),
+		OnEvent:     req.OnEvent,
+	})
+	return stopFunc(func() error { return nil }), nil
+}
 
-	server, err := dns.Start(ctx, cfg, dns.Deps{
-		Mode:      req.Mode,
-		GatewayIP: req.GatewayIP,
+func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (boxruntime.Runner, error) {
+	executablePath, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	binaryPath, err := ienvoy.ResolveBinary(ienvoy.BinaryLocator{
+		ExecutablePath: executablePath,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return stopFunc(server.Close), nil
-}
-
-type proxyFactoryDeps struct {
-	listen          func(network, address string) (net.Listener, error)
-	startHTTP       func(context.Context, proxy.ProxyConfig) (*proxy.Server, error)
-	startTLS        func(context.Context, proxy.ProxyConfig) (*proxy.Server, error)
-	resolveUpstream func(net.Conn) (string, error)
-}
-
-func startTransparentProxy(ctx context.Context, req boxruntime.ProxyStartRequest) (boxruntime.Runner, error) {
-	return startTransparentProxyWithDeps(ctx, req, proxyFactoryDeps{
-		listen: transparentListen,
+	bootstrapContent, err := ienvoy.RenderBootstrap(ienvoy.BootstrapConfig{
+		NodeID:          req.RuntimeID,
+		ExplicitPort:    req.ExplicitPort,
+		TransparentPort: req.TransparentPort,
+		DNSPort:         req.DNSPort,
+		AuthzAddress:    req.PolicyListenAddr,
 	})
-}
-
-func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStartRequest, deps proxyFactoryDeps) (boxruntime.Runner, error) {
-	if deps.listen == nil {
-		deps.listen = net.Listen
-	}
-	if deps.startHTTP == nil {
-		deps.startHTTP = proxy.StartHTTP
-	}
-	if deps.startTLS == nil {
-		deps.startTLS = proxy.StartTLS
-	}
-	if deps.resolveUpstream == nil {
-		deps.resolveUpstream = resolveOriginalDst
-	}
-
-	onEvent := req.OnEvent
-
-	httpListener, err := deps.listen("tcp", proxyListenAddress(req.GatewayIP, req.Config.HTTPPort))
 	if err != nil {
 		return nil, err
 	}
-	tlsListener, err := deps.listen("tcp", proxyListenAddress(req.GatewayIP, req.Config.TLSPort))
-	if err != nil {
-		_ = httpListener.Close()
-		return nil, fmt.Errorf("listen tls on port %d: %w", req.Config.TLSPort, err)
-	}
-
-	httpServer, err := deps.startHTTP(ctx, proxy.ProxyConfig{
-		Listen:          consumeListener(httpListener),
-		ResolveUpstream: deps.resolveUpstream,
-		AllowHostname:   req.AllowHostname,
-		OnEvent:         onEvent,
-	})
-	if err != nil {
-		_ = httpListener.Close()
-		_ = tlsListener.Close()
+	if err := os.WriteFile(req.BootstrapPath, []byte(bootstrapContent), 0o644); err != nil {
 		return nil, err
 	}
-
-	tlsServer, err := deps.startTLS(ctx, proxy.ProxyConfig{
-		Listen:          consumeListener(tlsListener),
-		ResolveUpstream: deps.resolveUpstream,
-		AllowHostname:   req.AllowHostname,
-		OnEvent:         onEvent,
+	return ienvoy.Start(ctx, ienvoy.StartRequest{
+		BinaryPath:    binaryPath,
+		BootstrapPath: req.BootstrapPath,
+		LogPath:       req.LogPath,
 	})
-	if err != nil {
-		_ = httpServer.Close()
-		_ = tlsListener.Close()
-		return nil, err
-	}
-
-	var localhostHTTP *proxy.Server
-	if strings.TrimSpace(req.GatewayIP) != "" {
-		localhostListener, err := net.Listen("tcp", proxyListenAddress("127.0.0.1", req.Config.HTTPPort))
-		if err != nil {
-			_ = httpServer.Close()
-			_ = tlsServer.Close()
-			return nil, fmt.Errorf("listen localhost proxy on port %d: %w", req.Config.HTTPPort, err)
-		}
-		localhostHTTP, err = deps.startHTTP(ctx, proxy.ProxyConfig{
-			Listen:          consumeListener(localhostListener),
-			ResolveUpstream: deps.resolveUpstream,
-			AllowHostname:   req.AllowHostname,
-			OnEvent:         onEvent,
-		})
-		if err != nil {
-			_ = localhostListener.Close()
-			_ = httpServer.Close()
-			_ = tlsServer.Close()
-			return nil, err
-		}
-	}
-
-	return proxyRunner{
-		http:          httpServer,
-		tls:           tlsServer,
-		localhostHTTP: localhostHTTP,
-	}, nil
-}
-
-type proxyRunner struct {
-	http          *proxy.Server
-	tls           *proxy.Server
-	localhostHTTP *proxy.Server
-}
-
-func (r proxyRunner) Stop() error {
-	return errors.Join(closeProxyServer(r.localhostHTTP), closeProxyServer(r.tls), closeProxyServer(r.http))
-}
-
-func closeProxyServer(server *proxy.Server) error {
-	if server == nil {
-		return nil
-	}
-	return server.Close()
-}
-
-func consumeListener(listener net.Listener) func(network, address string) (net.Listener, error) {
-	used := false
-	return func(string, string) (net.Listener, error) {
-		if used {
-			return nil, errors.New("listener already consumed")
-		}
-		used = true
-		return listener, nil
-	}
-}
-
-func proxyListenAddress(host string, port int) string {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return ":" + strconv.Itoa(port)
-	}
-	return net.JoinHostPort(host, strconv.Itoa(port))
-}
-
-func transparentListen(network, address string) (net.Listener, error) {
-	var lc net.ListenConfig
-	lc.Control = func(_, _ string, c syscall.RawConn) error {
-		var controlErr error
-		if err := c.Control(func(fd uintptr) {
-			controlErr = errors.Join(
-				setSockoptBestEffort(int(fd), syscall.SOL_IP, ipTransparent, 1),
-				setSockoptBestEffort(int(fd), syscall.SOL_IPV6, ipv6Transparent, 1),
-			)
-		}); err != nil {
-			return err
-		}
-		return controlErr
-	}
-	return lc.Listen(context.Background(), network, address)
-}
-
-func setSockoptBestEffort(fd int, level int, opt int, value int) error {
-	if err := syscall.SetsockoptInt(fd, level, opt, value); err != nil && !errors.Is(err, syscall.ENOPROTOOPT) {
-		return err
-	}
-	return nil
-}
-
-func resolveOriginalDst(conn net.Conn) (string, error) {
-	sysconn, ok := conn.(syscall.Conn)
-	if !ok {
-		return "", errors.New("connection does not expose syscall conn")
-	}
-
-	rawConn, err := sysconn.SyscallConn()
-	if err != nil {
-		return "", fmt.Errorf("get syscall conn: %w", err)
-	}
-
-	var (
-		addr       *net.TCPAddr
-		controlErr error
-	)
-	if err := rawConn.Control(func(fd uintptr) {
-		addr, controlErr = originalDstFromFD(int(fd), conn.LocalAddr())
-	}); err != nil {
-		return "", fmt.Errorf("control original dst fd: %w", err)
-	}
-	if controlErr != nil {
-		return "", controlErr
-	}
-	return addr.String(), nil
-}
-
-func originalDstFromFD(fd int, localAddr net.Addr) (*net.TCPAddr, error) {
-	if tcpAddr, ok := localAddr.(*net.TCPAddr); ok && tcpAddr.IP.To4() == nil {
-		return originalDstIPv6(fd)
-	}
-	return originalDstIPv4(fd)
-}
-
-func originalDstIPv4(fd int) (*net.TCPAddr, error) {
-	var raw syscall.RawSockaddrInet4
-	size := uint32(unsafe.Sizeof(raw))
-	if errno := getSockoptRaw(fd, syscall.IPPROTO_IP, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
-		return nil, fmt.Errorf("get ipv4 original dst: %w", errno)
-	}
-	return tcpAddrFromSockaddrIPv4(raw), nil
-}
-
-func originalDstIPv6(fd int) (*net.TCPAddr, error) {
-	var raw syscall.RawSockaddrInet6
-	size := uint32(unsafe.Sizeof(raw))
-	if errno := getSockoptRaw(fd, syscall.IPPROTO_IPV6, soOriginalDst, unsafe.Pointer(&raw), unsafe.Pointer(&size)); errno != 0 {
-		return nil, fmt.Errorf("get ipv6 original dst: %w", errno)
-	}
-	return tcpAddrFromSockaddrIPv6(raw), nil
-}
-
-func tcpAddrFromSockaddrIPv4(raw syscall.RawSockaddrInet4) *net.TCPAddr {
-	return &net.TCPAddr{
-		IP:   net.IP(raw.Addr[:]),
-		Port: decodeSockaddrPort(raw.Port),
-	}
-}
-
-func tcpAddrFromSockaddrIPv6(raw syscall.RawSockaddrInet6) *net.TCPAddr {
-	addr := &net.TCPAddr{
-		IP:   net.IP(raw.Addr[:]),
-		Port: decodeSockaddrPort(raw.Port),
-	}
-	if raw.Scope_id != 0 {
-		addr.Zone = strconv.FormatUint(uint64(raw.Scope_id), 10)
-	}
-	return addr
-}
-
-func decodeSockaddrPort(port uint16) int {
-	return int(binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&port))[:]))
-}
-
-func getSockoptRaw(fd int, level int, opt int, value unsafe.Pointer, size unsafe.Pointer) syscall.Errno {
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_GETSOCKOPT,
-		uintptr(fd),
-		uintptr(level),
-		uintptr(opt),
-		uintptr(value),
-		uintptr(size),
-		0,
-	)
-	return errno
 }
 
 type preflightCommandRunner func(ctx context.Context, name string, args ...string) (string, error)

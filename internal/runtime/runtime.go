@@ -15,12 +15,11 @@ import (
 	"time"
 
 	"gvisor-net/internal/config"
-	"gvisor-net/internal/dns"
 	"gvisor-net/internal/firewall"
 	"gvisor-net/internal/monitor"
 	"gvisor-net/internal/netns"
 	"gvisor-net/internal/pki"
-	"gvisor-net/internal/proxy"
+	"gvisor-net/internal/policyd"
 	"gvisor-net/internal/rootfs"
 )
 
@@ -50,34 +49,38 @@ type Runner interface {
 	Stop() error
 }
 
-type DNSServerFactory func(ctx context.Context, req DNSStartRequest) (Runner, error)
-type ProxyFactory func(ctx context.Context, req ProxyStartRequest) (Runner, error)
+type PolicyServiceFactory func(ctx context.Context, req PolicyServiceStartRequest) (Runner, error)
+type EnvoyFactory func(ctx context.Context, req EnvoyStartRequest) (Runner, error)
 
 type Deps struct {
 	Clock                func() time.Time
 	RandomID             func() string
 	CommandExec          CommandExec
 	AllocateNetResources func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error)
-	DNS                  DNSServerFactory
-	Proxy                ProxyFactory
+	StartPolicyService   PolicyServiceFactory
+	StartEnvoy           EnvoyFactory
 	MonitorPreflight     MonitorPreflightFunc
 }
 
-type DNSStartRequest struct {
-	Mode       string
-	GatewayIP  string
-	Config     dns.Config
-	OnQuery    func(hostname string)
-	AllowQuery func(hostname string) bool
-	OnResolved func(dns.Resolution)
+type PolicyServiceStartRequest struct {
+	RuntimeID   string
+	Mode        string
+	GatewayIP   string
+	ListenAddr  string
+	Rules       []config.NetworkPolicyRule
+	DNSUpstream []string
+	OnEvent     func(policyd.Event)
 }
 
-type ProxyStartRequest struct {
-	GatewayIP     string
-	Mode          string
-	Config        config.TransparentProxyConfig
-	OnEvent       func(proxy.Event)
-	AllowHostname func(string) bool
+type EnvoyStartRequest struct {
+	RuntimeID        string
+	GatewayIP        string
+	ExplicitPort     int
+	TransparentPort  int
+	DNSPort          int
+	BootstrapPath    string
+	LogPath          string
+	PolicyListenAddr string
 }
 
 type MonitorPreflightRequest struct {
@@ -94,8 +97,6 @@ type Runtime struct {
 	runners  map[string]Runner
 	monitor  *monitor.Collector
 	eventMu  sync.Mutex
-	allowMu  sync.Mutex
-	allowIPs map[string]struct{}
 }
 
 type Manifest struct {
@@ -266,7 +267,6 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	rt := &Runtime{
 		Manifest: manifest,
 		runners:  make(map[string]Runner),
-		allowIPs: make(map[string]struct{}),
 	}
 
 	defer func() {
@@ -370,38 +370,54 @@ func SandboxEnv(manifest Manifest) []string {
 }
 
 func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config, deps Deps) error {
-	if deps.DNS != nil {
-		onQuery := rt.monitorDNSCallback()
-		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
-			Mode:      cfg.Network.Mode,
-			GatewayIP: rt.Manifest.GatewayIP,
-			Config: dns.Config{
-				ListenAddr: cfg.Network.DNS.BindAddr,
-				Upstreams:  append([]string(nil), cfg.Network.DNS.Upstream...),
-				OnQuery:    onQuery,
-			},
-			OnQuery: onQuery,
+	policyListenAddr, err := allocateLoopbackTCPAddr()
+	if err != nil {
+		return fmt.Errorf("allocate policy service addr: %w", err)
+	}
+	if deps.StartPolicyService != nil {
+		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
+			RuntimeID:   rt.Manifest.RuntimeID,
+			Mode:        cfg.Network.Mode,
+			GatewayIP:   rt.Manifest.GatewayIP,
+			ListenAddr:  policyListenAddr,
+			Rules:       append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream: append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:     rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
-			return fmt.Errorf("start dns: %w", err)
+			return fmt.Errorf("start policyd: %w", err)
 		}
-		if dnsRunner != nil {
-			rt.runners["dns"] = dnsRunner
-			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "dns")
+		if policyRunner != nil {
+			rt.runners["policyd"] = policyRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "policyd")
 		}
 	}
-
-	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
-	if err != nil {
-		return err
+	if deps.StartEnvoy != nil {
+		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
+			RuntimeID:        rt.Manifest.RuntimeID,
+			GatewayIP:        rt.Manifest.GatewayIP,
+			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
+			DNSPort:          rt.Manifest.Envoy.DNSPort,
+			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
+			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr: policyListenAddr,
+		})
+		if err != nil {
+			return fmt.Errorf("start envoy: %w", err)
+		}
+		if envoyRunner != nil {
+			rt.runners["envoy"] = envoyRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "envoy")
+		}
 	}
 
 	firewallPlan, err := firewall.BuildMonitorPlan(firewall.MonitorPlanInput{
 		TableName:  rt.Manifest.Net.TableName,
 		HostVeth:   rt.Manifest.Net.HostVeth,
 		SubnetCIDR: cfg.Network.Subnet,
-		DNSPort:    dnsPort,
-		ProxyPort:  cfg.Network.TransparentProxy.HTTPPort,
+		DNSPort:    rt.Manifest.Envoy.DNSPort,
+		ProxyPort:  rt.Manifest.Envoy.TransparentPort,
 		FWMark:     rt.Manifest.Net.FWMark,
 	})
 	if err != nil {
@@ -430,55 +446,50 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 		return fmt.Errorf("apply policy routing plan: %w", err)
 	}
 
-	if cfg.Network.TransparentProxy.Enabled && deps.Proxy != nil {
-		onEvent := rt.monitorProxyCallback()
-		proxyRunner, err := deps.Proxy(ctx, ProxyStartRequest{
-			GatewayIP:     rt.Manifest.GatewayIP,
-			Mode:          cfg.Network.TransparentProxy.Mode,
-			Config:        cfg.Network.TransparentProxy,
-			OnEvent:       onEvent,
-			AllowHostname: nil,
-		})
-		if err != nil {
-			return fmt.Errorf("start proxy: %w", err)
-		}
-		if proxyRunner != nil {
-			rt.runners["proxy"] = proxyRunner
-			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "proxy")
-		}
-	}
-
 	return nil
 }
 
 func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config, deps Deps) error {
-	if deps.DNS != nil {
-		allowQuery := rt.enforceAllowQuery(cfg.Policy)
-		onResolved := rt.enforceResolvedCallback(ctx, deps)
-		dnsRunner, err := deps.DNS(ctx, DNSStartRequest{
-			Mode:      cfg.Network.Mode,
-			GatewayIP: rt.Manifest.GatewayIP,
-			Config: dns.Config{
-				ListenAddr: cfg.Network.DNS.BindAddr,
-				Upstreams:  append([]string(nil), cfg.Network.DNS.Upstream...),
-				AllowQuery: allowQuery,
-				OnResolved: onResolved,
-			},
-			AllowQuery: allowQuery,
-			OnResolved: onResolved,
+	policyListenAddr, err := allocateLoopbackTCPAddr()
+	if err != nil {
+		return fmt.Errorf("allocate policy service addr: %w", err)
+	}
+	if deps.StartPolicyService != nil {
+		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
+			RuntimeID:   rt.Manifest.RuntimeID,
+			Mode:        cfg.Network.Mode,
+			GatewayIP:   rt.Manifest.GatewayIP,
+			ListenAddr:  policyListenAddr,
+			Rules:       append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream: append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:     rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
-			return fmt.Errorf("start dns: %w", err)
+			return fmt.Errorf("start policyd: %w", err)
 		}
-		if dnsRunner != nil {
-			rt.runners["dns"] = dnsRunner
-			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "dns")
+		if policyRunner != nil {
+			rt.runners["policyd"] = policyRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "policyd")
 		}
 	}
-
-	dnsPort, err := resolveGatewayDNSPort(cfg.Network.DNS.BindAddr, rt.Manifest.GatewayIP)
-	if err != nil {
-		return err
+	if deps.StartEnvoy != nil {
+		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
+			RuntimeID:        rt.Manifest.RuntimeID,
+			GatewayIP:        rt.Manifest.GatewayIP,
+			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
+			DNSPort:          rt.Manifest.Envoy.DNSPort,
+			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
+			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr: policyListenAddr,
+		})
+		if err != nil {
+			return fmt.Errorf("start envoy: %w", err)
+		}
+		if envoyRunner != nil {
+			rt.runners["envoy"] = envoyRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "envoy")
+		}
 	}
 
 	if err := ensureIPv4Forwarding(ctx, deps.CommandExec, &rt.Manifest); err != nil {
@@ -489,7 +500,8 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		TableName:         rt.Manifest.Net.TableName,
 		HostVeth:          rt.Manifest.Net.HostVeth,
 		SubnetCIDR:        cfg.Network.Subnet,
-		DNSPort:           dnsPort,
+		DNSPort:           rt.Manifest.Envoy.DNSPort,
+		TransparentPort:   rt.Manifest.Envoy.TransparentPort,
 		ExtraAllowedCIDRs: append([]string(nil), cfg.Policy.ExtraAllowedCIDRs...),
 	})
 	if err != nil {
@@ -553,26 +565,15 @@ func monitorPreflightCheck(ctx context.Context, manifest Manifest, cfg config.Co
 	return nil
 }
 
-func (rt *Runtime) monitorDNSCallback() func(hostname string) {
+func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 	if rt == nil || rt.monitor == nil {
 		return nil
 	}
-	return func(hostname string) {
-		rt.monitor.AddDNS(hostname)
-		rt.logRawMonitorEvent(rawMonitorEvent{
-			Type:     "dns",
-			Hostname: hostname,
-		})
-	}
-}
-
-func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
-	if rt == nil || rt.monitor == nil {
-		return nil
-	}
-	return func(event proxy.Event) {
-		hostname := proxyEventHostname(event)
-		switch strings.ToLower(strings.TrimSpace(event.Protocol)) {
+	return func(event policyd.Event) {
+		hostname := strings.TrimSpace(event.Hostname)
+		switch strings.ToLower(strings.TrimSpace(event.Type)) {
+		case "dns":
+			rt.monitor.AddDNS(hostname)
 		case "http":
 			rt.monitor.AddHTTP(event.Method, hostname)
 		case "tls":
@@ -580,7 +581,7 @@ func (rt *Runtime) monitorProxyCallback() func(proxy.Event) {
 		}
 
 		rt.logRawMonitorEvent(rawMonitorEvent{
-			Type:     "proxy",
+			Type:     event.Type,
 			Protocol: event.Protocol,
 			Hostname: hostname,
 			Method:   event.Method,
@@ -628,51 +629,6 @@ func (rt *Runtime) enforceAllowProxyTarget(policyCfg config.PolicyConfig) func(h
 	}
 }
 
-func (rt *Runtime) enforceResolvedCallback(ctx context.Context, deps Deps) func(dns.Resolution) {
-	return func(event dns.Resolution) {
-		if rt == nil {
-			return
-		}
-		for _, addr := range event.IPs {
-			if err := rt.allowResolvedIP(ctx, deps.CommandExec, addr); err != nil {
-				continue
-			}
-		}
-	}
-}
-
-func (rt *Runtime) allowResolvedIP(ctx context.Context, execer CommandExec, addr netip.Addr) error {
-	if rt == nil || execer == nil || !addr.Is4() {
-		return nil
-	}
-
-	ip := addr.Unmap().String()
-
-	rt.allowMu.Lock()
-	if _, exists := rt.allowIPs[ip]; exists {
-		rt.allowMu.Unlock()
-		return nil
-	}
-	rt.allowIPs[ip] = struct{}{}
-	rt.allowMu.Unlock()
-
-	command, err := firewall.BuildEnforceAllowIPCommand(rt.Manifest.Net.TableName, ip)
-	if err != nil {
-		return err
-	}
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
-		return nil
-	}
-	if err := execer.Run(ctx, fields[0], fields[1:]...); err != nil {
-		rt.allowMu.Lock()
-		delete(rt.allowIPs, ip)
-		rt.allowMu.Unlock()
-		return fmt.Errorf("allow resolved ip %q: %w", ip, err)
-	}
-	return nil
-}
-
 type rawMonitorEvent struct {
 	Type     string `json:"type"`
 	Protocol string `json:"protocol,omitempty"`
@@ -698,21 +654,23 @@ func (rt *Runtime) logRawMonitorEvent(event rawMonitorEvent) {
 	_ = appendEvent(rt.Manifest.EventLogPath, string(line))
 }
 
-func proxyEventHostname(event proxy.Event) string {
-	if hostname := strings.TrimSpace(event.Hostname); hostname != "" {
-		return hostname
-	}
-	if host := strings.TrimSpace(event.Host); host != "" {
-		return host
-	}
-	return strings.TrimSpace(event.SNI)
-}
-
 func nowUTC(deps Deps) time.Time {
 	if deps.Clock != nil {
 		return deps.Clock().UTC()
 	}
 	return time.Now().UTC()
+}
+
+func allocateLoopbackTCPAddr() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
 }
 
 func newRuntimeID(deps Deps) string {
@@ -754,22 +712,6 @@ func gatewayIPFromSubnet(subnet string) (string, error) {
 		return "", fmt.Errorf("subnet %q has no usable gateway ip", trimmed)
 	}
 	return gateway.String(), nil
-}
-
-func resolveGatewayDNSPort(bindAddr, gatewayIP string) (int, error) {
-	listenAddr, err := dns.ResolveListenAddr(bindAddr, "monitor", gatewayIP)
-	if err != nil {
-		return 0, err
-	}
-	_, port, err := net.SplitHostPort(listenAddr)
-	if err != nil {
-		return 0, fmt.Errorf("parse monitor dns listen addr %q: %w", listenAddr, err)
-	}
-	value, err := strconv.Atoi(port)
-	if err != nil || value <= 0 {
-		return 0, fmt.Errorf("invalid monitor dns listen port %q", port)
-	}
-	return value, nil
 }
 
 func usesManagedNetworkPolicy(mode string) bool {

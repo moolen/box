@@ -3,18 +3,17 @@ package runtime
 import (
 	"context"
 	"errors"
-	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"gvisor-net/internal/config"
-	"gvisor-net/internal/dns"
 	"gvisor-net/internal/netns"
-	"gvisor-net/internal/proxy"
+	"gvisor-net/internal/policyd"
 )
 
 func TestRunCreatesStateDirAndEventLog(t *testing.T) {
@@ -107,15 +106,18 @@ func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 		Config:    cfg,
 		StateRoot: t.TempDir(),
 	}, Deps{
-		Clock:    fixedClock,
-		RandomID: func() string { return "runtime-monitor-a" },
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-a" },
+		CommandExec: noopCommandExec{},
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
-		CommandExec: noopCommandExec{},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -129,14 +131,16 @@ func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 	}
 }
 
-func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
+func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("monitor")
 	cfg.Network.DNS.Upstream = []string{"1.1.1.1:53"}
 
-	var dnsReq DNSStartRequest
-	var dnsCalled bool
+	var policyReq PolicyServiceStartRequest
+	var policyCalled bool
+	var envoyReq EnvoyStartRequest
+	var envoyCalled bool
 	exec := &recordingCommandExec{}
 
 	rt, err := Run(context.Background(), Request{
@@ -149,9 +153,14 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			dnsCalled = true
-			dnsReq = req
+		StartPolicyService: func(_ context.Context, req PolicyServiceStartRequest) (Runner, error) {
+			policyCalled = true
+			policyReq = req
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(_ context.Context, req EnvoyStartRequest) (Runner, error) {
+			envoyCalled = true
+			envoyReq = req
 			return noopRunner{}, nil
 		},
 	})
@@ -159,14 +168,35 @@ func TestMonitorModeStartsDNSAndFirewallWithScopedResources(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if !dnsCalled {
-		t.Fatalf("DNS factory was not called in monitor mode")
+	if !policyCalled {
+		t.Fatalf("StartPolicyService was not called in monitor mode")
 	}
-	if dnsReq.Mode != "monitor" {
-		t.Fatalf("DNS request mode = %q, want %q", dnsReq.Mode, "monitor")
+	if !envoyCalled {
+		t.Fatalf("StartEnvoy was not called in monitor mode")
 	}
-	if dnsReq.GatewayIP != rt.Manifest.GatewayIP {
-		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, rt.Manifest.GatewayIP)
+	if policyReq.Mode != "monitor" {
+		t.Fatalf("PolicyService request mode = %q, want %q", policyReq.Mode, "monitor")
+	}
+	if policyReq.GatewayIP != rt.Manifest.GatewayIP {
+		t.Fatalf("PolicyService request gateway ip = %q, want %q", policyReq.GatewayIP, rt.Manifest.GatewayIP)
+	}
+	if !reflect.DeepEqual(policyReq.DNSUpstream, cfg.Network.DNS.Upstream) {
+		t.Fatalf("PolicyService DNSUpstream = %#v, want %#v", policyReq.DNSUpstream, cfg.Network.DNS.Upstream)
+	}
+	if strings.TrimSpace(policyReq.ListenAddr) == "" {
+		t.Fatalf("PolicyService ListenAddr = %q, want non-empty", policyReq.ListenAddr)
+	}
+	if envoyReq.ExplicitPort != rt.Manifest.Envoy.ExplicitPort {
+		t.Fatalf("Envoy request explicit port = %d, want %d", envoyReq.ExplicitPort, rt.Manifest.Envoy.ExplicitPort)
+	}
+	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
+		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
+	}
+	if envoyReq.DNSPort != rt.Manifest.Envoy.DNSPort {
+		t.Fatalf("Envoy request dns port = %d, want %d", envoyReq.DNSPort, rt.Manifest.Envoy.DNSPort)
+	}
+	if envoyReq.PolicyListenAddr != policyReq.ListenAddr {
+		t.Fatalf("Envoy request policy addr = %q, want %q", envoyReq.PolicyListenAddr, policyReq.ListenAddr)
 	}
 
 	resources, err := netns.ResourcesForRuntimeID("runtime-monitor-b")
@@ -246,7 +276,10 @@ func TestRunUsesInjectedNetworkAllocation(t *testing.T) {
 			preflightReq = req
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -297,7 +330,10 @@ func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -375,7 +411,35 @@ func TestRunSkipsWorkdirOverlayWhenExplicitlyDisabled(t *testing.T) {
 	}
 }
 
-func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T) {
+func TestRunStartsPolicyServiceBeforeEnvoy(t *testing.T) {
+	t.Parallel()
+
+	var order []string
+
+	_, err := Run(context.Background(), Request{
+		Config:    testConfig("enforce"),
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:    fixedClock,
+		RandomID: func() string { return "runtime-start-order" },
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			order = append(order, "policyd")
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			order = append(order, "envoy")
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !reflect.DeepEqual(order, []string{"policyd", "envoy"}) {
+		t.Fatalf("startup order = %#v, want policyd before envoy", order)
+	}
+}
+
+func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("monitor")
@@ -391,27 +455,30 @@ func TestMonitorModeCapturesMonitorSummaryFromDNSAndProxyCallbacks(t *testing.T)
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			if req.OnQuery == nil {
-				t.Fatalf("DNSStartRequest.OnQuery = nil, want callback")
-			}
-			req.OnQuery("dns.example.com")
-			return noopRunner{}, nil
-		},
-		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
+		StartPolicyService: func(_ context.Context, req PolicyServiceStartRequest) (Runner, error) {
 			if req.OnEvent == nil {
-				t.Fatalf("ProxyStartRequest.OnEvent = nil, want callback")
+				t.Fatalf("PolicyServiceStartRequest.OnEvent = nil, want callback")
 			}
-			req.OnEvent(proxy.Event{
+			req.OnEvent(policyd.Event{
+				Type:     "dns",
+				Protocol: "dns",
+				Hostname: "dns.example.com",
+			})
+			req.OnEvent(policyd.Event{
+				Type:     "http",
 				Protocol: "http",
 				Hostname: "api.example.com",
 				Method:   "GET",
 				Path:     "/hello",
 			})
-			req.OnEvent(proxy.Event{
-				Protocol: "tls",
+			req.OnEvent(policyd.Event{
+				Type:     "tls",
+				Protocol: "https",
 				Hostname: "tls.example.com",
 			})
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -445,17 +512,22 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			req.OnQuery("dns.example.com")
-			return noopRunner{}, nil
-		},
-		Proxy: func(_ context.Context, req ProxyStartRequest) (Runner, error) {
-			req.OnEvent(proxy.Event{
+		StartPolicyService: func(_ context.Context, req PolicyServiceStartRequest) (Runner, error) {
+			req.OnEvent(policyd.Event{
+				Type:     "dns",
+				Protocol: "dns",
+				Hostname: "dns.example.com",
+			})
+			req.OnEvent(policyd.Event{
+				Type:     "http",
 				Protocol: "http",
 				Hostname: "api.example.com",
 				Method:   "POST",
 				Path:     "/submit",
 			})
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -470,7 +542,7 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 	text := string(eventLog)
 	mustContain(t, text, `"type":"dns"`)
 	mustContain(t, text, `"hostname":"dns.example.com"`)
-	mustContain(t, text, `"type":"proxy"`)
+	mustContain(t, text, `"type":"http"`)
 	mustContain(t, text, `"protocol":"http"`)
 	mustContain(t, text, `"hostname":"api.example.com"`)
 	mustContain(t, text, `"method":"POST"`)
@@ -501,53 +573,6 @@ func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {
 	}
 }
 
-func TestRejectsMITMBeforeMutatingHostState(t *testing.T) {
-	t.Parallel()
-
-	stateRoot := t.TempDir()
-	cfg := testConfig("monitor")
-	cfg.Network.TransparentProxy.Mode = "mitm"
-
-	exec := &recordingCommandExec{}
-	dnsCalled := false
-	proxyCalled := false
-
-	_, err := Run(context.Background(), Request{
-		Config:    cfg,
-		StateRoot: stateRoot,
-	}, Deps{
-		Clock:       fixedClock,
-		RandomID:    func() string { return "runtime-blocked" },
-		CommandExec: exec,
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
-			dnsCalled = true
-			return noopRunner{}, nil
-		},
-		Proxy: func(context.Context, ProxyStartRequest) (Runner, error) {
-			proxyCalled = true
-			return noopRunner{}, nil
-		},
-	})
-	if err == nil {
-		t.Fatalf("Run() error = nil, want non-nil")
-	}
-	if !strings.Contains(err.Error(), "network.transparent_proxy.mode=mitm") {
-		t.Fatalf("Run() error = %q, want transparent proxy mitm rejection", err.Error())
-	}
-	if _, statErr := os.Stat(filepath.Join(stateRoot, "runtime-blocked")); !os.IsNotExist(statErr) {
-		t.Fatalf("runtime state dir should not exist on early validation failure; stat err=%v", statErr)
-	}
-	if dnsCalled {
-		t.Fatalf("DNS factory was called before runtime rejected unsupported mode")
-	}
-	if proxyCalled {
-		t.Fatalf("Proxy factory was called before runtime rejected unsupported mode")
-	}
-	if len(exec.calls) != 0 {
-		t.Fatalf("command exec calls = %#v, want none before rejection", exec.calls)
-	}
-}
-
 func TestMonitorPreflightConflictPreventsMonitorMutationAndTeardown(t *testing.T) {
 	t.Parallel()
 
@@ -555,8 +580,8 @@ func TestMonitorPreflightConflictPreventsMonitorMutationAndTeardown(t *testing.T
 	cfg := testConfig("monitor")
 
 	exec := &recordingCommandExec{}
-	dnsCalled := false
-	proxyCalled := false
+	policydCalled := false
+	envoyCalled := false
 
 	_, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -568,12 +593,12 @@ func TestMonitorPreflightConflictPreventsMonitorMutationAndTeardown(t *testing.T
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return errors.New("nft table already owned by another runtime")
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
-			dnsCalled = true
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			policydCalled = true
 			return noopRunner{}, nil
 		},
-		Proxy: func(context.Context, ProxyStartRequest) (Runner, error) {
-			proxyCalled = true
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			envoyCalled = true
 			return noopRunner{}, nil
 		},
 	})
@@ -587,11 +612,11 @@ func TestMonitorPreflightConflictPreventsMonitorMutationAndTeardown(t *testing.T
 	if len(exec.calls) != 0 {
 		t.Fatalf("command exec calls = %#v, want none when preflight conflicts", exec.calls)
 	}
-	if dnsCalled {
-		t.Fatalf("DNS factory was called despite monitor preflight conflict")
+	if policydCalled {
+		t.Fatalf("StartPolicyService was called despite monitor preflight conflict")
 	}
-	if proxyCalled {
-		t.Fatalf("Proxy factory was called despite monitor preflight conflict")
+	if envoyCalled {
+		t.Fatalf("StartEnvoy was called despite monitor preflight conflict")
 	}
 	if _, statErr := os.Stat(filepath.Join(stateRoot, "runtime-preflight-conflict")); !os.IsNotExist(statErr) {
 		t.Fatalf("state dir should be cleaned up on preflight conflict; stat err=%v", statErr)
@@ -637,7 +662,10 @@ func TestRunCleansTrustedOrphansBeforeMonitorPreflight(t *testing.T) {
 			}
 			return nil
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -688,7 +716,10 @@ func TestRunLeavesUntrustedOrphanStateForConflictHandling(t *testing.T) {
 			preflightCalled = true
 			return errors.New("nft table already owned by another runtime")
 		},
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
 	})
@@ -716,8 +747,8 @@ func TestMonitorModeWithoutPreflightFailsClosedBeforeMutation(t *testing.T) {
 	cfg := testConfig("monitor")
 
 	exec := &recordingCommandExec{}
-	dnsCalled := false
-	proxyCalled := false
+	policydCalled := false
+	envoyCalled := false
 
 	_, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -726,12 +757,12 @@ func TestMonitorModeWithoutPreflightFailsClosedBeforeMutation(t *testing.T) {
 		Clock:       fixedClock,
 		RandomID:    func() string { return "runtime-missing-preflight" },
 		CommandExec: exec,
-		DNS: func(context.Context, DNSStartRequest) (Runner, error) {
-			dnsCalled = true
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			policydCalled = true
 			return noopRunner{}, nil
 		},
-		Proxy: func(context.Context, ProxyStartRequest) (Runner, error) {
-			proxyCalled = true
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			envoyCalled = true
 			return noopRunner{}, nil
 		},
 	})
@@ -745,11 +776,11 @@ func TestMonitorModeWithoutPreflightFailsClosedBeforeMutation(t *testing.T) {
 	if len(exec.calls) != 0 {
 		t.Fatalf("command exec calls = %#v, want none when monitor preflight is missing", exec.calls)
 	}
-	if dnsCalled {
-		t.Fatalf("DNS factory was called despite missing monitor preflight")
+	if policydCalled {
+		t.Fatalf("StartPolicyService was called despite missing monitor preflight")
 	}
-	if proxyCalled {
-		t.Fatalf("Proxy factory was called despite missing monitor preflight")
+	if envoyCalled {
+		t.Fatalf("StartEnvoy was called despite missing monitor preflight")
 	}
 	if _, statErr := os.Stat(filepath.Join(stateRoot, "runtime-missing-preflight")); !os.IsNotExist(statErr) {
 		t.Fatalf("state dir should be cleaned up when monitor preflight is missing; stat err=%v", statErr)
@@ -819,16 +850,21 @@ func TestRunCreatesMissingStateRootBeforeStartupChecks(t *testing.T) {
 	}
 }
 
-func TestEnforceModeStartsDNSWithoutLegacyAllowsetCommands(t *testing.T) {
+func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Policy.AllowDomains = []string{"allowed.example.com"}
+	cfg.Network.Policy = []config.NetworkPolicyRule{{
+		Hostname: "allowed.example.com",
+		Ports:    []int{443},
+	}}
 	cfg.Policy.ExtraAllowedCIDRs = []string{"10.0.0.0/8"}
 
 	exec := &recordingCommandExec{}
-	var dnsReq DNSStartRequest
-	var dnsCalled bool
+	var policyReq PolicyServiceStartRequest
+	var policyCalled bool
+	var envoyReq EnvoyStartRequest
+	var envoyCalled bool
 
 	rt, err := Run(context.Background(), Request{
 		Config:    cfg,
@@ -840,29 +876,14 @@ func TestEnforceModeStartsDNSWithoutLegacyAllowsetCommands(t *testing.T) {
 		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
 			return nil
 		},
-		DNS: func(_ context.Context, req DNSStartRequest) (Runner, error) {
-			dnsCalled = true
-			dnsReq = req
-			if req.AllowQuery == nil {
-				t.Fatalf("DNSStartRequest.AllowQuery = nil, want callback")
-			}
-			if req.OnResolved == nil {
-				t.Fatalf("DNSStartRequest.OnResolved = nil, want callback")
-			}
-			if req.AllowQuery("blocked.example.com") {
-				t.Fatalf("AllowQuery(blocked.example.com) = true, want false")
-			}
-			if !req.AllowQuery("allowed.example.com") {
-				t.Fatalf("AllowQuery(allowed.example.com) = false, want true")
-			}
-			req.OnResolved(dns.Resolution{
-				Hostname: "allowed.example.com",
-				IPs: []netip.Addr{
-					netip.MustParseAddr("93.184.216.34"),
-					netip.MustParseAddr("93.184.216.35"),
-					netip.MustParseAddr("93.184.216.34"),
-				},
-			})
+		StartPolicyService: func(_ context.Context, req PolicyServiceStartRequest) (Runner, error) {
+			policyCalled = true
+			policyReq = req
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(_ context.Context, req EnvoyStartRequest) (Runner, error) {
+			envoyCalled = true
+			envoyReq = req
 			return noopRunner{}, nil
 		},
 	})
@@ -873,38 +894,32 @@ func TestEnforceModeStartsDNSWithoutLegacyAllowsetCommands(t *testing.T) {
 		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
 	}()
 
-	if !dnsCalled {
-		t.Fatalf("DNS factory was not called in enforce mode")
+	if !policyCalled {
+		t.Fatalf("StartPolicyService was not called in enforce mode")
 	}
-	if dnsReq.Mode != "enforce" {
-		t.Fatalf("DNS request mode = %q, want %q", dnsReq.Mode, "enforce")
+	if !envoyCalled {
+		t.Fatalf("StartEnvoy was not called in enforce mode")
 	}
-	if dnsReq.GatewayIP != rt.Manifest.GatewayIP {
-		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, rt.Manifest.GatewayIP)
+	if policyReq.Mode != "enforce" {
+		t.Fatalf("PolicyService request mode = %q, want %q", policyReq.Mode, "enforce")
+	}
+	if policyReq.GatewayIP != rt.Manifest.GatewayIP {
+		t.Fatalf("PolicyService request gateway ip = %q, want %q", policyReq.GatewayIP, rt.Manifest.GatewayIP)
+	}
+	if !reflect.DeepEqual(policyReq.Rules, cfg.Network.Policy) {
+		t.Fatalf("PolicyService rules = %#v, want %#v", policyReq.Rules, cfg.Network.Policy)
+	}
+	if !reflect.DeepEqual(policyReq.DNSUpstream, cfg.Network.DNS.Upstream) {
+		t.Fatalf("PolicyService DNSUpstream = %#v, want %#v", policyReq.DNSUpstream, cfg.Network.DNS.Upstream)
+	}
+	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
+		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
 	}
 
 	for _, call := range exec.calls {
 		if strings.Contains(call, "allow_v4") || strings.Contains(call, "nft add element inet box_") {
 			t.Fatalf("legacy allowset command must not be emitted; calls=%#v", exec.calls)
 		}
-	}
-}
-
-func TestEnforceAllowProxyTargetAllowsConfiguredCIDRAndBlocksOtherIPs(t *testing.T) {
-	t.Parallel()
-
-	rt := &Runtime{}
-	allow := rt.enforceAllowProxyTarget(config.PolicyConfig{
-		ExtraAllowedCIDRs: []string{"1.1.1.1/32"},
-	})
-	if !allow("1.1.1.1") {
-		t.Fatalf("allow(1.1.1.1) = false, want true")
-	}
-	if !allow("1.1.1.1:80") {
-		t.Fatalf("allow(1.1.1.1:80) = false, want true")
-	}
-	if allow("1.1.1.2") {
-		t.Fatalf("allow(1.1.1.2) = true, want false")
 	}
 }
 
@@ -985,7 +1000,7 @@ func TestCleanupOrderStopsRunnersBeforeNetworkTeardown(t *testing.T) {
 		RuntimeID:      "run-2",
 		StateRoot:      stateRoot,
 		StateDir:       stateDir,
-		StartedRunners: []string{"dns", "proxy", "runsc"},
+		StartedRunners: []string{"policyd", "envoy", "runsc"},
 		NetworkMode:    "monitor",
 		Net: NetResources{
 			NetNS:      "box-deadbeef",
@@ -1018,8 +1033,8 @@ func TestCleanupOrderStopsRunnersBeforeNetworkTeardown(t *testing.T) {
 	if len(order) < 4 {
 		t.Fatalf("cleanup order too short: %#v", order)
 	}
-	if order[0] != "stop:runsc" || order[1] != "stop:proxy" || order[2] != "stop:dns" {
-		t.Fatalf("runner stop order = %#v, want reverse-start order runsc->proxy->dns", order)
+	if order[0] != "stop:runsc" || order[1] != "stop:envoy" || order[2] != "stop:policyd" {
+		t.Fatalf("runner stop order = %#v, want reverse-start order runsc->envoy->policyd", order)
 	}
 	if !strings.HasPrefix(order[3], "cmd:") {
 		t.Fatalf("expected network teardown commands after runner stops, got %#v", order)
