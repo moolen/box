@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	BundledVersion       = "v1.37.1"
-	BundledImageRef      = "docker.io/envoyproxy/envoy@sha256:4d9226b9fd4d1449887de7cde785beb24b12e47d6e79021dec3c79e362609432"
-	bundledBinaryInImage = "/usr/local/bin/envoy"
+	BundledVersion          = "v1.37.1"
+	BundledImageRef         = "docker.io/envoyproxy/envoy@sha256:4d9226b9fd4d1449887de7cde785beb24b12e47d6e79021dec3c79e362609432"
+	BundledPlatformImageRef = "docker.io/envoyproxy/envoy:distroless-" + BundledVersion
+	bundledBinaryInImage    = "/usr/local/bin/envoy"
 )
 
 type RuntimeLocator struct {
@@ -77,14 +78,16 @@ func StageBundledBinary(ctx context.Context, req StageRequest) error {
 	}()
 
 	createArgs := []string{"create"}
+	imageRef := BundledImageRef
 	if platform := strings.TrimSpace(req.Platform); platform != "" {
 		createArgs = append(createArgs, "--platform", platform)
+		imageRef = BundledPlatformImageRef
 	}
-	createArgs = append(createArgs, BundledImageRef)
+	createArgs = append(createArgs, imageRef)
 
 	containerIDBytes, err := run(ctx, runtimeName, createArgs...)
 	if err != nil {
-		return commandError(fmt.Sprintf("create container from %s", BundledImageRef), containerIDBytes, err)
+		return commandError(fmt.Sprintf("create container from %s", imageRef), containerIDBytes, err)
 	}
 	containerID := parseContainerID(containerIDBytes)
 	if containerID == "" {
@@ -95,7 +98,7 @@ func StageBundledBinary(ctx context.Context, req StageRequest) error {
 	}()
 
 	if copyOutput, err := run(ctx, runtimeName, "cp", containerID+":"+bundledBinaryInImage, tempPath); err != nil {
-		return commandError(fmt.Sprintf("copy envoy binary from %s", BundledImageRef), copyOutput, err)
+		return commandError(fmt.Sprintf("copy envoy binary from %s", imageRef), copyOutput, err)
 	}
 	if err := os.Chmod(tempPath, 0o755); err != nil {
 		return fmt.Errorf("chmod staged envoy binary %q: %w", tempPath, err)

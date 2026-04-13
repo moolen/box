@@ -133,8 +133,8 @@ func TestStageBundledBinaryPassesPlatformToContainerRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StageBundledBinary() error = %v", err)
 	}
-	if !containsCall(calls, "docker create --platform linux/arm64 "+BundledImageRef) {
-		t.Fatalf("command calls = %#v, want docker create with explicit platform", calls)
+	if !containsCall(calls, "docker create --platform linux/arm64 "+BundledPlatformImageRef) {
+		t.Fatalf("command calls = %#v, want docker create with explicit platform tag reference", calls)
 	}
 }
 
