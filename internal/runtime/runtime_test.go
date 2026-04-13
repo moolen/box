@@ -47,6 +47,29 @@ func TestRunCreatesStateDirAndEventLog(t *testing.T) {
 	}
 }
 
+func TestRunRestrictsStateArtifactPermissions(t *testing.T) {
+	t.Parallel()
+
+	stateRoot := t.TempDir()
+	cfg := testConfig("enforce")
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: stateRoot,
+	}, Deps{
+		Clock:    fixedClock,
+		RandomID: func() string { return "runtime-perms" },
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	assertMode(t, stateRoot, 0o700)
+	assertMode(t, rt.Manifest.StateDir, 0o700)
+	assertMode(t, rt.Manifest.EventLogPath, 0o600)
+	assertMode(t, rt.Manifest.ManifestPath, 0o600)
+}
+
 func TestRunRecordsRandomizedEnvoyPortsAndCAAssets(t *testing.T) {
 	t.Parallel()
 
@@ -245,6 +268,9 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	}
 	if strings.TrimSpace(policyReq.DNSListenAddr) == "" {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want non-empty", policyReq.DNSListenAddr)
+	}
+	if !strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
+		t.Fatalf("PolicyService DNSListenAddr = %q, want loopback listener", policyReq.DNSListenAddr)
 	}
 	if envoyReq.ExplicitPort != rt.Manifest.Envoy.ExplicitPort {
 		t.Fatalf("Envoy request explicit port = %d, want %d", envoyReq.ExplicitPort, rt.Manifest.Envoy.ExplicitPort)
@@ -1000,8 +1026,8 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	if strings.TrimSpace(policyReq.DNSListenAddr) == "" {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want non-empty", policyReq.DNSListenAddr)
 	}
-	if strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
-		t.Fatalf("PolicyService DNSListenAddr = %q, want wildcard bind for redirected sandbox DNS", policyReq.DNSListenAddr)
+	if !strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
+		t.Fatalf("PolicyService DNSListenAddr = %q, want loopback listener", policyReq.DNSListenAddr)
 	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
@@ -1374,4 +1400,16 @@ func countCallsContaining(calls []string, fragment string) int {
 		}
 	}
 	return count
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("mode(%q) = %04o, want %04o", path, got, want)
+	}
 }

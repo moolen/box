@@ -193,10 +193,10 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err != nil {
 		return nil, fmt.Errorf("resolve runtime state root %q: %w", req.StateRoot, err)
 	}
-	if err := os.MkdirAll(stateRoot, 0o755); err != nil {
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create runtime state root %q: %w", stateRoot, err)
 	}
-	if err := os.Chmod(stateRoot, 0o755); err != nil {
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("chmod runtime state root %q: %w", stateRoot, err)
 	}
 	if err := cleanupOrphanedRuntimes(ctx, stateRoot, deps.CommandExec); err != nil {
@@ -207,12 +207,15 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err := assertNoStateConflict(stateDir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create runtime state dir %q: %w", stateDir, err)
+	}
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		return nil, fmt.Errorf("chmod runtime state dir %q: %w", stateDir, err)
 	}
 
 	eventLogPath := filepath.Join(stateDir, eventLogName)
-	if err := os.WriteFile(eventLogPath, []byte(""), 0o644); err != nil {
+	if err := os.WriteFile(eventLogPath, []byte(""), 0o600); err != nil {
 		return nil, fmt.Errorf("create event log %q: %w", eventLogPath, err)
 	}
 
@@ -400,7 +403,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
-	dnsListenAddr, err := allocateWildcardUDPAddr()
+	dnsListenAddr, err := allocateLoopbackUDPAddr()
 	if err != nil {
 		return fmt.Errorf("allocate policyd dns addr: %w", err)
 	}
@@ -495,7 +498,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
-	dnsListenAddr, err := allocateWildcardUDPAddr()
+	dnsListenAddr, err := allocateLoopbackUDPAddr()
 	if err != nil {
 		return fmt.Errorf("allocate policyd dns addr: %w", err)
 	}
@@ -837,7 +840,7 @@ func prepareManagedNetworkAssets(networkMode, stateDir, runtimeID string, rules 
 
 func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
 	envoyDir := filepath.Join(stateDir, envoyDirName)
-	if err := os.MkdirAll(envoyDir, 0o755); err != nil {
+	if err := os.MkdirAll(envoyDir, 0o700); err != nil {
 		return EnvoyRuntime{}, fmt.Errorf("create envoy dir %q: %w", envoyDir, err)
 	}
 
@@ -869,7 +872,7 @@ func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
 
 func writeRuntimeCAAssets(stateDir, runtimeID string, rules []config.NetworkPolicyRule) (CARuntime, string, error) {
 	caDir := filepath.Join(stateDir, caDirName)
-	if err := os.MkdirAll(caDir, 0o755); err != nil {
+	if err := os.MkdirAll(caDir, 0o700); err != nil {
 		return CARuntime{}, "", fmt.Errorf("create ca dir %q: %w", caDir, err)
 	}
 
@@ -958,7 +961,7 @@ func writeTransparentTLSCertificates(dir string, runtimeCA *pki.RuntimeCA, rules
 		if err != nil {
 			return nil, fmt.Errorf("issue transparent tls certificate for %q: %w", host, err)
 		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create transparent tls dir %q: %w", dir, err)
 		}
 		base := sanitizeTransparentTLSFilename(host)
@@ -1109,7 +1112,7 @@ func writeManifest(path string, manifest Manifest) error {
 		return err
 	}
 	content = append(content, '\n')
-	return os.WriteFile(path, content, 0o644)
+	return os.WriteFile(path, content, 0o600)
 }
 
 func appendEvent(path, line string) error {
