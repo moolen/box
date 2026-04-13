@@ -22,6 +22,8 @@ import (
 	boxruntime "gvisor-net/internal/runtime"
 )
 
+const stagedFilesDirName = "staged-files"
+
 type runtimeHandle interface {
 	Cleanup(context.Context, boxruntime.Deps) error
 	MonitorSummary() string
@@ -126,6 +128,9 @@ func (e runtimeExecutor) Run(req runRequest) error {
 	}
 	trustedCACert := boxruntime.BuildSandboxTrustBundlePEM(runtimeCACert)
 
+	hostEnv := os.Environ()
+	extraEnv := sandboxProxyEnv(manifest)
+
 	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
 		RootfsMode:        cfg.Sandbox.Rootfs,
 		RepoPath:          repoPath,
@@ -143,6 +148,12 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		_ = rt.Cleanup(ctx, deps)
 		return fmt.Errorf("build rootfs plan: %w", err)
 	}
+	stagedBinds, err := stageConfiguredFileMounts(cfg.Mounts, manifest.StateDir)
+	if err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return fmt.Errorf("stage configured file mounts: %w", err)
+	}
+	rootfsPlan.Binds = append(rootfsPlan.Binds, stagedBinds...)
 
 	bundleDir := filepath.Join(manifest.StateDir, "bundle")
 	if _, err := applyRootfs(rootfs.ApplyRequest{
@@ -154,13 +165,11 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		_ = rt.Cleanup(ctx, deps)
 		return fmt.Errorf("apply rootfs plan: %w", err)
 	}
-	extraEnv := sandboxProxyEnv(manifest)
-
 	spec, err := buildSandboxSpec(gvisor.BuildSpecRequest{
 		Config:               cfg,
 		Workdir:              cfg.Sandbox.Workdir,
 		Payload:              req.ShellCommand,
-		HostEnv:              os.Environ(),
+		HostEnv:              hostEnv,
 		ExtraEnv:             extraEnv,
 		RuntimeManifest:      manifest,
 		RootfsPlan:           rootfsPlan,
@@ -513,6 +522,81 @@ func readRuntimeCACert(manifest boxruntime.Manifest) (string, error) {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func stageConfiguredFileMounts(mounts config.MountsConfig, stateDir string) ([]rootfs.Bind, error) {
+	if len(mounts.StagedRO) == 0 && len(mounts.StagedRW) == 0 {
+		return nil, nil
+	}
+	if strings.TrimSpace(stateDir) == "" {
+		return nil, errors.New("runtime state dir is required for staged file mounts")
+	}
+
+	stagingRoot := filepath.Join(stateDir, stagedFilesDirName)
+	var binds []rootfs.Bind
+
+	stageGroup := func(entries []config.StagedFileMount, readOnly bool, group string) error {
+		for i, mount := range entries {
+			bind, err := stageConfiguredFileMount(stagingRoot, group, i, mount, readOnly)
+			if err != nil {
+				return err
+			}
+			if bind.Source == "" {
+				continue
+			}
+			binds = append(binds, bind)
+		}
+		return nil
+	}
+
+	if err := stageGroup(mounts.StagedRO, true, "ro"); err != nil {
+		return nil, err
+	}
+	if err := stageGroup(mounts.StagedRW, false, "rw"); err != nil {
+		return nil, err
+	}
+	return binds, nil
+}
+
+func stageConfiguredFileMount(stagingRoot, group string, index int, mount config.StagedFileMount, readOnly bool) (rootfs.Bind, error) {
+	info, err := os.Stat(mount.Source)
+	if err != nil {
+		if mount.Optional && errors.Is(err, os.ErrNotExist) {
+			return rootfs.Bind{}, nil
+		}
+		return rootfs.Bind{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return rootfs.Bind{}, fmt.Errorf("staged file source %q is not a regular file", mount.Source)
+	}
+
+	mode := info.Mode().Perm()
+	if mount.Mode != nil {
+		mode = os.FileMode(*mount.Mode)
+	}
+
+	stagedPath := filepath.Join(stagingRoot, group, fmt.Sprintf("%03d", index), filepath.Base(mount.Target))
+	if err := copyFileWithMode(mount.Source, stagedPath, mode); err != nil {
+		return rootfs.Bind{}, err
+	}
+
+	return rootfs.Bind{
+		Source:   stagedPath,
+		Target:   mount.Target,
+		ReadOnly: readOnly,
+		File:     true,
+	}, nil
+}
+
+func copyFileWithMode(src, dst string, mode os.FileMode) error {
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, content, mode)
 }
 
 func sandboxNetworkNamespacePath(cfg config.Config, netNS string) string {

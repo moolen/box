@@ -43,6 +43,8 @@ func Load(path, cwd string) (Config, error) {
 	if cfg.Sandbox.Workdir != "" && !filepath.IsAbs(cfg.Sandbox.Workdir) {
 		cfg.Sandbox.Workdir = filepath.Join(cwd, cfg.Sandbox.Workdir)
 	}
+	cfg.Mounts.StagedRO = resolveStagedMountSources(cfg.Mounts.StagedRO, cwd)
+	cfg.Mounts.StagedRW = resolveStagedMountSources(cfg.Mounts.StagedRW, cwd)
 	mode := strings.TrimSpace(cfg.Network.Mode)
 	if mode == "" {
 		cfg.Network.Mode = "monitor"
@@ -82,6 +84,71 @@ func ValidateRuntime(cfg Config) error {
 	for i, rule := range cfg.Network.Policy {
 		if err := validateNetworkPolicyRule(rule); err != nil {
 			return fmt.Errorf("network.policy[%d]: %w", i, err)
+		}
+	}
+	for i, mount := range cfg.Mounts.StagedRO {
+		if err := validateStagedFileMount(mount); err != nil {
+			return fmt.Errorf("mounts.staged_ro[%d]: %w", i, err)
+		}
+	}
+	for i, mount := range cfg.Mounts.StagedRW {
+		if err := validateStagedFileMount(mount); err != nil {
+			return fmt.Errorf("mounts.staged_rw[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func resolveStagedMountSources(mounts []StagedFileMount, cwd string) []StagedFileMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	resolved := append([]StagedFileMount(nil), mounts...)
+	for i := range resolved {
+		resolved[i].Source = resolveHostPath(resolved[i].Source, cwd)
+	}
+	return resolved
+}
+
+func resolveHostPath(value, cwd string) string {
+	pathValue := strings.TrimSpace(value)
+	if pathValue == "" {
+		return ""
+	}
+	if pathValue == "~" || strings.HasPrefix(pathValue, "~/") {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if pathValue == "~" {
+				return home
+			}
+			return filepath.Join(home, strings.TrimPrefix(pathValue, "~/"))
+		}
+	}
+	if filepath.IsAbs(pathValue) {
+		return pathValue
+	}
+	if cwd == "" {
+		return pathValue
+	}
+	return filepath.Join(cwd, pathValue)
+}
+
+func validateStagedFileMount(mount StagedFileMount) error {
+	if strings.TrimSpace(mount.Source) == "" {
+		return errors.New("source is required")
+	}
+	target := strings.TrimSpace(mount.Target)
+	if target == "" {
+		return errors.New("target is required")
+	}
+	if !filepath.IsAbs(target) {
+		return fmt.Errorf("target %q must be absolute", mount.Target)
+	}
+	if filepath.Clean(target) == string(filepath.Separator) {
+		return fmt.Errorf("target %q must not be root", mount.Target)
+	}
+	if mount.Mode != nil {
+		if *mount.Mode < 0 || *mount.Mode > 0o777 {
+			return fmt.Errorf("mode %04o is invalid; must be between 0000 and 0777", *mount.Mode)
 		}
 	}
 	return nil

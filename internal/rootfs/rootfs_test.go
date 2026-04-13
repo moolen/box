@@ -281,6 +281,37 @@ func TestApplyCreatesBindTargetDirectoriesInBundle(t *testing.T) {
 	}
 }
 
+func TestApplyCreatesBindTargetFilesInBundle(t *testing.T) {
+	temp := t.TempDir()
+	shim := filepath.Join(temp, "box-initshim")
+	if err := os.WriteFile(shim, []byte("shim"), 0o755); err != nil {
+		t.Fatalf("WriteFile(shim): %v", err)
+	}
+
+	bundleDir := filepath.Join(temp, "bundle")
+	_, err := Apply(ApplyRequest{
+		BundleDir:    bundleDir,
+		InitShimPath: shim,
+		Plan: Plan{
+			Binds: []Bind{
+				{Source: "/runtime/staged/config.toml", Target: "/run/box/codex-home/config.toml", ReadOnly: true, File: true},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Apply() error: %v", err)
+	}
+
+	staged := filepath.Join(bundleDir, "rootfs", "run", "box", "codex-home", "config.toml")
+	info, err := os.Stat(staged)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", staged, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("staged bind target %q is a directory, want file placeholder", staged)
+	}
+}
+
 func TestBuildPlanRejectsUnknownRootfsMode(t *testing.T) {
 	_, err := BuildPlan(PlanRequest{
 		RootfsMode: "mystery",

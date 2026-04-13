@@ -28,6 +28,8 @@ sandbox:
   env:
     - "PS1=box# "
     - TERM=xterm
+    # Example when using mounts.staged_rw for Codex config projection:
+    # - CODEX_HOME=/run/box/codex-home
 
   # Everything after `box --` is shell-escaped and passed as one command string here.
   command_shell: /bin/bash -ilc
@@ -79,6 +81,26 @@ mounts:
   # Use absolute host paths.
   extra_ro: []
   extra_rw: []
+
+  # Stage selected host files into sandbox paths without exposing the whole host
+  # directory. `source` may be absolute, relative to the invocation directory, or
+  # under `~/...`. `target` must be an absolute sandbox path.
+  #
+  # Example for Codex config projection:
+  # staged_rw:
+  #   - source: ~/.codex/config.toml
+  #     target: /run/box/codex-home/config.toml
+  #     mode: 0600
+  #   - source: ~/.codex/auth.json
+  #     target: /run/box/codex-home/auth.json
+  #     mode: 0600
+  #     optional: true
+  #   - source: ~/.codex/managed_config.toml
+  #     target: /run/box/codex-home/managed_config.toml
+  #     mode: 0600
+  #     optional: true
+  staged_ro: []
+  staged_rw: []
 
 gvisor:
   # gVisor platform passed to `runsc`.

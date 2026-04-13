@@ -50,8 +50,17 @@ type HTTPPolicyConfig struct {
 }
 
 type MountsConfig struct {
-	ExtraRO []string `yaml:"extra_ro"`
-	ExtraRW []string `yaml:"extra_rw"`
+	ExtraRO  []string          `yaml:"extra_ro"`
+	ExtraRW  []string          `yaml:"extra_rw"`
+	StagedRO []StagedFileMount `yaml:"staged_ro"`
+	StagedRW []StagedFileMount `yaml:"staged_rw"`
+}
+
+type StagedFileMount struct {
+	Source   string `yaml:"source"`
+	Target   string `yaml:"target"`
+	Mode     *int   `yaml:"mode"`
+	Optional bool   `yaml:"optional"`
 }
 
 type GVisorConfig struct {

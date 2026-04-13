@@ -93,6 +93,82 @@ network:
 	}
 }
 
+func TestLoadResolvesStagedMountSourcesRelativeToInvocationDir(t *testing.T) {
+	invocationDir := t.TempDir()
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+mounts:
+  staged_rw:
+    - source: secrets/config.toml
+      target: /run/box/codex-home/config.toml
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, invocationDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(got.Mounts.StagedRW) != 1 {
+		t.Fatalf("staged_rw = %#v, want 1 entry", got.Mounts.StagedRW)
+	}
+	want := filepath.Join(invocationDir, "secrets", "config.toml")
+	if got.Mounts.StagedRW[0].Source != want {
+		t.Fatalf("staged_rw[0].source = %q, want %q", got.Mounts.StagedRW[0].Source, want)
+	}
+}
+
+func TestValidateRejectsRelativeStagedMountTarget(t *testing.T) {
+	cfg := Config{
+		Mounts: MountsConfig{
+			StagedRW: []StagedFileMount{
+				{
+					Source: "/host/config.toml",
+					Target: "run/box/codex-home/config.toml",
+				},
+			},
+		},
+	}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "target") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of target", err)
+	}
+}
+
+func TestValidateRejectsInvalidStagedMountMode(t *testing.T) {
+	mode := 0o1000
+	cfg := Config{
+		Mounts: MountsConfig{
+			StagedRO: []StagedFileMount{
+				{
+					Source: "/host/config.toml",
+					Target: "/run/box/codex-home/config.toml",
+					Mode:   &mode,
+				},
+			},
+		},
+	}
+
+	err := ValidateRuntime(cfg)
+	if err == nil {
+		t.Fatal("ValidateRuntime() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("ValidateRuntime() error = %q, want mention of mode", err)
+	}
+}
+
 func TestLoadDefaultsWorkdirOverlayToTrueWhenOmitted(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `

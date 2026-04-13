@@ -50,7 +50,13 @@ func Apply(req ApplyRequest) (ApplyResult, error) {
 		}
 	}
 	for _, bind := range req.Plan.Binds {
-		if err := writeBindTargetDir(rootfsDir, bind.Target); err != nil {
+		var err error
+		if bind.File {
+			err = writeBindTargetFile(rootfsDir, bind.Target)
+		} else {
+			err = writeBindTargetDir(rootfsDir, bind.Target)
+		}
+		if err != nil {
 			return ApplyResult{}, err
 		}
 	}
@@ -127,6 +133,26 @@ func writeBindTargetDir(rootfsDir, target string) error {
 		return fmt.Errorf("bind target path %q escapes rootfs", target)
 	}
 	return os.MkdirAll(path, 0o755)
+}
+
+func writeBindTargetFile(rootfsDir, target string) error {
+	clean := filepath.Clean(target)
+	rel := strings.TrimPrefix(clean, "/")
+	if rel == "." || rel == "" {
+		return fmt.Errorf("invalid bind target path %q", target)
+	}
+	path := filepath.Join(rootfsDir, rel)
+	if !pathWithinRootfs(rootfsDir, path) {
+		return fmt.Errorf("bind target path %q escapes rootfs", target)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	return file.Close()
 }
 
 func copyFile(src, dst string, fallbackMode os.FileMode) error {

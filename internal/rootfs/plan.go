@@ -15,8 +15,8 @@ var (
 )
 
 const (
-	RuntimeCACertPath    = "/etc/box/ca-certificates/runtime-ca.crt"
-	TrustedCABundlePath  = "/etc/box/ca-certificates/trust-bundle.crt"
+	RuntimeCACertPath   = "/etc/box/ca-certificates/runtime-ca.crt"
+	TrustedCABundlePath = "/etc/box/ca-certificates/trust-bundle.crt"
 )
 
 type PlanRequest struct {
@@ -37,6 +37,7 @@ type Bind struct {
 	Source   string
 	Target   string
 	ReadOnly bool
+	File     bool
 }
 
 type GeneratedFile struct {

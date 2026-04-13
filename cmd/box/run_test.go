@@ -341,6 +341,114 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 	}
 }
 
+func TestRuntimeExecutorStagesConfiguredFilesIntoRuntimeState(t *testing.T) {
+	stateDir := t.TempDir()
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-staged-files",
+			StateDir:  stateDir,
+		},
+	}
+
+	hostSource := filepath.Join(t.TempDir(), "config.toml")
+	const sourceContent = "model_provider = \"azure\"\n"
+	if err := os.WriteFile(hostSource, []byte(sourceContent), 0o600); err != nil {
+		t.Fatalf("WriteFile(host source) error = %v", err)
+	}
+
+	var sawStagedBind bool
+
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Sandbox: config.SandboxConfig{
+					Rootfs:       "host-overlay",
+					Workdir:      "/workspace",
+					InheritEnv:   true,
+					Env:          []string{"CODEX_HOME=/run/box/codex-home"},
+					CommandShell: "/bin/bash -lc",
+				},
+				Mounts: config.MountsConfig{
+					StagedRW: []config.StagedFileMount{
+						{
+							Source: hostSource,
+							Target: "/run/box/codex-home/config.toml",
+							Mode:   intPtr(0o600),
+						},
+					},
+				},
+				GVisor: config.GVisorConfig{
+					Platform: "ptrace",
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			for _, bind := range req.Plan.Binds {
+				if bind.Target != "/run/box/codex-home/config.toml" {
+					continue
+				}
+				sawStagedBind = true
+				if !bind.File {
+					t.Fatalf("bind.File = false, want true for %#v", bind)
+				}
+				if bind.ReadOnly {
+					t.Fatalf("bind.ReadOnly = true, want false for %#v", bind)
+				}
+				content, err := os.ReadFile(bind.Source)
+				if err != nil {
+					t.Fatalf("ReadFile(staged source) error = %v", err)
+				}
+				if string(content) != sourceContent {
+					t.Fatalf("staged source content = %q, want %q", string(content), sourceContent)
+				}
+				info, err := os.Stat(bind.Source)
+				if err != nil {
+					t.Fatalf("Stat(staged source) error = %v", err)
+				}
+				if info.Mode().Perm() != 0o600 {
+					t.Fatalf("staged source mode = %o, want 0600", info.Mode().Perm())
+				}
+			}
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(req gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			spec, err := gvisor.BuildSandboxSpec(req)
+			if err != nil {
+				return gvisor.Spec{}, err
+			}
+			if !containsString(spec.Process.Env, "CODEX_HOME=/run/box/codex-home") {
+				t.Fatalf("Process.Env = %#v, want configured CODEX_HOME", spec.Process.Env)
+			}
+			return spec, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !sawStagedBind {
+		t.Fatal("staged bind not found in apply request")
+	}
+}
+
 func TestIsTerminalFDDoesNotCloseDescriptor(t *testing.T) {
 	t.Parallel()
 
@@ -1007,6 +1115,10 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 type preflightCommandResult struct {
