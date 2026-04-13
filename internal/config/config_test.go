@@ -48,8 +48,8 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Sandbox.Hostname != "box" {
 		t.Fatalf("sandbox.hostname = %q, want %q", got.Sandbox.Hostname, "box")
 	}
-	if got.Sandbox.InheritEnv {
-		t.Fatalf("sandbox.inherit_env = %t, want false by default", got.Sandbox.InheritEnv)
+	if !got.Sandbox.InheritEnv {
+		t.Fatalf("sandbox.inherit_env = %t, want true from recovered box.yaml", got.Sandbox.InheritEnv)
 	}
 	if !got.Sandbox.WorkdirOverlayEnabled() {
 		t.Fatalf("sandbox.workdir_overlay = %v, want enabled by default", got.Sandbox.WorkdirOverlay)
