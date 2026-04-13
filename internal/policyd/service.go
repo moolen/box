@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"github.com/miekg/dns"
+	"google.golang.org/grpc"
 
 	"gvisor-net/internal/config"
 )
@@ -41,8 +43,8 @@ type Service struct {
 }
 
 type Server struct {
-	httpServer   *http.Server
-	httpListener net.Listener
+	grpcServer   *grpc.Server
+	grpcListener net.Listener
 	dnsServer    *dns.Server
 	dnsConn      net.PacketConn
 	stopOnce     sync.Once
@@ -95,26 +97,25 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc
 	if svc == nil {
 		return nil, errors.New("service is required")
 	}
-	httpListener, err := net.Listen("tcp", strings.TrimSpace(httpListenAddr))
+	grpcListener, err := net.Listen("tcp", strings.TrimSpace(httpListenAddr))
 	if err != nil {
 		return nil, err
 	}
 	dnsConn, err := net.ListenPacket("udp", strings.TrimSpace(dnsListenAddr))
 	if err != nil {
-		_ = httpListener.Close()
+		_ = grpcListener.Close()
 		return nil, err
 	}
 
-	httpServer := &http.Server{
-		Handler: svc.Handler(),
-	}
+	grpcServer := grpc.NewServer()
+	authv3.RegisterAuthorizationServer(grpcServer, svc)
 	dnsServer := &dns.Server{
 		PacketConn: dnsConn,
 		Handler:    dns.HandlerFunc(svc.handleDNS),
 	}
 	runner := &Server{
-		httpServer:   httpServer,
-		httpListener: httpListener,
+		grpcServer:   grpcServer,
+		grpcListener: grpcListener,
 		dnsServer:    dnsServer,
 		dnsConn:      dnsConn,
 	}
@@ -124,8 +125,8 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc
 		_ = runner.Stop()
 	}()
 	go func() {
-		err := httpServer.Serve(httpListener)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		err := grpcServer.Serve(grpcListener)
+		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			_ = runner.Stop()
 		}
 	}()
@@ -146,13 +147,13 @@ func (s *Server) Stop() error {
 
 	s.stopOnce.Do(func() {
 		var errs []error
-		if s.httpServer != nil {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-			err := s.httpServer.Shutdown(shutdownCtx)
-			cancel()
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if s.grpcListener != nil {
+			if err := s.grpcListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				errs = append(errs, err)
 			}
+		}
+		if s.grpcServer != nil {
+			s.grpcServer.Stop()
 		}
 		if s.dnsServer != nil {
 			if err := s.dnsServer.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) && err.Error() != "dns: server not started" {
@@ -168,7 +169,15 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authorize/http", s.handleAuthorizeHTTP)
 	mux.HandleFunc("/", s.handleAuthorizeHTTP)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Envoy ext_authz forwards CONNECT checks with an authority-form request target
+		// such as "example.com:443". net/http's ServeMux does not route those to "/".
+		if r.Method == http.MethodConnect {
+			s.handleAuthorizeHTTP(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (s *Service) CheckHTTP(_ context.Context, req HTTPCheckRequest) (HTTPCheckResponse, error) {
@@ -306,6 +315,7 @@ func (s *Service) handleDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 	authority := firstNonEmpty(
+		connectAuthority(r),
 		r.Header.Get("Host"),
 		r.Header.Get("X-Forwarded-Host"),
 		r.Header.Get("Authority"),
@@ -333,15 +343,15 @@ func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 		dstIP = authorityIP
 	}
 
-	port := dstPort
-	if port == 0 {
-		port = authorityPort
-	}
+	port := authorityPort
 	if port == 0 {
 		port = pathPort
 	}
 	if port == 0 {
 		port = defaultPortForProtocol(protocol)
+	}
+	if port == 0 {
+		port = dstPort
 	}
 
 	return HTTPCheckRequest{
@@ -444,6 +454,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func connectAuthority(r *http.Request) string {
+	if r == nil || r.Method != http.MethodConnect {
+		return ""
+	}
+	return strings.TrimSpace(r.Host)
 }
 
 func exchangeDNSQuery(req *dns.Msg, upstreams []string) (*dns.Msg, error) {

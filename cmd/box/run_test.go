@@ -6,13 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/gvisor"
@@ -209,7 +214,7 @@ func TestSandboxProxyEnvIncludesProxyVariablesInMonitorMode(t *testing.T) {
 			ExplicitPort: 19001,
 		},
 		CA: boxruntime.CARuntime{
-			SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+			SandboxCertPath: rootfs.TrustedCABundlePath,
 		},
 	})
 	for _, want := range []string{
@@ -219,10 +224,10 @@ func TestSandboxProxyEnvIncludesProxyVariablesInMonitorMode(t *testing.T) {
 		"https_proxy=http://100.96.0.1:19001",
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
-		"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
-		"CURL_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
-		"REQUESTS_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
-		"NODE_EXTRA_CA_CERTS=/etc/ssl/certs/box-runtime-ca.pem",
+		"SSL_CERT_FILE=" + rootfs.TrustedCABundlePath,
+		"CURL_CA_BUNDLE=" + rootfs.TrustedCABundlePath,
+		"REQUESTS_CA_BUNDLE=" + rootfs.TrustedCABundlePath,
+		"NODE_EXTRA_CA_CERTS=" + rootfs.TrustedCABundlePath,
 	} {
 		if !containsString(env, want) {
 			t.Fatalf("sandboxProxyEnv() = %#v, want %q", env, want)
@@ -253,7 +258,7 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 			},
 			CA: boxruntime.CARuntime{
 				CertPath:        caCertPath,
-				SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+				SandboxCertPath: rootfs.TrustedCABundlePath,
 			},
 		},
 	}
@@ -269,16 +274,20 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 					Workdir:      "/workspace",
 					CommandShell: "/bin/bash -lc",
 				},
+				GVisor: config.GVisorConfig{
+					Platform: "ptrace",
+				},
 			}, nil
 		},
 		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
 			return rt, nil
 		},
 		buildRootfsPlan: func(req rootfs.PlanRequest) (rootfs.Plan, error) {
-			if req.TrustedCACertPEM != caCertPEM {
-				t.Fatalf("TrustedCACertPEM = %q, want runtime CA contents", req.TrustedCACertPEM)
+			wantTrusted := boxruntime.BuildSandboxTrustBundlePEM(caCertPEM)
+			if req.TrustedCACertPEM != wantTrusted {
+				t.Fatalf("TrustedCACertPEM = %q, want %q", req.TrustedCACertPEM, wantTrusted)
 			}
-			if req.TrustedCACertPath != "/etc/ssl/certs/box-runtime-ca.pem" {
+			if req.TrustedCACertPath != rootfs.TrustedCABundlePath {
 				t.Fatalf("TrustedCACertPath = %q, want runtime CA target", req.TrustedCACertPath)
 			}
 			return rootfs.Plan{}, nil
@@ -290,7 +299,7 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 			if req.RuntimeManifest.Envoy.ExplicitPort != 19001 {
 				t.Fatalf("RuntimeManifest.Envoy.ExplicitPort = %d, want 19001", req.RuntimeManifest.Envoy.ExplicitPort)
 			}
-			if req.RuntimeManifest.CA.SandboxCertPath != "/etc/ssl/certs/box-runtime-ca.pem" {
+			if req.RuntimeManifest.CA.SandboxCertPath != rootfs.TrustedCABundlePath {
 				t.Fatalf("RuntimeManifest.CA.SandboxCertPath = %q, want runtime CA path", req.RuntimeManifest.CA.SandboxCertPath)
 			}
 
@@ -305,7 +314,7 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 				"https_proxy=http://100.96.0.1:19001",
 				"NO_PROXY=127.0.0.1,localhost",
 				"no_proxy=127.0.0.1,localhost",
-				"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
+				"SSL_CERT_FILE=" + rootfs.TrustedCABundlePath,
 			} {
 				if !containsString(spec.Process.Env, want) {
 					t.Fatalf("Process.Env = %#v, want %q", spec.Process.Env, want)
@@ -316,7 +325,10 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 		writeBundleSpec: func(string, gvisor.Spec) error {
 			return nil
 		},
-		runSandbox: func(gvisor.RunRequest) error {
+		runSandbox: func(req gvisor.RunRequest) error {
+			if req.Platform != "ptrace" {
+				t.Fatalf("RunRequest.Platform = %q, want %q", req.Platform, "ptrace")
+			}
 			return nil
 		},
 	}
@@ -326,6 +338,44 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 		Payload:    []string{"/bin/true"},
 	}); err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestIsTerminalFDDoesNotCloseDescriptor(t *testing.T) {
+	t.Parallel()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+
+	_ = isTerminalFD(writer.Fd())
+
+	for range 3 {
+		runtime.GC()
+		runtime.Gosched()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, readErr := reader.Read(buf)
+		done <- readErr
+	}()
+
+	if _, err := writer.Write([]byte("x")); err != nil {
+		t.Fatalf("writer.Write() error = %v, want descriptor to remain open", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reader.Read() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pipe read")
 	}
 }
 
@@ -876,7 +926,7 @@ func TestRuntimeExecutorSuppliesPolicyServiceAndEnvoyFactories(t *testing.T) {
 	}
 }
 
-func TestStartPolicyServiceServesHTTPAuthorizationEndpoint(t *testing.T) {
+func TestStartPolicyServiceServesGRPCAuthorizationEndpoint(t *testing.T) {
 	t.Parallel()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -917,24 +967,36 @@ func TestStartPolicyServiceServesHTTPAuthorizationEndpoint(t *testing.T) {
 		}
 	}()
 
-	client := &http.Client{Timeout: time.Second}
-	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/authorize/http", nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
-	}
-	req.Header.Set("Method", http.MethodGet)
-	req.Header.Set("Host", "example.com")
-	req.Header.Set("Path", "http://example.com/allowed/value")
-	req.Header.Set("X-Forwarded-Proto", "http")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 
-	resp, err := client.Do(req)
+	conn, err := grpc.DialContext(ctx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
 	if err != nil {
-		t.Fatalf("client.Do() error = %v", err)
+		t.Fatalf("grpc.DialContext() error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer conn.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	resp, err := authv3.NewAuthorizationClient(conn).Check(ctx, &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: "GET",
+					Host:   "example.com",
+					Path:   "http://example.com/allowed/value",
+					Scheme: "http",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v", got, codes.OK)
 	}
 }
 

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,13 @@ const (
 	envoyDirName     = "envoy"
 	bootstrapName    = "bootstrap.yaml"
 )
+
+var systemTrustBundlePaths = []string{
+	"/etc/ssl/certs/ca-certificates.crt",
+	"/etc/pki/tls/certs/ca-bundle.crt",
+	"/etc/ssl/cert.pem",
+	"/usr/share/ncat/ca-bundle.crt",
+}
 
 var ErrResourceConflict = errors.New("resource conflict")
 
@@ -218,6 +226,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	if err != nil {
 		return nil, err
 	}
+	trustedCAPEM := BuildSandboxTrustBundlePEM(caCertPEM)
 
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
 		RootfsMode:        runtimeCfg.Sandbox.Rootfs,
@@ -229,7 +238,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		ExtraRO:           runtimeCfg.Mounts.ExtraRO,
 		ExtraRW:           runtimeCfg.Mounts.ExtraRW,
 		RuntimeCACertPEM:  caCertPEM,
-		TrustedCACertPEM:  caCertPEM,
+		TrustedCACertPEM:  trustedCAPEM,
 		TrustedCACertPath: caRuntime.SandboxCertPath,
 	})
 	if err != nil {
@@ -424,12 +433,14 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 
 	firewallPlan, err := firewall.BuildMonitorPlan(firewall.MonitorPlanInput{
-		TableName:  rt.Manifest.Net.TableName,
-		HostVeth:   rt.Manifest.Net.HostVeth,
-		SubnetCIDR: cfg.Network.Subnet,
-		DNSPort:    rt.Manifest.Envoy.DNSPort,
-		ProxyPort:  rt.Manifest.Envoy.TransparentPort,
-		FWMark:     rt.Manifest.Net.FWMark,
+		TableName:    rt.Manifest.Net.TableName,
+		HostVeth:     rt.Manifest.Net.HostVeth,
+		SubnetCIDR:   cfg.Network.Subnet,
+		GatewayIP:    rt.Manifest.GatewayIP,
+		DNSPort:      rt.Manifest.Envoy.DNSPort,
+		ExplicitPort: rt.Manifest.Envoy.ExplicitPort,
+		ProxyPort:    rt.Manifest.Envoy.TransparentPort,
+		FWMark:       rt.Manifest.Net.FWMark,
 	})
 	if err != nil {
 		return fmt.Errorf("build firewall monitor plan: %w", err)
@@ -517,7 +528,9 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		TableName:       rt.Manifest.Net.TableName,
 		HostVeth:        rt.Manifest.Net.HostVeth,
 		SubnetCIDR:      cfg.Network.Subnet,
+		GatewayIP:       rt.Manifest.GatewayIP,
 		DNSPort:         rt.Manifest.Envoy.DNSPort,
+		ExplicitPort:    rt.Manifest.Envoy.ExplicitPort,
 		TransparentPort: rt.Manifest.Envoy.TransparentPort,
 	})
 	if err != nil {
@@ -823,8 +836,36 @@ func writeRuntimeCAAssets(stateDir, runtimeID string) (CARuntime, string, error)
 	return CARuntime{
 		CertPath:        certPath,
 		KeyPath:         keyPath,
-		SandboxCertPath: rootfs.RuntimeCACertPath,
+		SandboxCertPath: rootfs.TrustedCABundlePath,
 	}, string(runtimeCA.RootCertPEM), nil
+}
+
+func BuildSandboxTrustBundlePEM(runtimeCAPEM string) string {
+	runtimeCAPEM = strings.TrimSpace(runtimeCAPEM)
+	if runtimeCAPEM == "" {
+		return ""
+	}
+
+	var bundle bytes.Buffer
+	for _, path := range systemTrustBundlePaths {
+		content, err := os.ReadFile(path)
+		if err != nil || len(bytes.TrimSpace(content)) == 0 {
+			continue
+		}
+		bundle.Write(content)
+		if last := content[len(content)-1]; last != '\n' {
+			bundle.WriteByte('\n')
+		}
+	}
+	bundle.WriteString(runtimeCAPEM)
+	if !strings.HasSuffix(runtimeCAPEM, "\n") {
+		bundle.WriteByte('\n')
+	}
+	return bundle.String()
+}
+
+func buildSandboxTrustBundlePEM(runtimeCAPEM string) string {
+	return BuildSandboxTrustBundlePEM(runtimeCAPEM)
 }
 
 func listenerPort(addr net.Addr) int {

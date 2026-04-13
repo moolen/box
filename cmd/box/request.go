@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -137,13 +139,5 @@ func detectTTY(stdin, stdout, stderr *os.File, isTerminal func(fd uintptr) bool)
 }
 
 func isTerminalFD(fd uintptr) bool {
-	file := os.NewFile(fd, "tty-probe")
-	if file == nil {
-		return false
-	}
-	info, err := file.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(fd))
 }

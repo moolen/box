@@ -32,7 +32,7 @@ func TestBoxRunsEnv(t *testing.T) {
 	if !strings.Contains(output, "HTTPS_PROXY=http://") {
 		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
 	}
-	if !strings.Contains(output, "SSL_CERT_FILE="+rootfs.RuntimeCACertPath) {
+	if !strings.Contains(output, "SSL_CERT_FILE="+rootfs.TrustedCABundlePath) {
 		t.Fatalf("env output = %q, want runtime CA env injection", output)
 	}
 }
@@ -48,6 +48,25 @@ func TestBoxCanCurlExampleDotCom(t *testing.T) {
 	output := runBoxSmoke(t, "curl", "http://example.com")
 	if !strings.Contains(output, "Example Domain") {
 		t.Fatalf("curl output = %q, want Example Domain response body", output)
+	}
+}
+
+func TestBoxCanCurlHTTPSExampleDotCom(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, []string{"example.com"}, nil)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--", "curl", "-sS", "https://example.com")
+	if err != nil {
+		t.Fatalf("run box https curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("https curl output = %q, want Example Domain response body", stdout)
 	}
 }
 

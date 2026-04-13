@@ -124,6 +124,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		_ = rt.Cleanup(ctx, deps)
 		return fmt.Errorf("read runtime ca cert: %w", err)
 	}
+	trustedCACert := boxruntime.BuildSandboxTrustBundlePEM(runtimeCACert)
 
 	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
 		RootfsMode:        cfg.Sandbox.Rootfs,
@@ -135,7 +136,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		ExtraRO:           cfg.Mounts.ExtraRO,
 		ExtraRW:           cfg.Mounts.ExtraRW,
 		RuntimeCACertPEM:  runtimeCACert,
-		TrustedCACertPEM:  runtimeCACert,
+		TrustedCACertPEM:  trustedCACert,
 		TrustedCACertPath: manifest.CA.SandboxCertPath,
 	})
 	if err != nil {
@@ -177,6 +178,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		BundleDir:   bundleDir,
 		ContainerID: manifest.RuntimeID,
 		NetNS:       manifest.Net.NetNS,
+		Platform:    cfg.GVisor.Platform,
 	}
 
 	payloadErr := runSandbox(runReq)
@@ -189,10 +191,15 @@ type hostCommandExec struct{}
 
 func (hostCommandExec) Run(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, trimmed)
 }
 
 func writeMonitorSummary(stderr io.Writer, summary string) error {

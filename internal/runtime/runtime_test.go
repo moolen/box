@@ -96,6 +96,63 @@ func TestRunRecordsRandomizedEnvoyPortsAndCAAssets(t *testing.T) {
 	}
 }
 
+func TestBuildSandboxTrustBundlePEMAppendsRuntimeCAAfterSystemBundle(t *testing.T) {
+	temp := t.TempDir()
+	systemBundlePath := filepath.Join(temp, "system-bundle.pem")
+	systemBundle := "-----BEGIN CERTIFICATE-----\nsystem\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(systemBundlePath, []byte(systemBundle), 0o644); err != nil {
+		t.Fatalf("WriteFile(system bundle) error = %v", err)
+	}
+
+	originalPaths := append([]string(nil), systemTrustBundlePaths...)
+	systemTrustBundlePaths = []string{systemBundlePath}
+	defer func() { systemTrustBundlePaths = originalPaths }()
+
+	runtimeCA := "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n"
+	got := buildSandboxTrustBundlePEM(runtimeCA)
+	want := systemBundle + runtimeCA
+	if got != want {
+		t.Fatalf("buildSandboxTrustBundlePEM() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSandboxTrustBundlePEMAppendsAllAvailableSystemBundles(t *testing.T) {
+	temp := t.TempDir()
+	firstPath := filepath.Join(temp, "system-a.pem")
+	secondPath := filepath.Join(temp, "system-b.pem")
+	firstBundle := "-----BEGIN CERTIFICATE-----\nsystem-a\n-----END CERTIFICATE-----\n"
+	secondBundle := "-----BEGIN CERTIFICATE-----\nsystem-b\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(firstPath, []byte(firstBundle), 0o644); err != nil {
+		t.Fatalf("WriteFile(first bundle) error = %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte(secondBundle), 0o644); err != nil {
+		t.Fatalf("WriteFile(second bundle) error = %v", err)
+	}
+
+	originalPaths := append([]string(nil), systemTrustBundlePaths...)
+	systemTrustBundlePaths = []string{firstPath, secondPath}
+	defer func() { systemTrustBundlePaths = originalPaths }()
+
+	runtimeCA := "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n"
+	got := buildSandboxTrustBundlePEM(runtimeCA)
+	want := firstBundle + secondBundle + runtimeCA
+	if got != want {
+		t.Fatalf("buildSandboxTrustBundlePEM() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildSandboxTrustBundlePEMFallsBackToRuntimeCAOnly(t *testing.T) {
+	originalPaths := append([]string(nil), systemTrustBundlePaths...)
+	systemTrustBundlePaths = []string{filepath.Join(t.TempDir(), "missing.pem")}
+	defer func() { systemTrustBundlePaths = originalPaths }()
+
+	runtimeCA := "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n"
+	got := buildSandboxTrustBundlePEM(runtimeCA)
+	if got != runtimeCA {
+		t.Fatalf("buildSandboxTrustBundlePEM() = %q, want runtime CA only %q", got, runtimeCA)
+	}
+}
+
 func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 	t.Parallel()
 

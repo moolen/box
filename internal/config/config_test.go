@@ -63,6 +63,9 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.Network.Envoy.Mode != "peek" {
 		t.Fatalf("envoy.mode = %q, want %q", got.Network.Envoy.Mode, "peek")
 	}
+	if got.GVisor.Platform != "ptrace" {
+		t.Fatalf("gvisor.platform = %q, want %q", got.GVisor.Platform, "ptrace")
+	}
 }
 
 func TestLoadResolvesWorkdirRelativeToInvocationDir(t *testing.T) {

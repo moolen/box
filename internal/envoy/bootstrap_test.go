@@ -26,9 +26,14 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"19053",
 		"ext_authz",
 		"dynamic_forward_proxy",
-		"http_service",
-		"path_prefix: /authorize/http",
-		"allowed_headers",
+		"grpc_service",
+		"envoy_grpc",
+		"cluster_name: ext_authz",
+		"transport_api_version: V3",
+		"http2_protocol_options: {}",
+		"upgrade_configs",
+		"upgrade_type: CONNECT",
+		"connect_config: {}",
 		"envoy.filters.http.dynamic_forward_proxy",
 		"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
 		"dns_cache_config",
@@ -42,8 +47,8 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 			t.Fatalf("bootstrap missing %q\ncontent=%s", want, content)
 		}
 	}
-	if strings.Contains(content, "grpc_service:") {
-		t.Fatalf("bootstrap unexpectedly still uses grpc ext_authz\ncontent=%s", content)
+	if strings.Contains(content, "http_service:") {
+		t.Fatalf("bootstrap unexpectedly still uses http ext_authz\ncontent=%s", content)
 	}
 	if strings.Contains(content, "resolution_timeout") {
 		t.Fatalf("bootstrap unexpectedly includes unsupported dns client_config.resolution_timeout\ncontent=%s", content)

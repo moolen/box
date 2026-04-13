@@ -157,14 +157,14 @@ func TestBuildPlanStagesTrustedCACertWhenRequested(t *testing.T) {
 	plan, err := BuildPlan(PlanRequest{
 		RootfsMode:        "host-overlay",
 		TrustedCACertPEM:  "-----BEGIN CERTIFICATE-----\nbox\n-----END CERTIFICATE-----\n",
-		TrustedCACertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+		TrustedCACertPath: TrustedCABundlePath,
 	})
 	if err != nil {
 		t.Fatalf("BuildPlan() error: %v", err)
 	}
 
 	for _, file := range plan.GeneratedFiles {
-		if file.Path != "/etc/ssl/certs/box-runtime-ca.pem" {
+		if file.Path != TrustedCABundlePath {
 			continue
 		}
 		if file.Content != "-----BEGIN CERTIFICATE-----\nbox\n-----END CERTIFICATE-----\n" {
@@ -177,6 +177,32 @@ func TestBuildPlanStagesTrustedCACertWhenRequested(t *testing.T) {
 	}
 
 	t.Fatalf("trusted CA file missing from plan: %#v", plan.GeneratedFiles)
+}
+
+func TestBuildPlanStagesRuntimeAndTrustedCACertsWhenBothProvided(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:        "host-overlay",
+		RuntimeCACertPEM:  "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n",
+		TrustedCACertPEM:  "-----BEGIN CERTIFICATE-----\ntrusted\n-----END CERTIFICATE-----\n",
+		TrustedCACertPath: TrustedCABundlePath,
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	var sawRuntime bool
+	var sawTrusted bool
+	for _, file := range plan.GeneratedFiles {
+		switch file.Path {
+		case RuntimeCACertPath:
+			sawRuntime = strings.Contains(file.Content, "runtime")
+		case TrustedCABundlePath:
+			sawTrusted = strings.Contains(file.Content, "trusted")
+		}
+	}
+	if !sawRuntime || !sawTrusted {
+		t.Fatalf("generated files = %#v, want runtime CA and trusted bundle", plan.GeneratedFiles)
+	}
 }
 
 func TestResolveInitShimCopiesSiblingBinaryIntoBundle(t *testing.T) {

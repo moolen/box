@@ -8,7 +8,10 @@ import (
 	"net/netip"
 	"testing"
 
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	authv3 "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"github.com/miekg/dns"
+	"google.golang.org/grpc/codes"
 
 	"gvisor-net/internal/config"
 )
@@ -188,6 +191,109 @@ func TestHandlerAuthorizeHTTPAcceptsOriginalRequestPathFallback(t *testing.T) {
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusOK, resp.Body.String())
+	}
+}
+
+func TestHandlerAuthorizeHTTPAllowsCONNECTAuthorityRequest(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodConnect, "example.com:443", nil)
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	resp := httptest.NewRecorder()
+	svc.Handler().ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%q", resp.Code, http.StatusOK, resp.Body.String())
+	}
+}
+
+func TestCheckGRPCAllowsCONNECTAuthorityRequest(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "93.184.216.34",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 443,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodConnect,
+					Host:   "example.com:443",
+					Scheme: "http",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v", got, codes.OK)
+	}
+	if resp.GetOkResponse() == nil {
+		t.Fatalf("ok response = nil, want allow response")
+	}
+}
+
+func TestCheckGRPCPrefersAuthorityPortOverProxyListenerPort(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "127.0.0.1",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 19001,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodConnect,
+					Host:   "example.com:443",
+					Scheme: "http",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v", got, codes.OK)
 	}
 }
 

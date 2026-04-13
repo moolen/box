@@ -11,13 +11,16 @@ func TestEnforceModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 		TableName:       "box_deadbeef",
 		HostVeth:        "vethhdeadbeef",
 		SubnetCIDR:      "100.96.0.0/30",
+		GatewayIP:       "100.96.0.1",
 		DNSPort:         15353,
+		ExplicitPort:    18080,
 		TransparentPort: 19001,
 	})
 	if err != nil {
 		t.Fatalf("BuildEnforcePlan() error: %v", err)
 	}
 
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr 100.96.0.1 meta l4proto tcp tcp dport 18080 return")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp udp dport 53 redirect to :15353")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp drop")
@@ -26,19 +29,22 @@ func TestEnforceModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 
 func TestMonitorModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 	plan, err := BuildMonitorPlan(MonitorPlanInput{
-		TableName:  "box_deadbeef",
-		HostVeth:   "vethhdeadbeef",
-		SubnetCIDR: "100.96.0.0/30",
-		DNSPort:    53,
-		ProxyPort:  18080,
-		FWMark:     0x101,
+		TableName:    "box_deadbeef",
+		HostVeth:     "vethhdeadbeef",
+		SubnetCIDR:   "100.96.0.0/30",
+		DNSPort:      53,
+		GatewayIP:    "100.96.0.1",
+		ExplicitPort: 18080,
+		ProxyPort:    19001,
+		FWMark:       0x101,
 	})
 	if err != nil {
 		t.Fatalf("BuildMonitorPlan() error: %v", err)
 	}
 
 	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef prerouting_envoy")
-	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto tcp redirect to :18080")
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr 100.96.0.1 meta l4proto tcp tcp dport 18080 return")
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef prerouting_envoy iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp udp dport 53 redirect to :53")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward ct state established,related accept")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp drop")

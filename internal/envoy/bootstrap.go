@@ -38,8 +38,6 @@ func RenderBootstrap(cfg BootstrapConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	authzURI := "http://" + net.JoinHostPort(host, port)
-
 	return fmt.Sprintf(`node:
   id: %s
 static_resources:
@@ -59,29 +57,29 @@ static_resources:
                   name: explicit_proxy_routes
                   virtual_hosts:
                     - name: explicit_proxy
-                      domains: ["*"]
+                      domains: ["*", "*:*"]
                       routes:
+                        - match:
+                            connect_matcher: {}
+                          route:
+                            cluster: dynamic_forward_proxy
+                            upgrade_configs:
+                              - upgrade_type: CONNECT
+                                connect_config: {}
                         - match: { prefix: "/" }
                           route:
                             cluster: dynamic_forward_proxy
+                upgrade_configs:
+                  - upgrade_type: CONNECT
                 http_filters:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-                      http_service:
-                        server_uri:
-                          uri: %s
-                          cluster: ext_authz
-                          timeout: 0.25s
-                        path_prefix: /authorize/http
-                        authorization_request:
-                          allowed_headers:
-                            patterns:
-                              - exact: host
-                              - exact: path
-                              - exact: x-forwarded-proto
-                              - exact: x-forwarded-host
-                              - exact: x-envoy-original-dst-host
+                      transport_api_version: V3
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: ext_authz
+                        timeout: 0.25s
                   - name: envoy.filters.http.dynamic_forward_proxy
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -115,20 +113,11 @@ static_resources:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
-                      http_service:
-                        server_uri:
-                          uri: %s
-                          cluster: ext_authz
-                          timeout: 0.25s
-                        path_prefix: /authorize/http
-                        authorization_request:
-                          allowed_headers:
-                            patterns:
-                              - exact: host
-                              - exact: path
-                              - exact: x-forwarded-proto
-                              - exact: x-forwarded-host
-                              - exact: x-envoy-original-dst-host
+                      transport_api_version: V3
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: ext_authz
+                        timeout: 0.25s
                   - name: envoy.filters.http.dynamic_forward_proxy
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -160,6 +149,7 @@ static_resources:
   clusters:
     - name: ext_authz
       type: STATIC
+      http2_protocol_options: {}
       load_assignment:
         cluster_name: ext_authz
         endpoints:
@@ -184,7 +174,7 @@ admin:
     socket_address:
       address: 127.0.0.1
       port_value: 0
-`, cfg.NodeID, cfg.ExplicitPort, authzURI, cfg.TransparentPort, authzURI, cfg.DNSPort, dnsResolvers, host, authzPort), nil
+`, cfg.NodeID, cfg.ExplicitPort, cfg.TransparentPort, cfg.DNSPort, dnsResolvers, host, authzPort), nil
 }
 
 func renderDNSResolvers(upstreams []string) (string, error) {

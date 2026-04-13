@@ -162,7 +162,7 @@ mounts:
   extra_ro: []
   extra_rw: []
 gvisor:
-  platform: systrap
+  platform: ptrace
   network: sandbox
   debug: false
 `, subnet, policySection)
@@ -272,7 +272,7 @@ mounts:
     - %s
   extra_rw: []
 gvisor:
-  platform: systrap
+  platform: ptrace
   network: sandbox
   debug: false
 `, hostPath, subnet, hostBinDir)

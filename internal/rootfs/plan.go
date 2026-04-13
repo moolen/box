@@ -14,7 +14,10 @@ var (
 	writableRuntimeDirs   = []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache"}
 )
 
-const RuntimeCACertPath = "/etc/box/ca-certificates/runtime-ca.crt"
+const (
+	RuntimeCACertPath    = "/etc/box/ca-certificates/runtime-ca.crt"
+	TrustedCABundlePath  = "/etc/box/ca-certificates/trust-bundle.crt"
+)
 
 type PlanRequest struct {
 	RootfsMode        string
@@ -148,19 +151,20 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 	}
 	trustedPEM := req.TrustedCACertPEM
 	trustedPath := strings.TrimSpace(req.TrustedCACertPath)
+	if strings.TrimSpace(req.RuntimeCACertPEM) != "" {
+		files = append(files, GeneratedFile{
+			Path:    RuntimeCACertPath,
+			Content: req.RuntimeCACertPEM,
+			Mode:    0o644,
+		})
+	}
 	if strings.TrimSpace(trustedPEM) != "" {
 		if trustedPath == "" {
-			trustedPath = RuntimeCACertPath
+			trustedPath = TrustedCABundlePath
 		}
 		files = append(files, GeneratedFile{
 			Path:    trustedPath,
 			Content: trustedPEM,
-			Mode:    0o644,
-		})
-	} else if strings.TrimSpace(req.RuntimeCACertPEM) != "" {
-		files = append(files, GeneratedFile{
-			Path:    RuntimeCACertPath,
-			Content: req.RuntimeCACertPEM,
 			Mode:    0o644,
 		})
 	}

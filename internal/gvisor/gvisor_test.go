@@ -233,7 +233,7 @@ func TestBuildSandboxSpecInjectsRuntimeProxyAndCAEnv(t *testing.T) {
 				ExplicitPort: 19001,
 			},
 			CA: boxruntime.CARuntime{
-				SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+				SandboxCertPath: rootfs.TrustedCABundlePath,
 			},
 		},
 	})
@@ -260,7 +260,7 @@ func TestBuildSandboxSpecInjectsRuntimeProxyAndCAEnv(t *testing.T) {
 		t.Fatalf("no_proxy = %q, want lowercase localhost bypass list", value)
 	}
 	for _, key := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
-		if value := envValue(spec.Process.Env, key); value != "/etc/ssl/certs/box-runtime-ca.pem" {
+		if value := envValue(spec.Process.Env, key); value != rootfs.TrustedCABundlePath {
 			t.Fatalf("%s = %q, want runtime manifest CA path", key, value)
 		}
 	}
@@ -325,6 +325,27 @@ func TestRunnerInvokesRunscWithExpectedArgs(t *testing.T) {
 		t.Fatalf("command name = %q, want %q", fake.name, "runsc")
 	}
 	wantArgs := []string{"--ignore-cgroups", "run", "--bundle", "/tmp/box-bundle", "box-123"}
+	if !reflect.DeepEqual(fake.args, wantArgs) {
+		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
+	}
+}
+
+func TestRunnerIncludesConfiguredPlatformFlag(t *testing.T) {
+	fake := &fakeCommandRunner{}
+	runner := Runner{
+		Command: fake,
+	}
+
+	err := runner.Run(RunRequest{
+		BundleDir:   "/tmp/box-bundle",
+		ContainerID: "box-123",
+		Platform:    "ptrace",
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	wantArgs := []string{"--platform=ptrace", "--ignore-cgroups", "run", "--bundle", "/tmp/box-bundle", "box-123"}
 	if !reflect.DeepEqual(fake.args, wantArgs) {
 		t.Fatalf("command args = %#v, want %#v", fake.args, wantArgs)
 	}

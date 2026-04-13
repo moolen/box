@@ -74,7 +74,7 @@ mounts:
 
 gvisor:
   # gVisor platform passed to `runsc`.
-  platform: systrap
+  platform: ptrace
 
   # gVisor networking mode. Keep `sandbox` for the current host-managed netns path.
   network: sandbox
