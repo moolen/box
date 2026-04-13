@@ -513,6 +513,71 @@ func TestBoxMonitorModeAllowsHTTPTrafficButLogsWouldBlockVerdict(t *testing.T) {
 	}
 }
 
+func TestBoxMonitorModeAllowsHTTPSTrafficButLogsWouldBlockVerdict(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteMonitorConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "allowed.example",
+			Ports:    []int{443},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-sS", "https://example.com/",
+	)
+	if err != nil {
+		t.Fatalf("monitor mode should allow blocked-policy https traffic; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("monitor mode https curl output = %q, want Example Domain response body", stdout)
+	}
+	if !strings.Contains(stderr, "Monitor summary") {
+		t.Fatalf("stderr missing monitor summary: %q", stderr)
+	}
+	if !strings.Contains(stderr, "WOULD_BLOCK") {
+		t.Fatalf("stderr missing would_block verdicts: %q", stderr)
+	}
+}
+
+func TestBoxMonitorModeAllowsTransparentHTTPSTrafficButLogsWouldBlockVerdict(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteMonitorConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "allowed.example",
+			Ports:    []int{443},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"curl", "-sS", "https://example.com/",
+	)
+	if err != nil {
+		t.Fatalf("monitor mode should allow blocked-policy transparent https traffic; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("monitor mode transparent https curl output = %q, want Example Domain response body", stdout)
+	}
+	if !strings.Contains(stderr, "Monitor summary") {
+		t.Fatalf("stderr missing monitor summary: %q", stderr)
+	}
+	if !strings.Contains(stderr, "WOULD_BLOCK") {
+		t.Fatalf("stderr missing would_block verdicts: %q", stderr)
+	}
+}
+
 func runBoxSmoke(t *testing.T, payload ...string) string {
 	t.Helper()
 

@@ -97,3 +97,40 @@ func TestRenderBootstrapRejectsInvalidAuthzAddress(t *testing.T) {
 		t.Fatal("RenderBootstrap() error = nil, want invalid authz address rejection")
 	}
 }
+
+func TestRenderBootstrapAddsMonitorTransparentTLSPassthroughFallback(t *testing.T) {
+	cfg := BootstrapConfig{
+		NodeID:          "runtime-a",
+		ExplicitPort:    19001,
+		TransparentPort: 19002,
+		DNSPort:         19053,
+		DNSUpstream:     []string{"1.1.1.1:53"},
+		AuthzAddress:    "127.0.0.1:20001",
+		TransparentTLSCertificates: []TLSCertificate{
+			{
+				ServerNames: []string{"example.com"},
+				CertPath:    "/run/box/runtime-a/envoy/example.com.crt",
+				KeyPath:     "/run/box/runtime-a/envoy/example.com.key",
+			},
+		},
+		MonitorMode: true,
+	}
+
+	content, err := RenderBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderBootstrap() error = %v", err)
+	}
+
+	for _, want := range []string{
+		"envoy.filters.listener.original_dst",
+		"envoy.filters.network.ext_authz",
+		"include_tls_session: true",
+		"envoy.filters.network.tcp_proxy",
+		"cluster: original_destination",
+		"type: ORIGINAL_DST",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("bootstrap missing %q\ncontent=%s", want, content)
+		}
+	}
+}

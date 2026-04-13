@@ -15,12 +15,28 @@ import (
 var _ authv3.AuthorizationServer = (*Service)(nil)
 
 func (s *Service) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.CheckResponse, error) {
-	checkReq, err := httpCheckRequestFromGRPC(req)
+	if grpcHasHTTPAttributes(req) {
+		checkReq, err := httpCheckRequestFromGRPC(req)
+		if err != nil {
+			return deniedCheckResponse(err.Error()), nil
+		}
+
+		resp, err := s.CheckHTTP(ctx, checkReq)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Allowed {
+			return allowedCheckResponse(), nil
+		}
+		return deniedCheckResponse(resp.Decision.Reason), nil
+	}
+
+	checkReq, err := tcpCheckRequestFromGRPC(req)
 	if err != nil {
 		return deniedCheckResponse(err.Error()), nil
 	}
 
-	resp, err := s.CheckHTTP(ctx, checkReq)
+	resp, err := s.CheckTCP(ctx, checkReq)
 	if err != nil {
 		return nil, err
 	}
@@ -28,6 +44,17 @@ func (s *Service) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.
 		return allowedCheckResponse(), nil
 	}
 	return deniedCheckResponse(resp.Decision.Reason), nil
+}
+
+func grpcHasHTTPAttributes(req *authv3.CheckRequest) bool {
+	if req == nil {
+		return false
+	}
+	attrs := req.GetAttributes()
+	if attrs == nil || attrs.GetRequest() == nil {
+		return false
+	}
+	return attrs.GetRequest().GetHttp() != nil
 }
 
 func httpCheckRequestFromGRPC(req *authv3.CheckRequest) (HTTPCheckRequest, error) {
@@ -100,6 +127,29 @@ func inferGRPCProtocol(httpReq *authv3.AttributeContext_HttpRequest, authority s
 		return ProtocolHTTPS
 	}
 	return protocol
+}
+
+func tcpCheckRequestFromGRPC(req *authv3.CheckRequest) (TCPCheckRequest, error) {
+	if req == nil {
+		return TCPCheckRequest{}, errors.New("missing check request")
+	}
+	attrs := req.GetAttributes()
+	if attrs == nil {
+		return TCPCheckRequest{}, errors.New("missing request attributes")
+	}
+
+	dstIP, dstPort := parseGRPCDestination(attrs.GetDestination())
+	if dstPort == 0 {
+		dstPort = defaultPortForProtocol(ProtocolHTTPS)
+	}
+	sni := strings.TrimSpace(attrs.GetTlsSession().GetSni())
+	return TCPCheckRequest{
+		Protocol:        ProtocolHTTPS,
+		DestinationIP:   dstIP,
+		DestinationPort: dstPort,
+		SNI:             sni,
+		Authority:       sni,
+	}, nil
 }
 
 func parseGRPCDestination(peer *authv3.AttributeContext_Peer) (netip.Addr, int) {

@@ -84,6 +84,7 @@ type PolicyServiceStartRequest struct {
 
 type EnvoyStartRequest struct {
 	RuntimeID                  string
+	MonitorMode                bool
 	GatewayIP                  string
 	ExplicitPort               int
 	TransparentPort            int
@@ -429,6 +430,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
 			RuntimeID:                  rt.Manifest.RuntimeID,
+			MonitorMode:                strings.EqualFold(cfg.Network.Mode, "monitor"),
 			GatewayIP:                  rt.Manifest.GatewayIP,
 			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
 			TransparentPort:            rt.Manifest.Envoy.TransparentPort,
@@ -523,6 +525,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
 			RuntimeID:                  rt.Manifest.RuntimeID,
+			MonitorMode:                strings.EqualFold(cfg.Network.Mode, "monitor"),
 			GatewayIP:                  rt.Manifest.GatewayIP,
 			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
 			TransparentPort:            rt.Manifest.Envoy.TransparentPort,

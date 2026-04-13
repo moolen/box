@@ -255,6 +255,9 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	if envoyReq.DNSPort != rt.Manifest.Envoy.DNSPort {
 		t.Fatalf("Envoy request dns port = %d, want %d", envoyReq.DNSPort, rt.Manifest.Envoy.DNSPort)
 	}
+	if !envoyReq.MonitorMode {
+		t.Fatalf("Envoy request monitor mode = false, want true")
+	}
 	wantDNSUpstream, err := loopbackAddrForPort(policyReq.DNSListenAddr)
 	if err != nil {
 		t.Fatalf("loopbackAddrForPort(%q) error = %v", policyReq.DNSListenAddr, err)
@@ -1002,6 +1005,9 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
+	}
+	if envoyReq.MonitorMode {
+		t.Fatalf("Envoy request monitor mode = true, want false")
 	}
 	if len(envoyReq.TransparentTLSCertificates) != 2 {
 		t.Fatalf("Envoy request transparent tls certificates = %#v, want 2 hostname-backed certificates", envoyReq.TransparentTLSCertificates)

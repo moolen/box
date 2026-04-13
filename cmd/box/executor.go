@@ -235,13 +235,14 @@ func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (bo
 		return nil, err
 	}
 	bootstrapContent, err := ienvoy.RenderBootstrap(ienvoy.BootstrapConfig{
-		NodeID:                  req.RuntimeID,
-		ExplicitPort:            req.ExplicitPort,
-		TransparentPort:         req.TransparentPort,
-		DNSPort:                 req.DNSPort,
-		DNSUpstream:             append([]string(nil), req.DNSUpstream...),
-		AuthzAddress:            req.PolicyListenAddr,
-		UpstreamTrustBundlePath: req.UpstreamTrustBundlePath,
+		NodeID:                     req.RuntimeID,
+		MonitorMode:                req.MonitorMode,
+		ExplicitPort:               req.ExplicitPort,
+		TransparentPort:            req.TransparentPort,
+		DNSPort:                    req.DNSPort,
+		DNSUpstream:                append([]string(nil), req.DNSUpstream...),
+		AuthzAddress:               req.PolicyListenAddr,
+		UpstreamTrustBundlePath:    req.UpstreamTrustBundlePath,
 		TransparentTLSCertificates: mapTransparentTLSCertificates(req.TransparentTLSCertificates),
 	})
 	if err != nil {

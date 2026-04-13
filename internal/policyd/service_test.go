@@ -341,6 +341,58 @@ func TestCheckGRPCPrefersAuthorityPortOverProxyListenerPort(t *testing.T) {
 	}
 }
 
+func TestCheckGRPCObserveAllowsTLSNetworkAuthzAndEmitsWouldBlockTLSVerdict(t *testing.T) {
+	var events []Event
+	svc := NewService(ServiceConfig{
+		Mode: ModeObserve,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "allowed.example",
+			Ports:    []int{443},
+		}},
+		OnEvent: func(event Event) {
+			events = append(events, event)
+		},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "93.184.216.34",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 443,
+							},
+						},
+					},
+				},
+			},
+			TlsSession: &authv3.AttributeContext_TLSSession{
+				Sni: "example.com",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v", got, codes.OK)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want 1 event", events)
+	}
+	if events[0].Type != "tls" {
+		t.Fatalf("event type = %q, want tls", events[0].Type)
+	}
+	if events[0].Hostname != "example.com" {
+		t.Fatalf("event hostname = %q, want example.com", events[0].Hostname)
+	}
+	if events[0].Verdict != VerdictWouldBlock {
+		t.Fatalf("event verdict = %q, want would_block", events[0].Verdict)
+	}
+}
+
 func TestStartServesDNSPolicyEvaluatedQueries(t *testing.T) {
 	upstreamConn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

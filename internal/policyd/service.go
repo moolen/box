@@ -220,10 +220,16 @@ func (s *Service) CheckTCP(_ context.Context, req TCPCheckRequest) (TCPCheckResp
 		}, s.cfg.Rules, s.cfg.Mode)
 	}
 
+	eventType := "tcp"
+	if req.Protocol == ProtocolHTTPS {
+		eventType = "tls"
+	}
+	hostname := strings.TrimSpace(firstNonEmpty(req.SNI, req.Authority))
+
 	s.emit(Event{
-		Type:     "tcp",
+		Type:     eventType,
 		Protocol: string(req.Protocol),
-		Hostname: strings.TrimSpace(req.Authority),
+		Hostname: hostname,
 		Host:     req.Authority,
 		SNI:      req.SNI,
 		Verdict:  decision.Verdict,

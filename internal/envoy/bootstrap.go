@@ -3,12 +3,14 @@ package envoy
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
 type BootstrapConfig struct {
 	NodeID                     string
+	MonitorMode                bool
 	ExplicitPort               int
 	TransparentPort            int
 	DNSPort                    int
@@ -46,7 +48,12 @@ func RenderBootstrap(cfg BootstrapConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	transparentFilterChains, err := renderTransparentFilterChains(cfg.TransparentTLSCertificates)
+	transparentListenerFilters := renderTransparentListenerFilters(cfg.MonitorMode)
+	transparentFilterChains, err := renderTransparentFilterChains(cfg.TransparentTLSCertificates, cfg.MonitorMode)
+	if err != nil {
+		return "", err
+	}
+	explicitConnectRoutes, err := renderExplicitConnectRoutes(cfg.TransparentTLSCertificates, cfg.MonitorMode)
 	if err != nil {
 		return "", err
 	}
@@ -71,13 +78,7 @@ static_resources:
                     - name: explicit_proxy
                       domains: ["*", "*:*"]
                       routes:
-                        - match:
-                            connect_matcher: {}
-                          route:
-                            cluster: explicit_connect_mitm
-                            upgrade_configs:
-                              - upgrade_type: CONNECT
-                                connect_config: {}
+%s
                         - match: { prefix: "/" }
                           route:
                             cluster: dynamic_forward_proxy
@@ -107,9 +108,7 @@ static_resources:
           address: 0.0.0.0
           port_value: %d
       listener_filters:
-        - name: envoy.filters.listener.tls_inspector
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+%s
       filter_chains:
 %s
     - name: dns_listener
@@ -166,6 +165,7 @@ static_resources:
                     socket_address:
                       address: 127.0.0.1
                       port_value: %d
+%s
     - name: dynamic_forward_proxy_tls
       connect_timeout: 5s
       lb_policy: CLUSTER_PROVIDED
@@ -182,10 +182,10 @@ admin:
     socket_address:
       address: 127.0.0.1
       port_value: 0
-`, cfg.NodeID, cfg.ExplicitPort, cfg.TransparentPort, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, cfg.TransparentPort, renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
+`, cfg.NodeID, cfg.ExplicitPort, explicitConnectRoutes, cfg.TransparentPort, transparentListenerFilters, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, cfg.TransparentPort, renderAdditionalClusters(cfg.MonitorMode), renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
 }
 
-func renderTransparentFilterChains(certs []TLSCertificate) (string, error) {
+func renderTransparentFilterChains(certs []TLSCertificate, monitorMode bool) (string, error) {
 	lines := make([]string, 0, len(certs)*24+24)
 	for _, cert := range certs {
 		if len(cert.ServerNames) == 0 {
@@ -217,11 +217,133 @@ func renderTransparentFilterChains(certs []TLSCertificate) (string, error) {
 		)
 		lines = append(lines, renderTransparentHCMFilterChain("transparent_proxy_tls", "dynamic_forward_proxy_tls")...)
 	}
+	if monitorMode {
+		lines = append(lines, renderTransparentTLSPassthroughFilterChain()...)
+	}
 	lines = append(lines,
 		"        - filters:",
 	)
 	lines = append(lines, renderTransparentHCMFilterChain("transparent_proxy", "dynamic_forward_proxy")...)
 	return strings.Join(lines, "\n"), nil
+}
+
+func renderTransparentListenerFilters(monitorMode bool) string {
+	lines := make([]string, 0, 6)
+	if monitorMode {
+		lines = append(lines,
+			"        - name: envoy.filters.listener.original_dst",
+			"          typed_config:",
+			"            \"@type\": type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst",
+		)
+	}
+	lines = append(lines,
+		"        - name: envoy.filters.listener.tls_inspector",
+		"          typed_config:",
+		"            \"@type\": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func renderTransparentTLSPassthroughFilterChain() []string {
+	return []string{
+		"        - filter_chain_match:",
+		"            transport_protocol: tls",
+		"          filters:",
+		"            - name: envoy.filters.network.ext_authz",
+		"              typed_config:",
+		"                \"@type\": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz",
+		"                stat_prefix: transparent_proxy_tls_passthrough",
+		"                transport_api_version: V3",
+		"                include_tls_session: true",
+		"                grpc_service:",
+		"                  envoy_grpc:",
+		"                    cluster_name: ext_authz",
+		"                  timeout: 0.25s",
+		"            - name: envoy.filters.network.tcp_proxy",
+		"              typed_config:",
+		"                \"@type\": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
+		"                stat_prefix: transparent_proxy_tls_passthrough",
+		"                cluster: original_destination",
+	}
+}
+
+func renderExplicitConnectRoutes(certs []TLSCertificate, monitorMode bool) (string, error) {
+	lines := make([]string, 0, len(certs)*12+12)
+	if monitorMode {
+		for _, cert := range certs {
+			for _, serverName := range cert.ServerNames {
+				regex, err := connectAuthorityRegex(serverName)
+				if err != nil {
+					return "", err
+				}
+				lines = append(lines,
+					"                        - match:",
+					"                            connect_matcher: {}",
+					"                            headers:",
+					"                              - name: \":authority\"",
+					"                                string_match:",
+					"                                  safe_regex:",
+					"                                    google_re2: {}",
+					"                                    regex: "+strconv.Quote(regex),
+					"                          route:",
+					"                            cluster: explicit_connect_mitm",
+					"                            upgrade_configs:",
+					"                              - upgrade_type: CONNECT",
+					"                                connect_config: {}",
+				)
+			}
+		}
+		lines = append(lines,
+			"                        - match:",
+			"                            connect_matcher: {}",
+			"                          route:",
+			"                            cluster: dynamic_forward_proxy",
+			"                            upgrade_configs:",
+			"                              - upgrade_type: CONNECT",
+			"                                connect_config: {}",
+		)
+		return strings.Join(lines, "\n"), nil
+	}
+
+	lines = append(lines,
+		"                        - match:",
+		"                            connect_matcher: {}",
+		"                          route:",
+		"                            cluster: explicit_connect_mitm",
+		"                            upgrade_configs:",
+		"                              - upgrade_type: CONNECT",
+		"                                connect_config: {}",
+	)
+	return strings.Join(lines, "\n"), nil
+}
+
+func connectAuthorityRegex(serverName string) (string, error) {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(serverName), "."))
+	if host == "" {
+		return "", fmt.Errorf("transparent tls certificate server name is required")
+	}
+	if strings.Contains(host, "*") {
+		if strings.HasPrefix(host, "*.") && strings.Count(host, "*") == 1 {
+			suffix := regexp.QuoteMeta(strings.TrimPrefix(host, "*."))
+			if suffix == "" {
+				return "", fmt.Errorf("invalid wildcard server name %q", serverName)
+			}
+			return "(?i)^[^.]+(?:\\.[^.]+)*\\." + suffix + "(?::\\d+)?$", nil
+		}
+		return "", fmt.Errorf("unsupported wildcard server name %q", serverName)
+	}
+	return "(?i)^" + regexp.QuoteMeta(host) + "(?::\\d+)?$", nil
+}
+
+func renderAdditionalClusters(monitorMode bool) string {
+	if !monitorMode {
+		return ""
+	}
+	return `
+    - name: original_destination
+      connect_timeout: 5s
+      type: ORIGINAL_DST
+      lb_policy: CLUSTER_PROVIDED`
 }
 
 func renderTransparentHCMFilterChain(statPrefix, cluster string) []string {
