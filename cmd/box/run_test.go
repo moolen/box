@@ -212,7 +212,10 @@ func TestSandboxProxyEnvIncludesProxyVariablesInMonitorMode(t *testing.T) {
 	for _, want := range []string{
 		"HTTP_PROXY=http://100.96.0.1:19001",
 		"HTTPS_PROXY=http://100.96.0.1:19001",
+		"http_proxy=http://100.96.0.1:19001",
+		"https_proxy=http://100.96.0.1:19001",
 		"NO_PROXY=127.0.0.1,localhost",
+		"no_proxy=127.0.0.1,localhost",
 		"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
 		"CURL_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
 		"REQUESTS_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
@@ -295,7 +298,10 @@ func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T
 			for _, want := range []string{
 				"HTTP_PROXY=http://100.96.0.1:19001",
 				"HTTPS_PROXY=http://100.96.0.1:19001",
+				"http_proxy=http://100.96.0.1:19001",
+				"https_proxy=http://100.96.0.1:19001",
 				"NO_PROXY=127.0.0.1,localhost",
+				"no_proxy=127.0.0.1,localhost",
 				"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
 			} {
 				if !containsString(spec.Process.Env, want) {

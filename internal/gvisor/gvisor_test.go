@@ -185,7 +185,10 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 		ExtraEnv: []string{
 			"HTTP_PROXY=http://100.96.0.1:18080",
 			"HTTPS_PROXY=http://100.96.0.1:18080",
+			"http_proxy=http://100.96.0.1:18080",
+			"https_proxy=http://100.96.0.1:18080",
 			"NO_PROXY=127.0.0.1,localhost",
+			"no_proxy=127.0.0.1,localhost",
 		},
 	})
 	if err != nil {
@@ -198,8 +201,17 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:18080" {
 		t.Fatalf("HTTPS_PROXY = %q, want host proxy URL", value)
 	}
+	if value := envValue(spec.Process.Env, "http_proxy"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("http_proxy = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "https_proxy"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("https_proxy = %q, want host proxy URL", value)
+	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
+	}
+	if value := envValue(spec.Process.Env, "no_proxy"); value != "127.0.0.1,localhost" {
+		t.Fatalf("no_proxy = %q, want lowercase localhost bypass list", value)
 	}
 }
 
@@ -235,8 +247,17 @@ func TestBuildSandboxSpecInjectsRuntimeProxyAndCAEnv(t *testing.T) {
 	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:19001" {
 		t.Fatalf("HTTPS_PROXY = %q, want runtime manifest proxy URL", value)
 	}
+	if value := envValue(spec.Process.Env, "http_proxy"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("http_proxy = %q, want lowercase runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "https_proxy"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("https_proxy = %q, want lowercase runtime manifest proxy URL", value)
+	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
+	}
+	if value := envValue(spec.Process.Env, "no_proxy"); value != "127.0.0.1,localhost" {
+		t.Fatalf("no_proxy = %q, want lowercase localhost bypass list", value)
 	}
 	for _, key := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
 		if value := envValue(spec.Process.Env, key); value != "/etc/ssl/certs/box-runtime-ca.pem" {

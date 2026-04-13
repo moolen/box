@@ -25,6 +25,9 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"19053",
 		"ext_authz",
 		"dynamic_forward_proxy",
+		"envoy.filters.http.dynamic_forward_proxy",
+		"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
+		"dns_cache_config",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("bootstrap missing %q\ncontent=%s", want, content)

@@ -128,7 +128,10 @@ func runtimeManifestEnv(manifest boxruntime.Manifest) []string {
 		env = append(env,
 			"HTTP_PROXY="+proxy,
 			"HTTPS_PROXY="+proxy,
+			"http_proxy="+proxy,
+			"https_proxy="+proxy,
 			"NO_PROXY=127.0.0.1,localhost",
+			"no_proxy=127.0.0.1,localhost",
 		)
 	}
 	if strings.TrimSpace(manifest.CA.SandboxCertPath) != "" {
