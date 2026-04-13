@@ -3,6 +3,7 @@ package firewall
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -26,6 +27,9 @@ type EnforcePlanInput struct {
 	SubnetCIDR      string
 	DNSPort         int
 	TransparentPort int
+	// ExtraAllowedCIDRs is a temporary compatibility shim for older callers.
+	// It is intentionally ignored: enforce mode no longer renders allowsets.
+	ExtraAllowedCIDRs []string
 }
 
 type EnforcePlan struct {
@@ -50,13 +54,13 @@ func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
 	}
 
 	dnsRule := fmt.Sprintf(
-		"iifname %s ip saddr %s udp dport 53 redirect to :%d",
+		"iifname %s ip saddr %s meta l4proto udp udp dport 53 redirect to :%d",
 		in.HostVeth,
 		in.SubnetCIDR,
 		in.DNSPort,
 	)
-	httpRedirectRule := fmt.Sprintf(
-		"iifname %s ip saddr %s tcp dport 80 redirect to :%d",
+	tcpRedirectRule := fmt.Sprintf(
+		"iifname %s ip saddr %s meta l4proto tcp redirect to :%d",
 		in.HostVeth,
 		in.SubnetCIDR,
 		in.ProxyPort,
@@ -65,14 +69,19 @@ func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
 	return MonitorPlan{
 		Rules: []string{
 			dnsRule,
-			httpRedirectRule,
+			tcpRedirectRule,
 		},
 		Commands: []string{
 			fmt.Sprintf("nft add table inet %s", in.TableName),
-			fmt.Sprintf("nft add chain inet %s prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
-			fmt.Sprintf("nft add chain inet %s prerouting_http { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
-			fmt.Sprintf("nft add rule inet %s prerouting_dns %s", in.TableName, dnsRule),
-			fmt.Sprintf("nft add rule inet %s prerouting_http %s", in.TableName, httpRedirectRule),
+			fmt.Sprintf("nft add chain inet %s prerouting_envoy { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
+			fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
+			fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
+			fmt.Sprintf("nft add rule inet %s prerouting_envoy %s", in.TableName, dnsRule),
+			fmt.Sprintf("nft add rule inet %s prerouting_envoy %s", in.TableName, tcpRedirectRule),
+			fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
+			fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
+			fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
+			fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 		},
 	}, nil
 }
@@ -87,8 +96,8 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 	if strings.TrimSpace(in.SubnetCIDR) == "" {
 		return EnforcePlan{}, errors.New("subnet cidr is required")
 	}
-	if in.DNSPort <= 0 || in.TransparentPort <= 0 {
-		return EnforcePlan{}, errors.New("dns and transparent ports must be positive")
+	if in.DNSPort <= 0 {
+		return EnforcePlan{}, errors.New("dns port must be positive")
 	}
 
 	commands := []string{
@@ -97,12 +106,35 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add rule inet %s prerouting_envoy iifname %s ip saddr %s meta l4proto udp udp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
-		fmt.Sprintf("nft add rule inet %s prerouting_envoy iifname %s ip saddr %s meta l4proto tcp redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.TransparentPort),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 	}
 
+	// Temporary compatibility: older callers don't know the Envoy transparent listener port yet.
+	// Once callers migrate (Task 4), TransparentPort should always be set and this branch can be removed.
+	if in.TransparentPort > 0 {
+		commands = append(commands,
+			fmt.Sprintf("nft add rule inet %s prerouting_envoy iifname %s ip saddr %s meta l4proto tcp redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.TransparentPort),
+		)
+	}
+
 	return EnforcePlan{Commands: commands}, nil
+}
+
+// BuildEnforceAllowIPCommand is a temporary compatibility shim for older callers.
+// Enforce mode no longer renders per-IP allowsets; callers treat an empty command as a no-op.
+func BuildEnforceAllowIPCommand(tableName, rawIP string) (string, error) {
+	if strings.TrimSpace(tableName) == "" {
+		return "", errors.New("table name is required")
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
+	if err != nil {
+		return "", fmt.Errorf("parse ip %q: %w", rawIP, err)
+	}
+	if !addr.Is4() {
+		return "", fmt.Errorf("ip %q must be ipv4", rawIP)
+	}
+	return "", nil
 }
