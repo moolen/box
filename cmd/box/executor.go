@@ -215,7 +215,7 @@ func startPolicyService(ctx context.Context, req boxruntime.PolicyServiceStartRe
 	if strings.EqualFold(strings.TrimSpace(req.Mode), "monitor") {
 		mode = policyd.ModeObserve
 	}
-	return policyd.Start(ctx, req.ListenAddr, req.DNSListenAddr, policyd.NewService(policyd.ServiceConfig{
+	return policyd.Start(ctx, req.ListenAddr, req.DNSListenAddr, req.ProxyListenAddr, req.ProxyUpstreamAddr, policyd.NewService(policyd.ServiceConfig{
 		Mode:        mode,
 		Rules:       append([]config.NetworkPolicyRule(nil), req.Rules...),
 		DNSUpstream: append([]string(nil), req.DNSUpstream...),
@@ -237,7 +237,7 @@ func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (bo
 	bootstrapContent, err := ienvoy.RenderBootstrap(ienvoy.BootstrapConfig{
 		NodeID:                     req.RuntimeID,
 		MonitorMode:                req.MonitorMode,
-		ExplicitPort:               req.ExplicitPort,
+		ExplicitPort:               req.InternalExplicitPort,
 		TransparentPort:            req.TransparentPort,
 		DNSPort:                    req.DNSPort,
 		DNSUpstream:                append([]string(nil), req.DNSUpstream...),

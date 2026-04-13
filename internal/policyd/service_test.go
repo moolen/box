@@ -341,6 +341,50 @@ func TestCheckGRPCPrefersAuthorityPortOverProxyListenerPort(t *testing.T) {
 	}
 }
 
+func TestCheckGRPCUsesOriginalTargetHeadersForExplicitWebSocketCIDRRule(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			CIDR:  "203.0.113.7/32",
+			Ports: []int{8443},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "127.0.0.1",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 19001,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodGet,
+					Host:   "127.0.0.1:19001",
+					Path:   "/chat",
+					Headers: map[string]string{
+						"x-box-original-target":    "ws://203.0.113.7:8443/chat",
+						"x-box-original-authority": "203.0.113.7:8443",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v; denied=%#v", got, codes.OK, resp.GetDeniedResponse())
+	}
+}
+
 func TestCheckGRPCObserveAllowsTLSNetworkAuthzAndEmitsWouldBlockTLSVerdict(t *testing.T) {
 	var events []Event
 	svc := NewService(ServiceConfig{
@@ -442,7 +486,7 @@ func TestStartServesDNSPolicyEvaluatedQueries(t *testing.T) {
 		t.Fatalf("dnsConn.Close() error = %v", err)
 	}
 
-	server, err := Start(context.Background(), httpAddr, dnsAddr, NewService(ServiceConfig{
+	server, err := Start(context.Background(), httpAddr, dnsAddr, "", "", NewService(ServiceConfig{
 		Mode: ModeEnforce,
 		Rules: []config.NetworkPolicyRule{{
 			Hostname: "example.com",

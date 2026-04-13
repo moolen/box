@@ -134,3 +134,42 @@ func TestRenderBootstrapAddsMonitorTransparentTLSPassthroughFallback(t *testing.
 		}
 	}
 }
+
+func TestRenderBootstrapEnablesWebSocketUpgradesAcrossHTTPManagers(t *testing.T) {
+	cfg := BootstrapConfig{
+		NodeID:          "runtime-a",
+		ExplicitPort:    19001,
+		TransparentPort: 19002,
+		DNSPort:         19053,
+		DNSUpstream:     []string{"1.1.1.1:53"},
+		AuthzAddress:    "127.0.0.1:20001",
+		TransparentTLSCertificates: []TLSCertificate{
+			{
+				ServerNames: []string{"example.com"},
+				CertPath:    "/run/box/runtime-a/envoy/example.com.crt",
+				KeyPath:     "/run/box/runtime-a/envoy/example.com.key",
+			},
+		},
+	}
+
+	content, err := RenderBootstrap(cfg)
+	if err != nil {
+		t.Fatalf("RenderBootstrap() error = %v", err)
+	}
+
+	if got := strings.Count(content, "upgrade_type: websocket"); got < 3 {
+		t.Fatalf("websocket upgrade count = %d, want at least 3\ncontent=%s", got, content)
+	}
+	for _, want := range []string{
+		`regex: "(?i)^ws://"`,
+		`cluster: dynamic_forward_proxy`,
+		`regex: "(?i)^wss://"`,
+		`cluster: dynamic_forward_proxy_tls`,
+		"scheme_header_transformation:",
+		"scheme_to_overwrite: http",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("bootstrap missing %q\ncontent=%s", want, content)
+		}
+	}
+}

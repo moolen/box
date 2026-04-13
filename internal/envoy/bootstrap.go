@@ -53,7 +53,7 @@ func RenderBootstrap(cfg BootstrapConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	explicitConnectRoutes, err := renderExplicitConnectRoutes(cfg.TransparentTLSCertificates, cfg.MonitorMode)
+	explicitProxyRoutes, err := renderExplicitProxyRoutes(cfg.TransparentTLSCertificates, cfg.MonitorMode)
 	if err != nil {
 		return "", err
 	}
@@ -64,7 +64,7 @@ static_resources:
     - name: explicit_proxy
       address:
         socket_address:
-          address: 0.0.0.0
+          address: 127.0.0.1
           port_value: %d
       filter_chains:
         - filters:
@@ -72,6 +72,8 @@ static_resources:
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: explicit_proxy
+                scheme_header_transformation:
+                  scheme_to_overwrite: http
                 route_config:
                   name: explicit_proxy_routes
                   virtual_hosts:
@@ -83,7 +85,7 @@ static_resources:
                           route:
                             cluster: dynamic_forward_proxy
                 upgrade_configs:
-                  - upgrade_type: CONNECT
+%s
                 http_filters:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
@@ -182,7 +184,7 @@ admin:
     socket_address:
       address: 127.0.0.1
       port_value: 0
-`, cfg.NodeID, cfg.ExplicitPort, explicitConnectRoutes, cfg.TransparentPort, transparentListenerFilters, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, cfg.TransparentPort, renderAdditionalClusters(cfg.MonitorMode), renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
+`, cfg.NodeID, cfg.ExplicitPort, explicitProxyRoutes, renderHCMUpgradeConfigs(true), cfg.TransparentPort, transparentListenerFilters, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, cfg.TransparentPort, renderAdditionalClusters(cfg.MonitorMode), renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
 }
 
 func renderTransparentFilterChains(certs []TLSCertificate, monitorMode bool) (string, error) {
@@ -267,8 +269,48 @@ func renderTransparentTLSPassthroughFilterChain() []string {
 	}
 }
 
-func renderExplicitConnectRoutes(certs []TLSCertificate, monitorMode bool) (string, error) {
-	lines := make([]string, 0, len(certs)*12+12)
+func renderExplicitProxyRoutes(certs []TLSCertificate, monitorMode bool) (string, error) {
+	lines := make([]string, 0, len(certs)*12+28)
+	lines = append(lines,
+		"                        - match:",
+		"                            safe_regex:",
+		"                              google_re2: {}",
+		"                              regex: \"(?i)^http://\"",
+		"                          route:",
+		"                            cluster: dynamic_forward_proxy",
+		"                        - match:",
+		"                            safe_regex:",
+		"                              google_re2: {}",
+		"                              regex: \"(?i)^https://\"",
+		"                          route:",
+		"                            cluster: dynamic_forward_proxy_tls",
+		"                        - match:",
+		"                            safe_regex:",
+		"                              google_re2: {}",
+		"                              regex: \"(?i)^ws://\"",
+		"                          route:",
+		"                            cluster: dynamic_forward_proxy",
+		"                            regex_rewrite:",
+		"                              pattern:",
+		"                                google_re2: {}",
+		"                                regex: \"(?i)^ws://(.*)$\"",
+		"                              substitution: \"http://\\\\1\"",
+		"                            upgrade_configs:",
+		"                              - upgrade_type: websocket",
+		"                        - match:",
+		"                            safe_regex:",
+		"                              google_re2: {}",
+		"                              regex: \"(?i)^wss://\"",
+		"                          route:",
+		"                            cluster: dynamic_forward_proxy_tls",
+		"                            regex_rewrite:",
+		"                              pattern:",
+		"                                google_re2: {}",
+		"                                regex: \"(?i)^wss://(.*)$\"",
+		"                              substitution: \"https://\\\\1\"",
+		"                            upgrade_configs:",
+		"                              - upgrade_type: websocket",
+	)
 	if monitorMode {
 		for _, cert := range certs {
 			for _, serverName := range cert.ServerNames {
@@ -361,6 +403,8 @@ func renderTransparentHCMFilterChain(statPrefix, cluster string) []string {
 		"                        - match: { prefix: \"/\" }",
 		"                          route:",
 		"                            cluster: " + cluster,
+		"                upgrade_configs:",
+		"                  - upgrade_type: websocket",
 		"                http_filters:",
 		"                  - name: envoy.filters.http.ext_authz",
 		"                    typed_config:",
@@ -380,6 +424,16 @@ func renderTransparentHCMFilterChain(statPrefix, cluster string) []string {
 		"                    typed_config:",
 		"                      \"@type\": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
 	}
+}
+
+func renderHCMUpgradeConfigs(includeConnect bool) string {
+	lines := []string{
+		"                  - upgrade_type: websocket",
+	}
+	if includeConnect {
+		lines = append(lines, "                  - upgrade_type: CONNECT")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func renderUpstreamTLSClusterTransportSocket(trustBundlePath string) string {

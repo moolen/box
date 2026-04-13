@@ -71,25 +71,31 @@ func httpCheckRequestFromGRPC(req *authv3.CheckRequest) (HTTPCheckRequest, error
 	}
 
 	dstIP, dstPort := parseGRPCDestination(attrs.GetDestination())
+	headers := httpReq.GetHeaders()
 	authority := firstNonEmpty(
+		grpcHeaderValue(headers, "x-box-original-authority"),
 		strings.TrimSpace(httpReq.GetHost()),
-		httpReq.GetHeaders()[":authority"],
-		httpReq.GetHeaders()["host"],
-		httpReq.GetHeaders()["x-forwarded-host"],
+		grpcHeaderValue(headers, ":authority"),
+		grpcHeaderValue(headers, "host"),
+		grpcHeaderValue(headers, "x-forwarded-host"),
 	)
-	rawPath := firstNonEmpty(httpReq.GetPath(), "/")
+	rawPath := firstNonEmpty(
+		grpcHeaderValue(headers, "x-box-original-target"),
+		httpReq.GetPath(),
+		"/",
+	)
 	protocol := inferGRPCProtocol(httpReq, authority, dstPort)
 
 	path, authorityFromPath, pathPort, pathIP := normalizeAuthzPath(rawPath)
 	if strings.TrimSpace(authority) == "" {
 		authority = authorityFromPath
 	}
-	if !dstIP.IsValid() {
+	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = pathIP
 	}
 
 	_, authorityPort, authorityIP := parseAuthorityDestination(authority)
-	if !dstIP.IsValid() {
+	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = authorityIP
 	}
 
@@ -127,6 +133,18 @@ func inferGRPCProtocol(httpReq *authv3.AttributeContext_HttpRequest, authority s
 		return ProtocolHTTPS
 	}
 	return protocol
+}
+
+func grpcHeaderValue(headers map[string]string, key string) string {
+	if len(headers) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	for headerKey, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(headerKey), key) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func tcpCheckRequestFromGRPC(req *authv3.CheckRequest) (TCPCheckRequest, error) {
