@@ -77,9 +77,10 @@ func StageBundledBinary(ctx context.Context, req StageRequest) error {
 		_ = os.Remove(tempPath)
 	}()
 
+	platform := strings.TrimSpace(req.Platform)
 	createArgs := []string{"create"}
 	imageRef := BundledImageRef
-	if platform := strings.TrimSpace(req.Platform); platform != "" {
+	if platform != "" {
 		createArgs = append(createArgs, "--platform", platform)
 		imageRef = BundledPlatformImageRef
 	}
@@ -106,6 +107,12 @@ func StageBundledBinary(ctx context.Context, req StageRequest) error {
 
 	version, err := binaryVersion(ctx, run, tempPath)
 	if err != nil {
+		if platform != "" && isExecFormatError(err) {
+			if err := os.Rename(tempPath, outputPath); err != nil {
+				return fmt.Errorf("move staged envoy binary to %q: %w", outputPath, err)
+			}
+			return nil
+		}
 		return fmt.Errorf("inspect staged envoy binary %q: %w", tempPath, err)
 	}
 	if !versionMatches(version) {
@@ -160,4 +167,8 @@ func parseContainerID(output []byte) string {
 		}
 	}
 	return ""
+}
+
+func isExecFormatError(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "exec format error")
 }

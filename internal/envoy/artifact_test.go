@@ -138,6 +138,41 @@ func TestStageBundledBinaryPassesPlatformToContainerRuntime(t *testing.T) {
 	}
 }
 
+func TestStageBundledBinaryAllowsExecFormatErrorForExplicitPlatform(t *testing.T) {
+	t.Parallel()
+
+	outputPath := filepath.Join(t.TempDir(), "envoy")
+
+	err := StageBundledBinary(context.Background(), StageRequest{
+		OutputPath: outputPath,
+		Runtime:    "docker",
+		Platform:   "linux/arm64",
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case name == "docker" && len(args) >= 4 && args[0] == "create":
+				return []byte("container-123\n"), nil
+			case name == "docker" && len(args) >= 2 && args[0] == "cp":
+				if err := os.WriteFile(outputPath+".tmp", []byte("envoy-binary"), 0o755); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			case name == outputPath+".tmp":
+				return nil, errors.New("fork/exec " + outputPath + ".tmp: exec format error")
+			case name == "docker" && len(args) >= 2 && args[0] == "rm":
+				return nil, nil
+			default:
+				return nil, errors.New("unexpected command")
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("StageBundledBinary() error = %v, want exec format error to be tolerated for explicit platform staging", err)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("Stat(outputPath) error = %v, want staged binary to be kept", err)
+	}
+}
+
 func TestStageBundledBinaryParsesContainerIDFromCreateOutputWithPullProgress(t *testing.T) {
 	t.Parallel()
 
