@@ -293,27 +293,67 @@ func buildPackage(pkgPath, output string) error {
 }
 
 func stageBundledEnvoy(moduleRoot, outputDir string) error {
-	sourcePath := filepath.Join(moduleRoot, "bin", "envoy")
-	info, err := os.Stat(sourcePath)
-	if err != nil {
-		return fmt.Errorf("bundled envoy binary %q is required: %w", sourcePath, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("bundled envoy binary %q is a directory", sourcePath)
+	return stageBundledEnvoyWithDeps(stageBundledEnvoyDeps{
+		moduleRoot: moduleRoot,
+		outputDir:  outputDir,
+		stat:       os.Stat,
+		run: func(name string, args ...string) error {
+			cmd := exec.Command(name, args...)
+			cmd.Dir = moduleRoot
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("%s: %w: %s", strings.TrimSpace(name+" "+strings.Join(args, " ")), err, strings.TrimSpace(string(output)))
+			}
+			return nil
+		},
+	})
+}
+
+type stageBundledEnvoyDeps struct {
+	moduleRoot string
+	outputDir  string
+	stat       func(string) (os.FileInfo, error)
+	run        func(name string, args ...string) error
+}
+
+func stageBundledEnvoyWithDeps(deps stageBundledEnvoyDeps) error {
+	sourcePath := filepath.Join(deps.moduleRoot, "bin", "envoy")
+	stat := deps.stat
+	if stat == nil {
+		stat = os.Stat
 	}
 
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return fmt.Errorf("create output dir %q: %w", outputDir, err)
+	if info, err := stat(sourcePath); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("bundled envoy binary %q is a directory", sourcePath)
+		}
+		return copyFile(sourcePath, filepath.Join(deps.outputDir, "envoy"), info.Mode().Perm())
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat bundled envoy binary %q: %w", sourcePath, err)
 	}
 
-	destPath := filepath.Join(outputDir, "envoy")
+	if deps.run == nil {
+		return fmt.Errorf("bundled envoy binary %q is required", sourcePath)
+	}
+	destPath := filepath.Join(deps.outputDir, "envoy")
+	if err := deps.run("go", "run", "./cmd/envoypack", "--output", destPath); err != nil {
+		return fmt.Errorf("build bundled envoy binary %q: %w", destPath, err)
+	}
+	return nil
+}
+
+func copyFile(sourcePath, destPath string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return fmt.Errorf("create output dir %q: %w", filepath.Dir(destPath), err)
+	}
+
 	sourceFile, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open bundled envoy binary %q: %w", sourcePath, err)
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return fmt.Errorf("create staged envoy binary %q: %w", destPath, err)
 	}
@@ -325,7 +365,7 @@ func stageBundledEnvoy(moduleRoot, outputDir string) error {
 	if err := destFile.Close(); err != nil {
 		return fmt.Errorf("close staged envoy binary %q: %w", destPath, err)
 	}
-	if err := os.Chmod(destPath, info.Mode().Perm()); err != nil {
+	if err := os.Chmod(destPath, mode); err != nil {
 		return fmt.Errorf("chmod staged envoy binary %q: %w", destPath, err)
 	}
 	return nil

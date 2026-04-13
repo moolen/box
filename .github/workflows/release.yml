@@ -62,7 +62,8 @@ jobs:
             mkdir -p "${target_dir}"
             GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 go build -trimpath -o "${target_dir}/box" ./cmd/box
             GOOS=linux GOARCH="${arch}" CGO_ENABLED=0 go build -trimpath -o "${target_dir}/box-initshim" ./internal/initshim
-            tar -C "${target_dir}" -czf "dist/box_linux_${arch}.tar.gz" box box-initshim
+            go run ./cmd/envoypack --output "${target_dir}/envoy" --platform "linux/${arch}"
+            tar -C "${target_dir}" -czf "dist/box_linux_${arch}.tar.gz" box box-initshim envoy
           done
 
           (

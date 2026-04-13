@@ -9,6 +9,7 @@ Recovered bootstrap for the `box` sandbox runner project.
 - `runsc`
 - `ip` (iproute2)
 - `nft` (nftables)
+- `docker` or `podman` to stage the bundled Envoy binary
 
 ## Build and Test
 
@@ -17,11 +18,12 @@ make build
 make test
 ```
 
-`make build` produces both sandbox binaries and validates that a bundled Envoy
-artifact is available at `./bin/envoy`:
+`make build` produces both sandbox binaries and stages the pinned bundled Envoy
+artifact at `./bin/envoy`:
 
 - `./bin/box`
 - `./bin/box-initshim`
+- `./bin/envoy`
 
 ## Usage
 
@@ -73,3 +75,4 @@ Each archive contains:
 
 - `box`
 - `box-initshim`
+- `envoy`

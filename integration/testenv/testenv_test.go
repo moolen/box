@@ -140,15 +140,54 @@ func TestStageBundledEnvoyCopiesBinaryNextToBuiltBox(t *testing.T) {
 	}
 }
 
-func TestStageBundledEnvoyReturnsHelpfulErrorWhenMissing(t *testing.T) {
+func TestStageBundledEnvoyReturnsHelpfulErrorWhenMissingAndNoBuilderIsAvailable(t *testing.T) {
 	t.Parallel()
 
-	err := stageBundledEnvoy(t.TempDir(), t.TempDir())
+	err := stageBundledEnvoyWithDeps(stageBundledEnvoyDeps{
+		moduleRoot: t.TempDir(),
+		outputDir:  t.TempDir(),
+		stat: func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		},
+	})
 	if err == nil {
 		t.Fatal("stageBundledEnvoy() error = nil, want missing binary error")
 	}
 	if !strings.Contains(err.Error(), "bundled envoy binary") {
 		t.Fatalf("stageBundledEnvoy() error = %q, want bundled envoy context", err.Error())
+	}
+}
+
+func TestStageBundledEnvoyRunsEnvoypackWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	var calls []string
+
+	err := stageBundledEnvoyWithDeps(stageBundledEnvoyDeps{
+		moduleRoot: t.TempDir(),
+		outputDir:  outputDir,
+		stat: func(string) (os.FileInfo, error) {
+			return nil, os.ErrNotExist
+		},
+		run: func(name string, args ...string) error {
+			calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+			if err := os.WriteFile(filepath.Join(outputDir, "envoy"), []byte("envoy"), 0o755); err != nil {
+				return err
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("stageBundledEnvoyWithDeps() error = %v", err)
+	}
+
+	want := "go run ./cmd/envoypack --output " + filepath.Join(outputDir, "envoy")
+	if !reflect.DeepEqual(calls, []string{want}) {
+		t.Fatalf("command calls = %#v, want %#v", calls, []string{want})
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "envoy")); err != nil {
+		t.Fatalf("Stat(staged envoy) error = %v", err)
 	}
 }
 

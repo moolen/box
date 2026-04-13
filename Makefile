@@ -11,4 +11,4 @@ bin:
 	mkdir -p ./bin
 
 envoy: bin
-	test -x ./bin/envoy
+	go run ./cmd/envoypack --output ./bin/envoy

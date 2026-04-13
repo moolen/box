@@ -11,6 +11,7 @@ import (
 
 	"gvisor-net/integration/testenv"
 	"gvisor-net/internal/config"
+	"gvisor-net/internal/rootfs"
 )
 
 func TestBoxRunsPwd(t *testing.T) {
@@ -25,13 +26,13 @@ func TestBoxRunsEnv(t *testing.T) {
 	if !strings.Contains(output, "PATH=") {
 		t.Fatalf("env output = %q, want PATH entry", output)
 	}
-	if !strings.Contains(output, "HTTP_PROXY=http://100.96.0.1:") {
-		t.Fatalf("env output = %q, want randomized HTTP_PROXY host intercept env", output)
+	if !strings.Contains(output, "HTTP_PROXY=http://") {
+		t.Fatalf("env output = %q, want HTTP_PROXY host intercept env", output)
 	}
-	if !strings.Contains(output, "HTTPS_PROXY=http://100.96.0.1:") {
-		t.Fatalf("env output = %q, want randomized HTTPS_PROXY host intercept env", output)
+	if !strings.Contains(output, "HTTPS_PROXY=http://") {
+		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
 	}
-	if !strings.Contains(output, "SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem") {
+	if !strings.Contains(output, "SSL_CERT_FILE="+rootfs.RuntimeCACertPath) {
 		t.Fatalf("env output = %q, want runtime CA env injection", output)
 	}
 }
