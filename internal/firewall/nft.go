@@ -3,7 +3,6 @@ package firewall
 import (
 	"errors"
 	"fmt"
-	"net/netip"
 	"strings"
 )
 
@@ -22,11 +21,11 @@ type MonitorPlan struct {
 }
 
 type EnforcePlanInput struct {
-	TableName         string
-	HostVeth          string
-	SubnetCIDR        string
-	DNSPort           int
-	ExtraAllowedCIDRs []string
+	TableName       string
+	HostVeth        string
+	SubnetCIDR      string
+	DNSPort         int
+	TransparentPort int
 }
 
 type EnforcePlan struct {
@@ -88,57 +87,22 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 	if strings.TrimSpace(in.SubnetCIDR) == "" {
 		return EnforcePlan{}, errors.New("subnet cidr is required")
 	}
-	if in.DNSPort <= 0 {
-		return EnforcePlan{}, errors.New("dns port must be positive")
+	if in.DNSPort <= 0 || in.TransparentPort <= 0 {
+		return EnforcePlan{}, errors.New("dns and transparent ports must be positive")
 	}
 
 	commands := []string{
 		fmt.Sprintf("nft add table inet %s", in.TableName),
-		fmt.Sprintf("nft add set inet %s allow_v4 { type ipv4_addr; flags interval; }", in.TableName),
-		fmt.Sprintf("nft add chain inet %s prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
+		fmt.Sprintf("nft add chain inet %s prerouting_envoy { type nat hook prerouting priority dstnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy drop; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
-		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s udp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
-		fmt.Sprintf("nft add rule inet %s prerouting_dns iifname %s ip saddr %s tcp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
+		fmt.Sprintf("nft add rule inet %s prerouting_envoy iifname %s ip saddr %s meta l4proto udp udp dport 53 redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.DNSPort),
+		fmt.Sprintf("nft add rule inet %s prerouting_envoy iifname %s ip saddr %s meta l4proto tcp redirect to :%d", in.TableName, in.HostVeth, in.SubnetCIDR, in.TransparentPort),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
-		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s ip daddr @allow_v4 accept", in.TableName, in.HostVeth, in.SubnetCIDR),
+		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
+		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
 	}
 
-	if len(in.ExtraAllowedCIDRs) > 0 {
-		validCIDRs := make([]string, 0, len(in.ExtraAllowedCIDRs))
-		for _, raw := range in.ExtraAllowedCIDRs {
-			trimmed := strings.TrimSpace(raw)
-			if trimmed == "" {
-				continue
-			}
-			prefix, err := netip.ParsePrefix(trimmed)
-			if err != nil {
-				return EnforcePlan{}, fmt.Errorf("parse extra allowed cidr %q: %w", raw, err)
-			}
-			if !prefix.Addr().Is4() {
-				return EnforcePlan{}, fmt.Errorf("extra allowed cidr %q must be ipv4", raw)
-			}
-			validCIDRs = append(validCIDRs, prefix.String())
-		}
-		if len(validCIDRs) > 0 {
-			commands = append(commands, fmt.Sprintf("nft add element inet %s allow_v4 { %s }", in.TableName, strings.Join(validCIDRs, ", ")))
-		}
-	}
-
 	return EnforcePlan{Commands: commands}, nil
-}
-
-func BuildEnforceAllowIPCommand(tableName, rawIP string) (string, error) {
-	if strings.TrimSpace(tableName) == "" {
-		return "", errors.New("table name is required")
-	}
-	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
-	if err != nil {
-		return "", fmt.Errorf("parse ip %q: %w", rawIP, err)
-	}
-	if !addr.Is4() {
-		return "", fmt.Errorf("ip %q must be ipv4", rawIP)
-	}
-	return fmt.Sprintf("nft add element inet %s allow_v4 { %s }", tableName, addr.Unmap().String()), nil
 }

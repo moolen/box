@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestEnforceModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:       "box_deadbeef",
+		HostVeth:        "vethhdeadbeef",
+		SubnetCIDR:      "100.96.0.0/30",
+		DNSPort:         15353,
+		TransparentPort: 19001,
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error: %v", err)
+	}
+
+	mustContainCommand(t, plan.Commands, "tcp redirect to :19001")
+	mustContainCommand(t, plan.Commands, "udp dport 53 redirect to :15353")
+	mustContainCommand(t, plan.Commands, "udp drop")
+	mustContainCommand(t, plan.Commands, "icmp accept")
+}
+
 func TestMonitorModeRendersScopedDNSRule(t *testing.T) {
 	plan, err := BuildMonitorPlan(MonitorPlanInput{
 		TableName:  "box_deadbeef",
@@ -161,46 +179,28 @@ func TestBuildMonitorPlanRejectsZeroFWMark(t *testing.T) {
 	}
 }
 
-func TestEnforceModeRendersDNSRedirectForwardAllowsetAndMasquerade(t *testing.T) {
+func TestEnforceModeRendersEnvoyRedirectAndDropsNonDNSUDP(t *testing.T) {
 	plan, err := BuildEnforcePlan(EnforcePlanInput{
-		TableName:         "box_deadbeef",
-		HostVeth:          "vethhdeadbeef",
-		SubnetCIDR:        "100.96.0.0/30",
-		DNSPort:           1053,
-		ExtraAllowedCIDRs: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		TableName:       "box_deadbeef",
+		HostVeth:        "vethhdeadbeef",
+		SubnetCIDR:      "100.96.0.0/30",
+		DNSPort:         1053,
+		TransparentPort: 19001,
 	})
 	if err != nil {
 		t.Fatalf("BuildEnforcePlan() error: %v", err)
 	}
 
-	wantFragments := []string{
-		"nft add set inet box_deadbeef allow_v4 { type ipv4_addr; flags interval; }",
-		"nft add chain inet box_deadbeef prerouting_dns { type nat hook prerouting priority dstnat; policy accept; }",
-		"nft add chain inet box_deadbeef forward { type filter hook forward priority filter; policy drop; }",
-		"nft add chain inet box_deadbeef postrouting { type nat hook postrouting priority srcnat; policy accept; }",
-		"nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 udp dport 53 redirect to :1053",
-		"nft add rule inet box_deadbeef prerouting_dns iifname vethhdeadbeef ip saddr 100.96.0.0/30 tcp dport 53 redirect to :1053",
-		"nft add rule inet box_deadbeef forward ct state established,related accept",
-		"nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr @allow_v4 accept",
-		"nft add rule inet box_deadbeef postrouting ip saddr 100.96.0.0/30 masquerade",
-		"nft add element inet box_deadbeef allow_v4 { 10.0.0.0/8, 192.168.0.0/16 }",
-	}
-	for _, want := range wantFragments {
-		if !slices.Contains(plan.Commands, want) {
-			t.Fatalf("BuildEnforcePlan() commands missing %q\ncommands=%#v", want, plan.Commands)
+	mustContainCommand(t, plan.Commands, "nft add chain inet box_deadbeef prerouting_envoy")
+	mustContainCommand(t, plan.Commands, "udp dport 53 redirect to :1053")
+	mustContainCommand(t, plan.Commands, "tcp redirect to :19001")
+	mustContainCommand(t, plan.Commands, "meta l4proto udp drop")
+	mustContainCommand(t, plan.Commands, "meta l4proto icmp accept")
+	mustContainCommand(t, plan.Commands, "masquerade")
+	for _, cmd := range plan.Commands {
+		if strings.Contains(cmd, "allow_v4") {
+			t.Fatalf("allowset model must not be rendered (found %q)\ncommands=%#v", cmd, plan.Commands)
 		}
-	}
-}
-
-func TestEnforceAllowIPCommandUsesRuntimeOwnedAllowset(t *testing.T) {
-	got, err := BuildEnforceAllowIPCommand("box_deadbeef", "93.184.216.34")
-	if err != nil {
-		t.Fatalf("BuildEnforceAllowIPCommand() error = %v", err)
-	}
-
-	want := "nft add element inet box_deadbeef allow_v4 { 93.184.216.34 }"
-	if got != want {
-		t.Fatalf("BuildEnforceAllowIPCommand() = %q, want %q", got, want)
 	}
 }
 
@@ -211,4 +211,14 @@ func containsFragment(lines []string, fragment string) bool {
 		}
 	}
 	return false
+}
+
+func mustContainCommand(t *testing.T, commands []string, fragment string) {
+	t.Helper()
+	for _, cmd := range commands {
+		if strings.Contains(cmd, fragment) {
+			return
+		}
+	}
+	t.Fatalf("missing command containing %q\ncommands=%#v", fragment, commands)
 }
