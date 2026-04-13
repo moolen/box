@@ -19,6 +19,7 @@ import (
 	"gvisor-net/internal/firewall"
 	"gvisor-net/internal/monitor"
 	"gvisor-net/internal/netns"
+	"gvisor-net/internal/pki"
 	"gvisor-net/internal/proxy"
 	"gvisor-net/internal/rootfs"
 )
@@ -27,6 +28,11 @@ const (
 	defaultStateRoot = "/run/box"
 	eventLogName     = "events.log"
 	manifestFileName = "manifest.json"
+	caDirName        = "ca"
+	caCertFileName   = "root-ca.pem"
+	caKeyFileName    = "root-ca-key.pem"
+	envoyDirName     = "envoy"
+	bootstrapName    = "bootstrap.yaml"
 )
 
 var ErrResourceConflict = errors.New("resource conflict")
@@ -93,20 +99,35 @@ type Runtime struct {
 }
 
 type Manifest struct {
-	RuntimeID          string                `json:"runtime_id"`
-	CreatedAtUTC       string                `json:"created_at_utc"`
-	StateRoot          string                `json:"state_root"`
-	StateDir           string                `json:"state_dir"`
-	ManifestPath       string                `json:"manifest_path"`
-	EventLogPath       string                `json:"event_log_path"`
-	WorkdirMountSource string                `json:"workdir_mount_source,omitempty"`
-	NetworkMode        string                `json:"network_mode"`
-	GatewayIP          string                `json:"gateway_ip"`
-	ResolvConf         string                `json:"resolv_conf"`
-	Net                NetResources          `json:"net"`
-	StartedRunners     []string              `json:"started_runners"`
-	TeardownCmds       []string              `json:"teardown_cmds"`
-	ManagedPaths       []ManagedPath         `json:"managed_paths"`
+	RuntimeID          string        `json:"runtime_id"`
+	CreatedAtUTC       string        `json:"created_at_utc"`
+	StateRoot          string        `json:"state_root"`
+	StateDir           string        `json:"state_dir"`
+	ManifestPath       string        `json:"manifest_path"`
+	EventLogPath       string        `json:"event_log_path"`
+	WorkdirMountSource string        `json:"workdir_mount_source,omitempty"`
+	NetworkMode        string        `json:"network_mode"`
+	GatewayIP          string        `json:"gateway_ip"`
+	ResolvConf         string        `json:"resolv_conf"`
+	Envoy              EnvoyRuntime  `json:"envoy"`
+	CA                 CARuntime     `json:"ca"`
+	Net                NetResources  `json:"net"`
+	StartedRunners     []string      `json:"started_runners"`
+	TeardownCmds       []string      `json:"teardown_cmds"`
+	ManagedPaths       []ManagedPath `json:"managed_paths"`
+}
+
+type EnvoyRuntime struct {
+	ExplicitPort    int    `json:"explicit_port"`
+	TransparentPort int    `json:"transparent_port"`
+	DNSPort         int    `json:"dns_port"`
+	BootstrapPath   string `json:"bootstrap_path"`
+}
+
+type CARuntime struct {
+	CertPath        string `json:"cert_path"`
+	KeyPath         string `json:"key_path"`
+	SandboxCertPath string `json:"sandbox_cert_path"`
 }
 
 type NetResources struct {
@@ -190,18 +211,38 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	runtimeCfg := req.Config
 	runtimeCfg.Network.Subnet = netResources.SubnetCIDR
 
+	envoyRuntime, caRuntime, caCertPEM, err := prepareManagedNetworkAssets(network, stateDir, runtimeID)
+	if err != nil {
+		return nil, err
+	}
+
 	rootfsPlan, err := rootfs.BuildPlan(rootfs.PlanRequest{
-		RootfsMode:   runtimeCfg.Sandbox.Rootfs,
-		RepoPath:     "",
-		Workdir:      runtimeCfg.Sandbox.Workdir,
-		NetworkMode:  network,
-		GatewayIP:    gatewayIP,
-		SandboxHostn: runtimeCfg.Sandbox.Hostname,
-		ExtraRO:      runtimeCfg.Mounts.ExtraRO,
-		ExtraRW:      runtimeCfg.Mounts.ExtraRW,
+		RootfsMode:        runtimeCfg.Sandbox.Rootfs,
+		RepoPath:          "",
+		Workdir:           runtimeCfg.Sandbox.Workdir,
+		NetworkMode:       network,
+		GatewayIP:         gatewayIP,
+		SandboxHostn:      runtimeCfg.Sandbox.Hostname,
+		ExtraRO:           runtimeCfg.Mounts.ExtraRO,
+		ExtraRW:           runtimeCfg.Mounts.ExtraRW,
+		RuntimeCACertPEM:  caCertPEM,
+		TrustedCACertPEM:  caCertPEM,
+		TrustedCACertPath: caRuntime.SandboxCertPath,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build rootfs plan: %w", err)
+	}
+
+	managedPaths := []ManagedPath{
+		{Path: eventLogPath, Kind: PathKindFile},
+		{Path: filepath.Join(stateDir, manifestFileName), Kind: PathKindFile},
+		{Path: stateDir, Kind: PathKindDir},
+	}
+	if strings.TrimSpace(caRuntime.CertPath) != "" {
+		managedPaths = append(managedPaths, ManagedPath{Path: caRuntime.CertPath, Kind: PathKindFile})
+	}
+	if strings.TrimSpace(caRuntime.KeyPath) != "" {
+		managedPaths = append(managedPaths, ManagedPath{Path: caRuntime.KeyPath, Kind: PathKindFile})
 	}
 
 	manifest := Manifest{
@@ -213,15 +254,13 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 		EventLogPath:   eventLogPath,
 		NetworkMode:    network,
 		GatewayIP:      gatewayIP,
-		ResolvConf: generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
-		Net:        fromNetnsResources(netResources),
+		ResolvConf:     generatedFileContent(rootfsPlan.GeneratedFiles, "/etc/resolv.conf"),
+		Envoy:          envoyRuntime,
+		CA:             caRuntime,
+		Net:            fromNetnsResources(netResources),
 		StartedRunners: nil,
 		TeardownCmds:   nil,
-		ManagedPaths: []ManagedPath{
-			{Path: eventLogPath, Kind: PathKindFile},
-			{Path: filepath.Join(stateDir, manifestFileName), Kind: PathKindFile},
-			{Path: stateDir, Kind: PathKindDir},
-		},
+		ManagedPaths:   managedPaths,
 	}
 
 	rt := &Runtime{
@@ -307,6 +346,27 @@ func (rt *Runtime) RuntimeManifest() Manifest {
 		return Manifest{}
 	}
 	return rt.Manifest
+}
+
+func SandboxEnv(manifest Manifest) []string {
+	var env []string
+	if gatewayIP := strings.TrimSpace(manifest.GatewayIP); gatewayIP != "" && manifest.Envoy.ExplicitPort > 0 {
+		proxy := "http://" + net.JoinHostPort(gatewayIP, strconv.Itoa(manifest.Envoy.ExplicitPort))
+		env = append(env,
+			"HTTP_PROXY="+proxy,
+			"HTTPS_PROXY="+proxy,
+			"NO_PROXY=127.0.0.1,localhost",
+		)
+	}
+	if caPath := strings.TrimSpace(manifest.CA.SandboxCertPath); caPath != "" {
+		env = append(env,
+			"SSL_CERT_FILE="+caPath,
+			"CURL_CA_BUNDLE="+caPath,
+			"REQUESTS_CA_BUNDLE="+caPath,
+			"NODE_EXTRA_CA_CERTS="+caPath,
+		)
+	}
+	return env
 }
 
 func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config, deps Deps) error {
@@ -747,6 +807,92 @@ func generatedFileContent(files []rootfs.GeneratedFile, path string) string {
 		}
 	}
 	return ""
+}
+
+func prepareManagedNetworkAssets(networkMode, stateDir, runtimeID string) (EnvoyRuntime, CARuntime, string, error) {
+	if !usesManagedNetworkPolicy(networkMode) {
+		return EnvoyRuntime{}, CARuntime{}, "", nil
+	}
+
+	envoyRuntime, err := allocateEnvoyRuntime(stateDir)
+	if err != nil {
+		return EnvoyRuntime{}, CARuntime{}, "", fmt.Errorf("allocate envoy runtime ports: %w", err)
+	}
+	caRuntime, certPEM, err := writeRuntimeCAAssets(stateDir, runtimeID)
+	if err != nil {
+		return EnvoyRuntime{}, CARuntime{}, "", fmt.Errorf("prepare runtime ca assets: %w", err)
+	}
+	return envoyRuntime, caRuntime, certPEM, nil
+}
+
+func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
+	envoyDir := filepath.Join(stateDir, envoyDirName)
+	if err := os.MkdirAll(envoyDir, 0o755); err != nil {
+		return EnvoyRuntime{}, fmt.Errorf("create envoy dir %q: %w", envoyDir, err)
+	}
+
+	explicit, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return EnvoyRuntime{}, err
+	}
+	defer explicit.Close()
+
+	transparent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return EnvoyRuntime{}, err
+	}
+	defer transparent.Close()
+
+	dnsListener, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		return EnvoyRuntime{}, err
+	}
+	defer dnsListener.Close()
+
+	return EnvoyRuntime{
+		ExplicitPort:    listenerPort(explicit.Addr()),
+		TransparentPort: listenerPort(transparent.Addr()),
+		DNSPort:         listenerPort(dnsListener.LocalAddr()),
+		BootstrapPath:   filepath.Join(envoyDir, bootstrapName),
+	}, nil
+}
+
+func writeRuntimeCAAssets(stateDir, runtimeID string) (CARuntime, string, error) {
+	caDir := filepath.Join(stateDir, caDirName)
+	if err := os.MkdirAll(caDir, 0o755); err != nil {
+		return CARuntime{}, "", fmt.Errorf("create ca dir %q: %w", caDir, err)
+	}
+
+	runtimeCA, err := pki.NewRuntimeCA(runtimeID)
+	if err != nil {
+		return CARuntime{}, "", err
+	}
+
+	certPath := filepath.Join(caDir, caCertFileName)
+	if err := os.WriteFile(certPath, runtimeCA.RootCertPEM, 0o644); err != nil {
+		return CARuntime{}, "", fmt.Errorf("write ca cert %q: %w", certPath, err)
+	}
+	keyPath := filepath.Join(caDir, caKeyFileName)
+	if err := os.WriteFile(keyPath, runtimeCA.RootKeyPEM, 0o600); err != nil {
+		return CARuntime{}, "", fmt.Errorf("write ca key %q: %w", keyPath, err)
+	}
+
+	return CARuntime{
+		CertPath:        certPath,
+		KeyPath:         keyPath,
+		SandboxCertPath: rootfs.RuntimeCACertPath,
+	}, string(runtimeCA.RootCertPEM), nil
+}
+
+func listenerPort(addr net.Addr) int {
+	switch value := addr.(type) {
+	case *net.TCPAddr:
+		return value.Port
+	case *net.UDPAddr:
+		return value.Port
+	default:
+		return 0
+	}
 }
 
 func fromNetnsResources(in netns.Resources) NetResources {

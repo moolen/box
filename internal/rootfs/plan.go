@@ -14,15 +14,20 @@ var (
 	writableRuntimeDirs   = []string{"/tmp", "/var/tmp", "/run", "/var/run", "/var/cache"}
 )
 
+const RuntimeCACertPath = "/etc/box/ca-certificates/runtime-ca.crt"
+
 type PlanRequest struct {
-	RootfsMode   string
-	RepoPath     string
-	Workdir      string
-	NetworkMode  string
-	GatewayIP    string
-	SandboxHostn string
-	ExtraRO      []string
-	ExtraRW      []string
+	RootfsMode        string
+	RepoPath          string
+	Workdir           string
+	NetworkMode       string
+	GatewayIP         string
+	SandboxHostn      string
+	ExtraRO           []string
+	ExtraRW           []string
+	RuntimeCACertPEM  string
+	TrustedCACertPEM  string
+	TrustedCACertPath string
 }
 
 type Bind struct {
@@ -114,7 +119,7 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 		nameserver = strings.TrimSpace(req.GatewayIP)
 	}
 
-	return []GeneratedFile{
+	files := []GeneratedFile{
 		{
 			Path:    "/etc/resolv.conf",
 			Content: "nameserver " + nameserver + "\noptions ndots:0\n",
@@ -141,6 +146,25 @@ func generatedEtcFiles(req PlanRequest) []GeneratedFile {
 			Mode:    0o644,
 		},
 	}
+	trustedPEM := req.TrustedCACertPEM
+	trustedPath := strings.TrimSpace(req.TrustedCACertPath)
+	if strings.TrimSpace(trustedPEM) != "" {
+		if trustedPath == "" {
+			trustedPath = RuntimeCACertPath
+		}
+		files = append(files, GeneratedFile{
+			Path:    trustedPath,
+			Content: trustedPEM,
+			Mode:    0o644,
+		})
+	} else if strings.TrimSpace(req.RuntimeCACertPEM) != "" {
+		files = append(files, GeneratedFile{
+			Path:    RuntimeCACertPath,
+			Content: req.RuntimeCACertPEM,
+			Mode:    0o644,
+		})
+	}
+	return files
 }
 
 func usesGatewayDNS(mode string) bool {

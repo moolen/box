@@ -7,6 +7,7 @@ import (
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/rootfs"
+	boxruntime "gvisor-net/internal/runtime"
 )
 
 func TestSpecUsesInitShimAsEntrypoint(t *testing.T) {
@@ -199,6 +200,48 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
+	}
+}
+
+func TestBuildSandboxSpecInjectsRuntimeProxyAndCAEnv(t *testing.T) {
+	cfg := config.Config{
+		Sandbox: config.SandboxConfig{
+			Env:          []string{"HTTP_PROXY=http://bypass.invalid:3128"},
+			CommandShell: "/bin/bash -lc",
+		},
+	}
+
+	spec, err := BuildSandboxSpec(BuildSpecRequest{
+		Config:  cfg,
+		Workdir: "/workspace",
+		Payload: "env",
+		RuntimeManifest: boxruntime.Manifest{
+			GatewayIP: "100.96.0.1",
+			Envoy: boxruntime.EnvoyRuntime{
+				ExplicitPort: 19001,
+			},
+			CA: boxruntime.CARuntime{
+				SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildSandboxSpec() error: %v", err)
+	}
+
+	if value := envValue(spec.Process.Env, "HTTP_PROXY"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("HTTP_PROXY = %q, want runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("HTTPS_PROXY = %q, want runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
+		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
+	}
+	for _, key := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"} {
+		if value := envValue(spec.Process.Env, key); value != "/etc/ssl/certs/box-runtime-ca.pem" {
+			t.Fatalf("%s = %q, want runtime manifest CA path", key, value)
+		}
 	}
 }
 

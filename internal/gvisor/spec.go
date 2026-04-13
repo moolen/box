@@ -2,12 +2,14 @@ package gvisor
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"unicode"
 
 	"gvisor-net/internal/config"
 	"gvisor-net/internal/rootfs"
+	boxruntime "gvisor-net/internal/runtime"
 )
 
 const defaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -63,6 +65,7 @@ type BuildSpecRequest struct {
 	Payload              string
 	HostEnv              []string
 	ExtraEnv             []string
+	RuntimeManifest      boxruntime.Manifest
 	RootfsPlan           rootfs.Plan
 	NetworkNamespacePath string
 }
@@ -104,7 +107,7 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 		Process: ProcessSpec{
 			Args: args,
 			Cwd:  cwd,
-			Env:  ensureDefaultEnv(baseProcessEnv(cfg, req.HostEnv), cfg.Sandbox.Env, req.ExtraEnv),
+			Env:  ensureDefaultEnv(baseProcessEnv(cfg, req.HostEnv), cfg.Sandbox.Env, mergeEnv(req.ExtraEnv, runtimeManifestEnv(req.RuntimeManifest))),
 		},
 		Root: RootSpec{
 			Path:     "rootfs",
@@ -116,6 +119,28 @@ func BuildSandboxSpec(req BuildSpecRequest) (Spec, error) {
 			Namespaces: buildNamespaces(req.NetworkNamespacePath),
 		},
 	}, nil
+}
+
+func runtimeManifestEnv(manifest boxruntime.Manifest) []string {
+	var env []string
+	if strings.TrimSpace(manifest.GatewayIP) != "" && manifest.Envoy.ExplicitPort > 0 {
+		proxy := "http://" + net.JoinHostPort(manifest.GatewayIP, fmt.Sprintf("%d", manifest.Envoy.ExplicitPort))
+		env = append(env,
+			"HTTP_PROXY="+proxy,
+			"HTTPS_PROXY="+proxy,
+			"NO_PROXY=127.0.0.1,localhost",
+		)
+	}
+	if strings.TrimSpace(manifest.CA.SandboxCertPath) != "" {
+		certPath := manifest.CA.SandboxCertPath
+		env = append(env,
+			"SSL_CERT_FILE="+certPath,
+			"CURL_CA_BUNDLE="+certPath,
+			"REQUESTS_CA_BUNDLE="+certPath,
+			"NODE_EXTRA_CA_CERTS="+certPath,
+		)
+	}
+	return env
 }
 
 func baseProcessEnv(cfg config.Config, hostEnv []string) []string {

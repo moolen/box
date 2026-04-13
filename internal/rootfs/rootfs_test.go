@@ -129,6 +129,56 @@ func TestGeneratedEtcFilesUseGatewayDNSInEnforceMode(t *testing.T) {
 	t.Fatalf("generated resolv.conf missing from plan: %#v", plan.GeneratedFiles)
 }
 
+func TestBuildPlanStagesRuntimeCACertWhenProvided(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:       "host-overlay",
+		RepoPath:         "/repo",
+		Workdir:          "/work",
+		RuntimeCACertPEM: "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n",
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	for _, file := range plan.GeneratedFiles {
+		if file.Path != RuntimeCACertPath {
+			continue
+		}
+		if !strings.Contains(file.Content, "BEGIN CERTIFICATE") {
+			t.Fatalf("runtime CA content = %q, want PEM", file.Content)
+		}
+		return
+	}
+
+	t.Fatalf("generated runtime CA file missing from plan: %#v", plan.GeneratedFiles)
+}
+
+func TestBuildPlanStagesTrustedCACertWhenRequested(t *testing.T) {
+	plan, err := BuildPlan(PlanRequest{
+		RootfsMode:        "host-overlay",
+		TrustedCACertPEM:  "-----BEGIN CERTIFICATE-----\nbox\n-----END CERTIFICATE-----\n",
+		TrustedCACertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+	})
+	if err != nil {
+		t.Fatalf("BuildPlan() error: %v", err)
+	}
+
+	for _, file := range plan.GeneratedFiles {
+		if file.Path != "/etc/ssl/certs/box-runtime-ca.pem" {
+			continue
+		}
+		if file.Content != "-----BEGIN CERTIFICATE-----\nbox\n-----END CERTIFICATE-----\n" {
+			t.Fatalf("trusted CA content = %q, want requested PEM", file.Content)
+		}
+		if file.Mode != 0o644 {
+			t.Fatalf("trusted CA mode = %v, want 0644", file.Mode)
+		}
+		return
+	}
+
+	t.Fatalf("trusted CA file missing from plan: %#v", plan.GeneratedFiles)
+}
+
 func TestResolveInitShimCopiesSiblingBinaryIntoBundle(t *testing.T) {
 	temp := t.TempDir()
 	exePath := filepath.Join(temp, "bin", "box")

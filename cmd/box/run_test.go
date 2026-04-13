@@ -207,25 +207,123 @@ func TestCommandShellForTTYDropsInteractiveFlagWithoutTTY(t *testing.T) {
 }
 
 func TestSandboxProxyEnvIncludesProxyVariablesInMonitorMode(t *testing.T) {
-	cfg := config.Config{
-		Network: config.NetworkConfig{
-			Mode: "monitor",
-			TransparentProxy: config.TransparentProxyConfig{
-				Enabled:  true,
-				HTTPPort: 18080,
-			},
+	env := sandboxProxyEnv(boxruntime.Manifest{
+		GatewayIP: "100.96.0.1",
+		Envoy: boxruntime.EnvoyRuntime{
+			ExplicitPort: 19001,
 		},
-	}
-
-	env := sandboxProxyEnv("100.96.0.1", cfg)
+		CA: boxruntime.CARuntime{
+			SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+		},
+	})
 	for _, want := range []string{
-		"HTTP_PROXY=http://100.96.0.1:18080",
-		"HTTPS_PROXY=http://100.96.0.1:18080",
+		"HTTP_PROXY=http://100.96.0.1:19001",
+		"HTTPS_PROXY=http://100.96.0.1:19001",
 		"NO_PROXY=127.0.0.1,localhost",
+		"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
+		"CURL_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
+		"REQUESTS_CA_BUNDLE=/etc/ssl/certs/box-runtime-ca.pem",
+		"NODE_EXTRA_CA_CERTS=/etc/ssl/certs/box-runtime-ca.pem",
 	} {
 		if !containsString(env, want) {
 			t.Fatalf("sandboxProxyEnv() = %#v, want %q", env, want)
 		}
+	}
+}
+
+func TestRuntimeExecutorPassesRuntimeCAAndManifestToSandboxBuilders(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	caCertPath := filepath.Join(stateDir, "runtime-ca.pem")
+	caCertPEM := "-----BEGIN CERTIFICATE-----\nruntime\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(caCertPath, []byte(caCertPEM), 0o644); err != nil {
+		t.Fatalf("WriteFile(ca cert) error = %v", err)
+	}
+
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-env",
+			StateDir:  stateDir,
+			GatewayIP: "100.96.0.1",
+			Net: boxruntime.NetResources{
+				NetNS: "box-runtime-env",
+			},
+			Envoy: boxruntime.EnvoyRuntime{
+				ExplicitPort: 19001,
+			},
+			CA: boxruntime.CARuntime{
+				CertPath:        caCertPath,
+				SandboxCertPath: "/etc/ssl/certs/box-runtime-ca.pem",
+			},
+		},
+	}
+
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Sandbox: config.SandboxConfig{
+					Rootfs:       "host-overlay",
+					Workdir:      "/workspace",
+					CommandShell: "/bin/bash -lc",
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(req rootfs.PlanRequest) (rootfs.Plan, error) {
+			if req.TrustedCACertPEM != caCertPEM {
+				t.Fatalf("TrustedCACertPEM = %q, want runtime CA contents", req.TrustedCACertPEM)
+			}
+			if req.TrustedCACertPath != "/etc/ssl/certs/box-runtime-ca.pem" {
+				t.Fatalf("TrustedCACertPath = %q, want runtime CA target", req.TrustedCACertPath)
+			}
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(req gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			if req.RuntimeManifest.Envoy.ExplicitPort != 19001 {
+				t.Fatalf("RuntimeManifest.Envoy.ExplicitPort = %d, want 19001", req.RuntimeManifest.Envoy.ExplicitPort)
+			}
+			if req.RuntimeManifest.CA.SandboxCertPath != "/etc/ssl/certs/box-runtime-ca.pem" {
+				t.Fatalf("RuntimeManifest.CA.SandboxCertPath = %q, want runtime CA path", req.RuntimeManifest.CA.SandboxCertPath)
+			}
+
+			spec, err := gvisor.BuildSandboxSpec(req)
+			if err != nil {
+				return gvisor.Spec{}, err
+			}
+			for _, want := range []string{
+				"HTTP_PROXY=http://100.96.0.1:19001",
+				"HTTPS_PROXY=http://100.96.0.1:19001",
+				"NO_PROXY=127.0.0.1,localhost",
+				"SSL_CERT_FILE=/etc/ssl/certs/box-runtime-ca.pem",
+			} {
+				if !containsString(spec.Process.Env, want) {
+					t.Fatalf("Process.Env = %#v, want %q", spec.Process.Env, want)
+				}
+			}
+			return spec, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 

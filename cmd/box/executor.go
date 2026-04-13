@@ -39,15 +39,15 @@ type runtimeHandle interface {
 }
 
 type runtimeExecutor struct {
-	stderr                     io.Writer
-	getwd                      func() (string, error)
-	loadConfig                 func(path, cwd string) (config.Config, error)
-	startRuntime               func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
-	buildRootfsPlan            func(rootfs.PlanRequest) (rootfs.Plan, error)
-	applyRootfs                func(rootfs.ApplyRequest) (rootfs.ApplyResult, error)
-	buildSandboxSpec           func(gvisor.BuildSpecRequest) (gvisor.Spec, error)
-	writeBundleSpec            func(string, gvisor.Spec) error
-	runSandbox                 func(gvisor.RunRequest) error
+	stderr           io.Writer
+	getwd            func() (string, error)
+	loadConfig       func(path, cwd string) (config.Config, error)
+	startRuntime     func(ctx context.Context, cfg config.Config, deps boxruntime.Deps) (runtimeHandle, error)
+	buildRootfsPlan  func(rootfs.PlanRequest) (rootfs.Plan, error)
+	applyRootfs      func(rootfs.ApplyRequest) (rootfs.ApplyResult, error)
+	buildSandboxSpec func(gvisor.BuildSpecRequest) (gvisor.Spec, error)
+	writeBundleSpec  func(string, gvisor.Spec) error
+	runSandbox       func(gvisor.RunRequest) error
 }
 
 func (e runtimeExecutor) Run(req runRequest) error {
@@ -128,15 +128,24 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		repoPath = strings.TrimSpace(manifest.WorkdirMountSource)
 	}
 
+	runtimeCACert, err := readRuntimeCACert(manifest)
+	if err != nil {
+		_ = rt.Cleanup(ctx, deps)
+		return fmt.Errorf("read runtime ca cert: %w", err)
+	}
+
 	rootfsPlan, err := buildRootfsPlan(rootfs.PlanRequest{
-		RootfsMode:   cfg.Sandbox.Rootfs,
-		RepoPath:     repoPath,
-		Workdir:      cfg.Sandbox.Workdir,
-		NetworkMode:  cfg.Network.Mode,
-		GatewayIP:    manifest.GatewayIP,
-		SandboxHostn: cfg.Sandbox.Hostname,
-		ExtraRO:      cfg.Mounts.ExtraRO,
-		ExtraRW:      cfg.Mounts.ExtraRW,
+		RootfsMode:        cfg.Sandbox.Rootfs,
+		RepoPath:          repoPath,
+		Workdir:           cfg.Sandbox.Workdir,
+		NetworkMode:       cfg.Network.Mode,
+		GatewayIP:         manifest.GatewayIP,
+		SandboxHostn:      cfg.Sandbox.Hostname,
+		ExtraRO:           cfg.Mounts.ExtraRO,
+		ExtraRW:           cfg.Mounts.ExtraRW,
+		RuntimeCACertPEM:  runtimeCACert,
+		TrustedCACertPEM:  runtimeCACert,
+		TrustedCACertPath: manifest.CA.SandboxCertPath,
 	})
 	if err != nil {
 		_ = rt.Cleanup(ctx, deps)
@@ -153,7 +162,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		_ = rt.Cleanup(ctx, deps)
 		return fmt.Errorf("apply rootfs plan: %w", err)
 	}
-	extraEnv := sandboxProxyEnv(manifest.GatewayIP, cfg)
+	extraEnv := sandboxProxyEnv(manifest)
 
 	spec, err := buildSandboxSpec(gvisor.BuildSpecRequest{
 		Config:               cfg,
@@ -161,6 +170,7 @@ func (e runtimeExecutor) Run(req runRequest) error {
 		Payload:              req.ShellCommand,
 		HostEnv:              os.Environ(),
 		ExtraEnv:             extraEnv,
+		RuntimeManifest:      manifest,
 		RootfsPlan:           rootfsPlan,
 		NetworkNamespacePath: sandboxNetworkNamespacePath(cfg, manifest.Net.NetNS),
 	})
@@ -293,7 +303,7 @@ func startTransparentProxyWithDeps(ctx context.Context, req boxruntime.ProxyStar
 		if err != nil {
 			_ = httpServer.Close()
 			_ = tlsServer.Close()
-				return nil, fmt.Errorf("listen localhost proxy on port %d: %w", req.Config.HTTPPort, err)
+			return nil, fmt.Errorf("listen localhost proxy on port %d: %w", req.Config.HTTPPort, err)
 		}
 		localhostHTTP, err = deps.startHTTP(ctx, proxy.ProxyConfig{
 			Listen:          consumeListener(localhostListener),
@@ -655,14 +665,26 @@ func commandShellForTTY(commandShell string, tty ttyState) string {
 	return commandShell
 }
 
-func sandboxProxyEnv(gatewayIP string, cfg config.Config) []string {
+func sandboxProxyEnv(manifest boxruntime.Manifest) []string {
 	var env []string
-	if modeUsesProxy(cfg) {
-		proxy := proxyURL(gatewayIP, cfg.Network.TransparentProxy.HTTPPort)
+	if modeUsesProxy(manifest) {
+		proxy := proxyURL(manifest.GatewayIP, manifest.Envoy.ExplicitPort)
 		env = append(env,
 			"HTTP_PROXY="+proxy,
 			"HTTPS_PROXY="+proxy,
 			"NO_PROXY=127.0.0.1,localhost",
+		)
+	}
+	if strings.TrimSpace(manifest.CA.CertPath) != "" || strings.TrimSpace(manifest.CA.SandboxCertPath) != "" {
+		certPath := manifest.CA.SandboxCertPath
+		if strings.TrimSpace(certPath) == "" {
+			certPath = rootfs.RuntimeCACertPath
+		}
+		env = append(env,
+			"SSL_CERT_FILE="+certPath,
+			"CURL_CA_BUNDLE="+certPath,
+			"REQUESTS_CA_BUNDLE="+certPath,
+			"NODE_EXTRA_CA_CERTS="+certPath,
 		)
 	}
 	return env
@@ -672,8 +694,21 @@ func proxyURL(host string, port int) string {
 	return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func modeUsesProxy(cfg config.Config) bool {
-	return strings.EqualFold(strings.TrimSpace(cfg.Network.Mode), "monitor") && cfg.Network.TransparentProxy.Enabled
+func modeUsesProxy(manifest boxruntime.Manifest) bool {
+	return strings.TrimSpace(manifest.GatewayIP) != "" &&
+		manifest.Envoy.ExplicitPort > 0
+}
+
+func readRuntimeCACert(manifest boxruntime.Manifest) (string, error) {
+	path := strings.TrimSpace(manifest.CA.CertPath)
+	if path == "" {
+		return "", nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
 }
 
 func sandboxNetworkNamespacePath(cfg config.Config, netNS string) string {

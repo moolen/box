@@ -48,6 +48,55 @@ func TestRunCreatesStateDirAndEventLog(t *testing.T) {
 	}
 }
 
+func TestRunRecordsRandomizedEnvoyPortsAndCAAssets(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("enforce")
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:    fixedClock,
+		RandomID: func() string { return "runtime-envoy-ca" },
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if rt.Manifest.Envoy.ExplicitPort == 0 || rt.Manifest.Envoy.TransparentPort == 0 || rt.Manifest.Envoy.DNSPort == 0 {
+		t.Fatalf("Manifest.Envoy = %#v, want randomized non-zero ports", rt.Manifest.Envoy)
+	}
+	if rt.Manifest.Envoy.ExplicitPort == rt.Manifest.Envoy.TransparentPort ||
+		rt.Manifest.Envoy.ExplicitPort == rt.Manifest.Envoy.DNSPort ||
+		rt.Manifest.Envoy.TransparentPort == rt.Manifest.Envoy.DNSPort {
+		t.Fatalf("Manifest.Envoy = %#v, want distinct listener ports", rt.Manifest.Envoy)
+	}
+	if strings.TrimSpace(rt.Manifest.CA.CertPath) == "" {
+		t.Fatalf("Manifest.CA.CertPath = %q, want non-empty", rt.Manifest.CA.CertPath)
+	}
+	if strings.TrimSpace(rt.Manifest.CA.KeyPath) == "" {
+		t.Fatalf("Manifest.CA.KeyPath = %q, want non-empty", rt.Manifest.CA.KeyPath)
+	}
+	if strings.TrimSpace(rt.Manifest.CA.SandboxCertPath) == "" {
+		t.Fatalf("Manifest.CA.SandboxCertPath = %q, want non-empty", rt.Manifest.CA.SandboxCertPath)
+	}
+	if rt.Manifest.Envoy.BootstrapPath == "" {
+		t.Fatalf("Manifest.Envoy.BootstrapPath = %q, want non-empty", rt.Manifest.Envoy.BootstrapPath)
+	}
+
+	certPEM, err := os.ReadFile(rt.Manifest.CA.CertPath)
+	if err != nil {
+		t.Fatalf("ReadFile(CA cert) error = %v", err)
+	}
+	if !strings.Contains(string(certPEM), "BEGIN CERTIFICATE") {
+		t.Fatalf("CA cert = %q, want PEM certificate", string(certPEM))
+	}
+	if _, err := os.Stat(rt.Manifest.CA.KeyPath); err != nil {
+		t.Fatalf("CA key stat error = %v", err)
+	}
+}
+
 func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 	t.Parallel()
 
@@ -770,7 +819,7 @@ func TestRunCreatesMissingStateRootBeforeStartupChecks(t *testing.T) {
 	}
 }
 
-func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
+func TestEnforceModeStartsDNSWithoutLegacyAllowsetCommands(t *testing.T) {
 	t.Parallel()
 
 	cfg := testConfig("enforce")
@@ -834,15 +883,12 @@ func TestEnforceModeStartsDNSAndAddsResolvedIPsToAllowset(t *testing.T) {
 		t.Fatalf("DNS request gateway ip = %q, want %q", dnsReq.GatewayIP, rt.Manifest.GatewayIP)
 	}
 
-	mustContainCall(t, exec.calls, "nft add set inet box_")
-	mustContainCall(t, exec.calls, "nft add element inet box_")
-	mustContainCall(t, exec.calls, "93.184.216.34")
-	mustContainCall(t, exec.calls, "93.184.216.35")
-	if countCallsContaining(exec.calls, "93.184.216.34") != 1 {
-		t.Fatalf("expected duplicate learned IPs to be de-duplicated; calls=%#v", exec.calls)
+	for _, call := range exec.calls {
+		if strings.Contains(call, "allow_v4") || strings.Contains(call, "nft add element inet box_") {
+			t.Fatalf("legacy allowset command must not be emitted; calls=%#v", exec.calls)
+		}
 	}
 }
-
 
 func TestEnforceAllowProxyTargetAllowsConfiguredCIDRAndBlocksOtherIPs(t *testing.T) {
 	t.Parallel()
@@ -1158,6 +1204,12 @@ func testConfig(networkMode string) config.Config {
 			DNS: config.DNSConfig{
 				BindAddr: "auto",
 				Upstream: []string{"1.1.1.1:53"},
+			},
+			Envoy: config.EnvoyConfig{
+				Enabled:  true,
+				Mode:     "peek",
+				HTTPPort: 18080,
+				TLSPort:  18443,
 			},
 			TransparentProxy: config.TransparentProxyConfig{
 				Enabled:  true,
