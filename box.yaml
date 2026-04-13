@@ -22,7 +22,7 @@ sandbox:
 
   # When true, start from the host process environment.
   # Entries in `env` still override inherited values.
-  inherit_env: false
+  inherit_env: true
 
   # Extra environment variables injected into the sandbox process.
   env:
@@ -64,7 +64,15 @@ network:
     tls_port: 18443
 
   # Egress policy rules enforced by the host-managed network layer.
-  policy: []
+  policy:
+    - hostname: example.com
+      ports: [443]
+    - hostname: zeit.de
+      ports: [80]
+      http:
+        path:
+          - /index
+
 
 mounts:
   # Extra host paths to bind read-only or read-write into the sandbox.
