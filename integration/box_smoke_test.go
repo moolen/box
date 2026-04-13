@@ -122,6 +122,64 @@ func TestBoxTransparentHTTPSPathRuleBlocksMismatchedPath(t *testing.T) {
 	}
 }
 
+func TestBoxProxiedHTTPSPathRuleAllowsMatchingPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/"},
+			},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-sS", "https://example.com/",
+	)
+	if err != nil {
+		t.Fatalf("run box proxied https curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("proxied https curl output = %q, want Example Domain response body", stdout)
+	}
+}
+
+func TestBoxProxiedHTTPSPathRuleBlocksMismatchedPath(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/foo*"},
+			},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"curl", "-sS", "https://example.com/",
+	)
+	if strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("path-mismatched proxied https unexpectedly returned body; stdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "no_matching_rule") {
+		t.Fatalf("proxied https path mismatch stdout = %q, want policy deny reason; stderr=%q err=%v", stdout, stderr, err)
+	}
+}
+
 func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")

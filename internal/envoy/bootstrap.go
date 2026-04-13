@@ -8,14 +8,14 @@ import (
 )
 
 type BootstrapConfig struct {
-	NodeID                  string
-	ExplicitPort            int
-	TransparentPort         int
-	DNSPort                 int
-	DNSUpstream             []string
-	AuthzAddress            string
+	NodeID                     string
+	ExplicitPort               int
+	TransparentPort            int
+	DNSPort                    int
+	DNSUpstream                []string
+	AuthzAddress               string
 	TransparentTLSCertificates []TLSCertificate
-	UpstreamTrustBundlePath string
+	UpstreamTrustBundlePath    string
 }
 
 type TLSCertificate struct {
@@ -74,7 +74,7 @@ static_resources:
                         - match:
                             connect_matcher: {}
                           route:
-                            cluster: dynamic_forward_proxy
+                            cluster: explicit_connect_mitm
                             upgrade_configs:
                               - upgrade_type: CONNECT
                                 connect_config: {}
@@ -154,6 +154,18 @@ static_resources:
           dns_cache_config:
             name: dynamic_forward_proxy_cache
             dns_lookup_family: V4_ONLY
+    - name: explicit_connect_mitm
+      type: STATIC
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: explicit_connect_mitm
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: %d
     - name: dynamic_forward_proxy_tls
       connect_timeout: 5s
       lb_policy: CLUSTER_PROVIDED
@@ -170,7 +182,7 @@ admin:
     socket_address:
       address: 127.0.0.1
       port_value: 0
-`, cfg.NodeID, cfg.ExplicitPort, cfg.TransparentPort, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
+`, cfg.NodeID, cfg.ExplicitPort, cfg.TransparentPort, transparentFilterChains, cfg.DNSPort, dnsResolvers, host, authzPort, cfg.TransparentPort, renderUpstreamTLSClusterTransportSocket(cfg.UpstreamTrustBundlePath)), nil
 }
 
 func renderTransparentFilterChains(certs []TLSCertificate) (string, error) {

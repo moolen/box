@@ -188,6 +188,7 @@ func (s *Service) CheckHTTP(_ context.Context, req HTTPCheckRequest) (HTTPCheckR
 		SNI:             req.SNI,
 		Authority:       req.Authority,
 		Path:            req.Path,
+		IsConnect:       strings.EqualFold(strings.TrimSpace(req.Method), http.MethodConnect),
 	}, s.cfg.Rules, s.cfg.Mode)
 
 	s.emit(Event{

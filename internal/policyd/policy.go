@@ -43,7 +43,8 @@ type Request struct {
 	Authority string
 
 	// HTTP-layer fields (when available).
-	Path string
+	Path      string
+	IsConnect bool
 }
 
 type Decision struct {
@@ -106,7 +107,7 @@ func Evaluate(req Request, rules []config.NetworkPolicyRule, mode Mode) Decision
 		if !matchHostnameRule(host, ruleHost) {
 			continue
 		}
-		if rule.HTTP != nil && len(rule.HTTP.Path) > 0 {
+		if !req.IsConnect && rule.HTTP != nil && len(rule.HTTP.Path) > 0 {
 			if !matchesAnyGlob(req.Path, rule.HTTP.Path) {
 				continue
 			}

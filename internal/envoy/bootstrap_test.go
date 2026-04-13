@@ -38,6 +38,7 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"19002",
 		"19053",
 		"ext_authz",
+		"explicit_connect_mitm",
 		"dynamic_forward_proxy",
 		"grpc_service",
 		"envoy_grpc",
@@ -59,6 +60,8 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"dynamic_forward_proxy_tls",
 		"UpstreamTlsContext",
 		"/run/box/runtime-a/ca/upstream-trust-bundle.crt",
+		"cluster: explicit_connect_mitm",
+		"address: 127.0.0.1",
 		"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
 		"dns_cache_config",
 		"type.googleapis.com/envoy.extensions.filters.udp.dns_filter.v3.DnsFilterConfig",
@@ -73,6 +76,9 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 	}
 	if strings.Contains(content, "http_service:") {
 		t.Fatalf("bootstrap unexpectedly still uses http ext_authz\ncontent=%s", content)
+	}
+	if strings.Contains(content, "cluster: dynamic_forward_proxy\n                            upgrade_configs:\n                              - upgrade_type: CONNECT\n                                connect_config: {}") {
+		t.Fatalf("bootstrap unexpectedly still routes CONNECT directly to dynamic_forward_proxy\ncontent=%s", content)
 	}
 	if strings.Contains(content, "resolution_timeout") {
 		t.Fatalf("bootstrap unexpectedly includes unsupported dns client_config.resolution_timeout\ncontent=%s", content)

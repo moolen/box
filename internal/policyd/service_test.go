@@ -257,6 +257,50 @@ func TestCheckGRPCAllowsCONNECTAuthorityRequest(t *testing.T) {
 	}
 }
 
+func TestCheckGRPCAllowsCONNECTWhenOnlyInnerHTTPSRequestShouldEnforcePath(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/allowed/*"},
+			},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "93.184.216.34",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 443,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodConnect,
+					Host:   "example.com:443",
+					Scheme: "http",
+					Path:   "example.com:443",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
+		t.Fatalf("status = %v, want %v; denied=%#v", got, codes.OK, resp.GetDeniedResponse())
+	}
+}
+
 func TestCheckGRPCPrefersAuthorityPortOverProxyListenerPort(t *testing.T) {
 	svc := NewService(ServiceConfig{
 		Mode: ModeEnforce,
