@@ -65,6 +65,50 @@ func TestIssueLeafIncludesDNSSANForHostname(t *testing.T) {
 	}
 }
 
+func TestNewRuntimeCARejectsEmptyRuntimeID(t *testing.T) {
+	if _, err := NewRuntimeCA(""); err == nil {
+		t.Fatalf("NewRuntimeCA(\"\") error = nil, want non-nil")
+	}
+}
+
+func TestIssueLeafRejectsNeitherOrBothSANInputs(t *testing.T) {
+	ca, err := NewRuntimeCA("runtime-a")
+	if err != nil {
+		t.Fatalf("NewRuntimeCA() error = %v", err)
+	}
+
+	if _, _, err := ca.IssueLeaf(LeafRequest{}); err == nil {
+		t.Fatalf("IssueLeaf(neither) error = nil, want non-nil")
+	}
+
+	if _, _, err := ca.IssueLeaf(LeafRequest{
+		DNSName: "example.com",
+		IP:      netip.MustParseAddr("203.0.113.7"),
+	}); err == nil {
+		t.Fatalf("IssueLeaf(both) error = nil, want non-nil")
+	}
+}
+
+func TestIssueLeafVerifiesAgainstRoot(t *testing.T) {
+	ca, err := NewRuntimeCA("runtime-a")
+	if err != nil {
+		t.Fatalf("NewRuntimeCA() error = %v", err)
+	}
+
+	root := mustParseCert(t, ca.RootCertPEM)
+	leafPEM, _, err := ca.IssueLeaf(LeafRequest{DNSName: "example.com"})
+	if err != nil {
+		t.Fatalf("IssueLeaf() error = %v", err)
+	}
+	leaf := mustParseCert(t, leafPEM)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+		t.Fatalf("leaf.Verify() error = %v", err)
+	}
+}
+
 func mustParseCert(t *testing.T, certPEM []byte) *x509.Certificate {
 	t.Helper()
 	block, _ := pem.Decode(certPEM)
@@ -77,4 +121,3 @@ func mustParseCert(t *testing.T, certPEM []byte) *x509.Certificate {
 	}
 	return cert
 }
-

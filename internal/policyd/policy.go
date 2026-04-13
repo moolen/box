@@ -73,8 +73,15 @@ func Evaluate(req Request, rules []config.NetworkPolicyRule, mode Mode) Decision
 	}
 
 	// Hostname rules require consistent host signals when multiple are present.
-	sni := normalizeHostSignal(req.SNI)
-	auth := normalizeHostSignal(req.Authority)
+	// If a host signal is present but malformed, fail closed.
+	sni, sniPresent, sniOK := parseHostSignal(req.SNI)
+	auth, authPresent, authOK := parseAuthority(req.Authority)
+	if (sniPresent && !sniOK) || (authPresent && !authOK) {
+		return finalize(mode, Decision{
+			Verdict: VerdictDeny,
+			Reason:  "invalid_host_signal",
+		})
+	}
 	if sni != "" && auth != "" && sni != auth {
 		return finalize(mode, Decision{
 			Verdict: VerdictDeny,
@@ -143,29 +150,48 @@ func portMatches(ports []int, dst int) bool {
 	return false
 }
 
-func normalizeHostSignal(in string) string {
+func parseHostSignal(in string) (host string, present bool, ok bool) {
 	trimmed := strings.TrimSpace(in)
 	if trimmed == "" {
-		return ""
+		return "", false, true
 	}
-
-	// Authority may include a port (e.g. "example.com:443").
-	if host, port, err := net.SplitHostPort(trimmed); err == nil {
-		if port == "" {
-			return ""
-		}
-		if p, err := strconv.Atoi(port); err != nil || p < 0 || p > 65535 {
-			return ""
-		}
-		trimmed = host
-	}
-
-	trimmed = strings.ToLower(trimmed)
-	trimmed = strings.TrimSuffix(trimmed, ".")
+	trimmed = strings.ToLower(strings.TrimSuffix(trimmed, "."))
 	if trimmed == "" {
-		return ""
+		return "", true, false
 	}
-	return trimmed
+	return trimmed, true, true
+}
+
+func parseAuthority(in string) (host string, present bool, ok bool) {
+	trimmed := strings.TrimSpace(in)
+	if trimmed == "" {
+		return "", false, true
+	}
+
+	// Common form: "host:port" or "[ipv6]:port". net.SplitHostPort handles both.
+	if h, p, err := net.SplitHostPort(trimmed); err == nil {
+		port, err := strconv.Atoi(p)
+		if err != nil || port < 0 || port > 65535 || h == "" {
+			return "", true, false
+		}
+		host = strings.ToLower(strings.TrimSuffix(h, "."))
+		if host == "" {
+			return "", true, false
+		}
+		return host, true, true
+	}
+
+	// Fail closed if it looks like an attempt at host:port but didn't parse.
+	// This avoids an attacker using malformed Authority to bypass the consistency check.
+	if strings.Contains(trimmed, ":") {
+		return "", true, false
+	}
+
+	host = strings.ToLower(strings.TrimSuffix(trimmed, "."))
+	if host == "" {
+		return "", true, false
+	}
+	return host, true, true
 }
 
 func matchHostnameRule(host string, rule string) bool {
@@ -186,11 +212,6 @@ func matchHostnameRule(host string, rule string) bool {
 		}
 		// Requires at least one label in front.
 		return strings.HasSuffix(host, "."+suffix) && host != suffix
-	}
-
-	// Fallback glob semantics ("*" matches any substring).
-	if strings.Contains(rule, "*") {
-		return matchGlob(rule, host)
 	}
 	return false
 }
@@ -241,4 +262,3 @@ func matchGlob(pattern, s string) bool {
 	}
 	return true
 }
-

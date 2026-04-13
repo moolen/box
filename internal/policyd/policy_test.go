@@ -130,3 +130,38 @@ func TestEvaluateModeObserveUsesWouldVerdicts(t *testing.T) {
 	}
 }
 
+func TestEvaluateMalformedAuthorityFailsClosed(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		Hostname: "example.com",
+		Ports:    []int{443},
+	}}
+
+	decision := Evaluate(Request{
+		Protocol:        ProtocolHTTPS,
+		DestinationPort: 443,
+		SNI:             "example.com",
+		Authority:       "example.com:bad",
+	}, rules, ModeEnforce)
+
+	if decision.Verdict != VerdictDeny {
+		t.Fatalf("Verdict = %q, want deny (decision = %#v)", decision.Verdict, decision)
+	}
+}
+
+func TestEvaluateAuthorityWithPortNormalizesAndAllows(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		Hostname: "example.com",
+		Ports:    []int{443},
+	}}
+
+	decision := Evaluate(Request{
+		Protocol:        ProtocolHTTPS,
+		DestinationPort: 443,
+		SNI:             "example.com",
+		Authority:       "example.com:443",
+	}, rules, ModeEnforce)
+
+	if decision.Verdict != VerdictAllow {
+		t.Fatalf("Verdict = %q, want allow (decision = %#v)", decision.Verdict, decision)
+	}
+}
