@@ -31,6 +31,7 @@ const (
 	caDirName        = "ca"
 	caCertFileName   = "root-ca.pem"
 	caKeyFileName    = "root-ca-key.pem"
+	upstreamTrustBundleFileName = "upstream-trust-bundle.crt"
 	envoyDirName     = "envoy"
 	bootstrapName    = "bootstrap.yaml"
 )
@@ -91,6 +92,8 @@ type EnvoyStartRequest struct {
 	BootstrapPath    string
 	LogPath          string
 	PolicyListenAddr string
+	TransparentTLSCertificates []TransparentTLSCertificate
+	UpstreamTrustBundlePath    string
 }
 
 type MonitorPreflightRequest struct {
@@ -139,6 +142,14 @@ type CARuntime struct {
 	CertPath        string `json:"cert_path"`
 	KeyPath         string `json:"key_path"`
 	SandboxCertPath string `json:"sandbox_cert_path"`
+	UpstreamTrustBundlePath string `json:"upstream_trust_bundle_path,omitempty"`
+	TransparentTLSCertificates []TransparentTLSCertificate `json:"transparent_tls_certificates,omitempty"`
+}
+
+type TransparentTLSCertificate struct {
+	ServerNames []string `json:"server_names"`
+	CertPath    string   `json:"cert_path"`
+	KeyPath     string   `json:"key_path"`
 }
 
 type NetResources struct {
@@ -222,7 +233,7 @@ func Run(ctx context.Context, req Request, deps Deps) (_ *Runtime, runErr error)
 	runtimeCfg := req.Config
 	runtimeCfg.Network.Subnet = netResources.SubnetCIDR
 
-	envoyRuntime, caRuntime, caCertPEM, err := prepareManagedNetworkAssets(network, stateDir, runtimeID)
+	envoyRuntime, caRuntime, caCertPEM, err := prepareManagedNetworkAssets(network, stateDir, runtimeID, runtimeCfg.Network.Policy)
 	if err != nil {
 		return nil, err
 	}
@@ -388,9 +399,13 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
-	dnsListenAddr, err := allocateLoopbackUDPAddr()
+	dnsListenAddr, err := allocateWildcardUDPAddr()
 	if err != nil {
 		return fmt.Errorf("allocate policyd dns addr: %w", err)
+	}
+	dnsUpstreamAddr, err := loopbackAddrForPort(dnsListenAddr)
+	if err != nil {
+		return fmt.Errorf("derive policyd dns upstream addr: %w", err)
 	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
@@ -413,15 +428,17 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
-			RuntimeID:        rt.Manifest.RuntimeID,
-			GatewayIP:        rt.Manifest.GatewayIP,
-			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
-			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
-			DNSPort:          rt.Manifest.Envoy.DNSPort,
-			DNSUpstream:      []string{dnsListenAddr},
-			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
-			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
-			PolicyListenAddr: policyListenAddr,
+			RuntimeID:                 rt.Manifest.RuntimeID,
+			GatewayIP:                 rt.Manifest.GatewayIP,
+			ExplicitPort:              rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:           rt.Manifest.Envoy.TransparentPort,
+			DNSPort:                   rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:               []string{dnsUpstreamAddr},
+			BootstrapPath:             rt.Manifest.Envoy.BootstrapPath,
+			LogPath:                   filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr:          policyListenAddr,
+			TransparentTLSCertificates: append([]TransparentTLSCertificate(nil), rt.Manifest.CA.TransparentTLSCertificates...),
+			UpstreamTrustBundlePath:   rt.Manifest.CA.UpstreamTrustBundlePath,
 		})
 		if err != nil {
 			return fmt.Errorf("start envoy: %w", err)
@@ -476,9 +493,13 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return fmt.Errorf("allocate policy service addr: %w", err)
 	}
-	dnsListenAddr, err := allocateLoopbackUDPAddr()
+	dnsListenAddr, err := allocateWildcardUDPAddr()
 	if err != nil {
 		return fmt.Errorf("allocate policyd dns addr: %w", err)
+	}
+	dnsUpstreamAddr, err := loopbackAddrForPort(dnsListenAddr)
+	if err != nil {
+		return fmt.Errorf("derive policyd dns upstream addr: %w", err)
 	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
@@ -501,15 +522,17 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartEnvoy != nil {
 		envoyRunner, err := deps.StartEnvoy(ctx, EnvoyStartRequest{
-			RuntimeID:        rt.Manifest.RuntimeID,
-			GatewayIP:        rt.Manifest.GatewayIP,
-			ExplicitPort:     rt.Manifest.Envoy.ExplicitPort,
-			TransparentPort:  rt.Manifest.Envoy.TransparentPort,
-			DNSPort:          rt.Manifest.Envoy.DNSPort,
-			DNSUpstream:      []string{dnsListenAddr},
-			BootstrapPath:    rt.Manifest.Envoy.BootstrapPath,
-			LogPath:          filepath.Join(rt.Manifest.StateDir, "envoy.log"),
-			PolicyListenAddr: policyListenAddr,
+			RuntimeID:                 rt.Manifest.RuntimeID,
+			GatewayIP:                 rt.Manifest.GatewayIP,
+			ExplicitPort:              rt.Manifest.Envoy.ExplicitPort,
+			TransparentPort:           rt.Manifest.Envoy.TransparentPort,
+			DNSPort:                   rt.Manifest.Envoy.DNSPort,
+			DNSUpstream:               []string{dnsUpstreamAddr},
+			BootstrapPath:             rt.Manifest.Envoy.BootstrapPath,
+			LogPath:                   filepath.Join(rt.Manifest.StateDir, "envoy.log"),
+			PolicyListenAddr:          policyListenAddr,
+			TransparentTLSCertificates: append([]TransparentTLSCertificate(nil), rt.Manifest.CA.TransparentTLSCertificates...),
+			UpstreamTrustBundlePath:   rt.Manifest.CA.UpstreamTrustBundlePath,
 		})
 		if err != nil {
 			return fmt.Errorf("start envoy: %w", err)
@@ -687,6 +710,26 @@ func allocateLoopbackUDPAddr() (string, error) {
 	return addr, nil
 }
 
+func allocateWildcardUDPAddr() (string, error) {
+	conn, err := net.ListenPacket("udp4", "0.0.0.0:0")
+	if err != nil {
+		return "", err
+	}
+	addr := conn.LocalAddr().String()
+	if err := conn.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
+}
+
+func loopbackAddrForPort(addr string) (string, error) {
+	_, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort("127.0.0.1", port), nil
+}
+
 func newRuntimeID(deps Deps) string {
 	if deps.RandomID != nil {
 		return deps.RandomID()
@@ -765,7 +808,7 @@ func generatedFileContent(files []rootfs.GeneratedFile, path string) string {
 	return ""
 }
 
-func prepareManagedNetworkAssets(networkMode, stateDir, runtimeID string) (EnvoyRuntime, CARuntime, string, error) {
+func prepareManagedNetworkAssets(networkMode, stateDir, runtimeID string, rules []config.NetworkPolicyRule) (EnvoyRuntime, CARuntime, string, error) {
 	if !usesManagedNetworkPolicy(networkMode) {
 		return EnvoyRuntime{}, CARuntime{}, "", nil
 	}
@@ -774,7 +817,7 @@ func prepareManagedNetworkAssets(networkMode, stateDir, runtimeID string) (Envoy
 	if err != nil {
 		return EnvoyRuntime{}, CARuntime{}, "", fmt.Errorf("allocate envoy runtime ports: %w", err)
 	}
-	caRuntime, certPEM, err := writeRuntimeCAAssets(stateDir, runtimeID)
+	caRuntime, certPEM, err := writeRuntimeCAAssets(stateDir, runtimeID, rules)
 	if err != nil {
 		return EnvoyRuntime{}, CARuntime{}, "", fmt.Errorf("prepare runtime ca assets: %w", err)
 	}
@@ -813,7 +856,7 @@ func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
 	}, nil
 }
 
-func writeRuntimeCAAssets(stateDir, runtimeID string) (CARuntime, string, error) {
+func writeRuntimeCAAssets(stateDir, runtimeID string, rules []config.NetworkPolicyRule) (CARuntime, string, error) {
 	caDir := filepath.Join(stateDir, caDirName)
 	if err := os.MkdirAll(caDir, 0o755); err != nil {
 		return CARuntime{}, "", fmt.Errorf("create ca dir %q: %w", caDir, err)
@@ -832,11 +875,25 @@ func writeRuntimeCAAssets(stateDir, runtimeID string) (CARuntime, string, error)
 	if err := os.WriteFile(keyPath, runtimeCA.RootKeyPEM, 0o600); err != nil {
 		return CARuntime{}, "", fmt.Errorf("write ca key %q: %w", keyPath, err)
 	}
+	upstreamTrustBundlePath := filepath.Join(caDir, upstreamTrustBundleFileName)
+	if trustBundle := buildSystemTrustBundlePEM(); strings.TrimSpace(trustBundle) != "" {
+		if err := os.WriteFile(upstreamTrustBundlePath, []byte(trustBundle), 0o644); err != nil {
+			return CARuntime{}, "", fmt.Errorf("write upstream trust bundle %q: %w", upstreamTrustBundlePath, err)
+		}
+	} else {
+		upstreamTrustBundlePath = ""
+	}
+	transparentTLSCertificates, err := writeTransparentTLSCertificates(filepath.Join(stateDir, envoyDirName, "tls"), runtimeCA, rules)
+	if err != nil {
+		return CARuntime{}, "", err
+	}
 
 	return CARuntime{
-		CertPath:        certPath,
-		KeyPath:         keyPath,
-		SandboxCertPath: rootfs.TrustedCABundlePath,
+		CertPath:                  certPath,
+		KeyPath:                   keyPath,
+		SandboxCertPath:           rootfs.TrustedCABundlePath,
+		UpstreamTrustBundlePath:   upstreamTrustBundlePath,
+		TransparentTLSCertificates: transparentTLSCertificates,
 	}, string(runtimeCA.RootCertPEM), nil
 }
 
@@ -846,6 +903,15 @@ func BuildSandboxTrustBundlePEM(runtimeCAPEM string) string {
 		return ""
 	}
 
+	bundle := bytes.NewBufferString(buildSystemTrustBundlePEM())
+	bundle.WriteString(runtimeCAPEM)
+	if !strings.HasSuffix(runtimeCAPEM, "\n") {
+		bundle.WriteByte('\n')
+	}
+	return bundle.String()
+}
+
+func buildSystemTrustBundlePEM() string {
 	var bundle bytes.Buffer
 	for _, path := range systemTrustBundlePaths {
 		content, err := os.ReadFile(path)
@@ -857,11 +923,79 @@ func BuildSandboxTrustBundlePEM(runtimeCAPEM string) string {
 			bundle.WriteByte('\n')
 		}
 	}
-	bundle.WriteString(runtimeCAPEM)
-	if !strings.HasSuffix(runtimeCAPEM, "\n") {
-		bundle.WriteByte('\n')
-	}
 	return bundle.String()
+}
+
+func writeTransparentTLSCertificates(dir string, runtimeCA *pki.RuntimeCA, rules []config.NetworkPolicyRule) ([]TransparentTLSCertificate, error) {
+	if runtimeCA == nil {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{})
+	var certificates []TransparentTLSCertificate
+	for _, rule := range rules {
+		host := normalizeTransparentTLSServerName(rule.Hostname)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+
+		certPEM, keyPEM, err := runtimeCA.IssueLeaf(pki.LeafRequest{DNSName: host})
+		if err != nil {
+			return nil, fmt.Errorf("issue transparent tls certificate for %q: %w", host, err)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create transparent tls dir %q: %w", dir, err)
+		}
+		base := sanitizeTransparentTLSFilename(host)
+		certPath := filepath.Join(dir, base+".crt")
+		keyPath := filepath.Join(dir, base+".key")
+		if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+			return nil, fmt.Errorf("write transparent tls cert %q: %w", certPath, err)
+		}
+		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+			return nil, fmt.Errorf("write transparent tls key %q: %w", keyPath, err)
+		}
+		certificates = append(certificates, TransparentTLSCertificate{
+			ServerNames: []string{host},
+			CertPath:    certPath,
+			KeyPath:     keyPath,
+		})
+	}
+	return certificates, nil
+}
+
+func normalizeTransparentTLSServerName(host string) string {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return ""
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return ""
+	}
+	return host
+}
+
+func sanitizeTransparentTLSFilename(host string) string {
+	var b strings.Builder
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if name == "" {
+		return "transparent-tls"
+	}
+	return name
 }
 
 func buildSandboxTrustBundlePEM(runtimeCAPEM string) string {

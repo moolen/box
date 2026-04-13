@@ -235,12 +235,14 @@ func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (bo
 		return nil, err
 	}
 	bootstrapContent, err := ienvoy.RenderBootstrap(ienvoy.BootstrapConfig{
-		NodeID:          req.RuntimeID,
-		ExplicitPort:    req.ExplicitPort,
-		TransparentPort: req.TransparentPort,
-		DNSPort:         req.DNSPort,
-		DNSUpstream:     append([]string(nil), req.DNSUpstream...),
-		AuthzAddress:    req.PolicyListenAddr,
+		NodeID:                  req.RuntimeID,
+		ExplicitPort:            req.ExplicitPort,
+		TransparentPort:         req.TransparentPort,
+		DNSPort:                 req.DNSPort,
+		DNSUpstream:             append([]string(nil), req.DNSUpstream...),
+		AuthzAddress:            req.PolicyListenAddr,
+		UpstreamTrustBundlePath: req.UpstreamTrustBundlePath,
+		TransparentTLSCertificates: mapTransparentTLSCertificates(req.TransparentTLSCertificates),
 	})
 	if err != nil {
 		return nil, err
@@ -253,6 +255,21 @@ func startEnvoyRunner(ctx context.Context, req boxruntime.EnvoyStartRequest) (bo
 		BootstrapPath: req.BootstrapPath,
 		LogPath:       req.LogPath,
 	})
+}
+
+func mapTransparentTLSCertificates(in []boxruntime.TransparentTLSCertificate) []ienvoy.TLSCertificate {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ienvoy.TLSCertificate, 0, len(in))
+	for _, cert := range in {
+		out = append(out, ienvoy.TLSCertificate{
+			ServerNames: append([]string(nil), cert.ServerNames...),
+			CertPath:    cert.CertPath,
+			KeyPath:     cert.KeyPath,
+		})
+	}
+	return out
 }
 
 type preflightCommandRunner func(ctx context.Context, name string, args ...string) (string, error)

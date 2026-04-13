@@ -13,6 +13,19 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		DNSPort:         19053,
 		DNSUpstream:     []string{"1.1.1.1:53", "8.8.8.8:53"},
 		AuthzAddress:    "127.0.0.1:20001",
+		TransparentTLSCertificates: []TLSCertificate{
+			{
+				ServerNames: []string{"example.com"},
+				CertPath:    "/run/box/runtime-a/envoy/example.com.crt",
+				KeyPath:     "/run/box/runtime-a/envoy/example.com.key",
+			},
+			{
+				ServerNames: []string{"*.example.org"},
+				CertPath:    "/run/box/runtime-a/envoy/wildcard-example.org.crt",
+				KeyPath:     "/run/box/runtime-a/envoy/wildcard-example.org.key",
+			},
+		},
+		UpstreamTrustBundlePath: "/run/box/runtime-a/ca/upstream-trust-bundle.crt",
 	}
 
 	content, err := RenderBootstrap(cfg)
@@ -35,6 +48,17 @@ func TestRenderBootstrapIncludesExplicitTransparentAndDNSListeners(t *testing.T)
 		"upgrade_type: CONNECT",
 		"connect_config: {}",
 		"envoy.filters.http.dynamic_forward_proxy",
+		"envoy.filters.listener.tls_inspector",
+		"transport_protocol: tls",
+		"server_names:",
+		"example.com",
+		"*.example.org",
+		"DownstreamTlsContext",
+		"/run/box/runtime-a/envoy/example.com.crt",
+		"/run/box/runtime-a/envoy/example.com.key",
+		"dynamic_forward_proxy_tls",
+		"UpstreamTlsContext",
+		"/run/box/runtime-a/ca/upstream-trust-bundle.crt",
 		"type.googleapis.com/envoy.extensions.filters.http.router.v3.Router",
 		"dns_cache_config",
 		"type.googleapis.com/envoy.extensions.filters.udp.dns_filter.v3.DnsFilterConfig",

@@ -255,8 +255,12 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	if envoyReq.DNSPort != rt.Manifest.Envoy.DNSPort {
 		t.Fatalf("Envoy request dns port = %d, want %d", envoyReq.DNSPort, rt.Manifest.Envoy.DNSPort)
 	}
-	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr}) {
-		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr})
+	wantDNSUpstream, err := loopbackAddrForPort(policyReq.DNSListenAddr)
+	if err != nil {
+		t.Fatalf("loopbackAddrForPort(%q) error = %v", policyReq.DNSListenAddr, err)
+	}
+	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{wantDNSUpstream}) {
+		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{wantDNSUpstream})
 	}
 	if envoyReq.PolicyListenAddr != policyReq.ListenAddr {
 		t.Fatalf("Envoy request policy addr = %q, want %q", envoyReq.PolicyListenAddr, policyReq.ListenAddr)
@@ -921,10 +925,20 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	t.Parallel()
 
 	cfg := testConfig("enforce")
-	cfg.Network.Policy = []config.NetworkPolicyRule{{
-		Hostname: "allowed.example.com",
-		Ports:    []int{443},
-	}}
+	cfg.Network.Policy = []config.NetworkPolicyRule{
+		{
+			Hostname: "allowed.example.com",
+			Ports:    []int{443},
+		},
+		{
+			Hostname: "*.example.org",
+			Ports:    []int{443},
+		},
+		{
+			CIDR:  "203.0.113.0/24",
+			Ports: []int{443},
+		},
+	}
 
 	exec := &recordingCommandExec{}
 	var policyReq PolicyServiceStartRequest
@@ -981,11 +995,32 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	if strings.TrimSpace(policyReq.DNSListenAddr) == "" {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want non-empty", policyReq.DNSListenAddr)
 	}
+	if strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
+		t.Fatalf("PolicyService DNSListenAddr = %q, want wildcard bind for redirected sandbox DNS", policyReq.DNSListenAddr)
+	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
 	}
-	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr}) {
-		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{policyReq.DNSListenAddr})
+	if len(envoyReq.TransparentTLSCertificates) != 2 {
+		t.Fatalf("Envoy request transparent tls certificates = %#v, want 2 hostname-backed certificates", envoyReq.TransparentTLSCertificates)
+	}
+	if got := envoyReq.TransparentTLSCertificates[0].ServerNames; !reflect.DeepEqual(got, []string{"allowed.example.com"}) {
+		t.Fatalf("first transparent tls certificate server names = %#v, want [allowed.example.com]", got)
+	}
+	if got := envoyReq.TransparentTLSCertificates[1].ServerNames; !reflect.DeepEqual(got, []string{"*.example.org"}) {
+		t.Fatalf("second transparent tls certificate server names = %#v, want [*.example.org]", got)
+	}
+	for _, cert := range envoyReq.TransparentTLSCertificates {
+		if strings.TrimSpace(cert.CertPath) == "" || strings.TrimSpace(cert.KeyPath) == "" {
+			t.Fatalf("transparent tls certificate = %#v, want non-empty cert and key paths", cert)
+		}
+	}
+	wantDNSUpstream, err := loopbackAddrForPort(policyReq.DNSListenAddr)
+	if err != nil {
+		t.Fatalf("loopbackAddrForPort(%q) error = %v", policyReq.DNSListenAddr, err)
+	}
+	if !reflect.DeepEqual(envoyReq.DNSUpstream, []string{wantDNSUpstream}) {
+		t.Fatalf("Envoy request DNSUpstream = %#v, want local policyd resolver %#v", envoyReq.DNSUpstream, []string{wantDNSUpstream})
 	}
 
 	for _, call := range exec.calls {

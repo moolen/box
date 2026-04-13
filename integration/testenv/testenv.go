@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"gvisor-net/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -103,28 +104,27 @@ func RequireAnyCommand(t *testing.T, names ...string) {
 
 func WriteEnforceConfig(t *testing.T, allowDomains []string, extraAllowedCIDRs []string) string {
 	t.Helper()
-	subnet := uniqueTestSubnet(t)
-
-	type policyRule struct {
-		Hostname string `yaml:"hostname,omitempty"`
-		CIDR     string `yaml:"cidr,omitempty"`
-		Ports    []int  `yaml:"ports"`
-	}
-	rules := make([]policyRule, 0, len(allowDomains)+len(extraAllowedCIDRs))
+	rules := make([]config.NetworkPolicyRule, 0, len(allowDomains)+len(extraAllowedCIDRs))
 	for _, domain := range allowDomains {
 		domain = strings.TrimSpace(domain)
 		if domain == "" {
 			continue
 		}
-		rules = append(rules, policyRule{Hostname: domain, Ports: []int{80, 443}})
+		rules = append(rules, config.NetworkPolicyRule{Hostname: domain, Ports: []int{80, 443}})
 	}
 	for _, cidr := range extraAllowedCIDRs {
 		cidr = strings.TrimSpace(cidr)
 		if cidr == "" {
 			continue
 		}
-		rules = append(rules, policyRule{CIDR: cidr, Ports: []int{80, 443}})
+		rules = append(rules, config.NetworkPolicyRule{CIDR: cidr, Ports: []int{80, 443}})
 	}
+	return WriteEnforceConfigWithRules(t, rules)
+}
+
+func WriteEnforceConfigWithRules(t *testing.T, rules []config.NetworkPolicyRule) string {
+	t.Helper()
+	subnet := uniqueTestSubnet(t)
 
 	policySection := "  policy: []"
 	if len(rules) > 0 {
