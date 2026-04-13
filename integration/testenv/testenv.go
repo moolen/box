@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,9 @@ func BuildBoxBinary(t *testing.T) BuiltBox {
 	}
 	if err := buildPackageAt(moduleRoot, "./internal/initshim", initShimOutput); err != nil {
 		t.Fatalf("buildPackageAt() error = %v", err)
+	}
+	if err := stageBundledEnvoy(moduleRoot, filepath.Dir(output)); err != nil {
+		t.Fatalf("stageBundledEnvoy() error = %v", err)
 	}
 
 	return BuiltBox{
@@ -286,6 +290,45 @@ func buildPackage(pkgPath, output string) error {
 		return err
 	}
 	return buildPackageAt(moduleRoot, pkgPath, output)
+}
+
+func stageBundledEnvoy(moduleRoot, outputDir string) error {
+	sourcePath := filepath.Join(moduleRoot, "bin", "envoy")
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("bundled envoy binary %q is required: %w", sourcePath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("bundled envoy binary %q is a directory", sourcePath)
+	}
+
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return fmt.Errorf("create output dir %q: %w", outputDir, err)
+	}
+
+	destPath := filepath.Join(outputDir, "envoy")
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return fmt.Errorf("open bundled envoy binary %q: %w", sourcePath, err)
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return fmt.Errorf("create staged envoy binary %q: %w", destPath, err)
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, sourceFile); err != nil {
+		return fmt.Errorf("copy bundled envoy binary to %q: %w", destPath, err)
+	}
+	if err := destFile.Close(); err != nil {
+		return fmt.Errorf("close staged envoy binary %q: %w", destPath, err)
+	}
+	if err := os.Chmod(destPath, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("chmod staged envoy binary %q: %w", destPath, err)
+	}
+	return nil
 }
 
 func uniqueTestSubnet(t *testing.T) string {

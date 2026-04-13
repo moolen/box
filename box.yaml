@@ -33,8 +33,8 @@ sandbox:
   command_shell: /bin/bash -ilc
 
 network:
-  # `monitor` is observation-only. It does not restrict general egress.
-  # Use `enforce` for DNS-gated egress controls.
+  # `monitor` records policy verdicts and prints a traffic summary.
+  # Use `enforce` to deny traffic that does not match `network.policy`.
   mode: monitor
 
   # IPv4 pool that `box` allocates per-sandbox /30 point-to-point links from.
@@ -51,14 +51,15 @@ network:
       - 8.8.8.8:53
 
   envoy:
-    # Enables host-side interception for HTTP and TLS.
+    # Enables the host-side Envoy interception path.
     enabled: true
 
     # `peek` logs HTTP metadata and TLS SNI without full TLS MITM.
-    # `mitm` is rejected by the runtime today.
+    # `mitm` is still rejected by the runtime today.
     mode: peek
 
-    # Host listener ports used by the proxy listeners.
+    # Legacy compatibility knobs. Runtime-owned Envoy listeners are
+    # randomized per sandbox startup and injected into the sandbox env.
     http_port: 18080
     tls_port: 18443
 

@@ -76,8 +76,79 @@ func TestWriteOpenCodeMonitorConfig(t *testing.T) {
 	if cfg.Network.Mode != "monitor" {
 		t.Fatalf("network.mode = %q, want monitor", cfg.Network.Mode)
 	}
-	if !cfg.Network.TransparentProxy.Enabled {
-		t.Fatalf("network.transparent_proxy.enabled = %t, want true", cfg.Network.TransparentProxy.Enabled)
+	if !cfg.Network.Envoy.Enabled {
+		t.Fatalf("network.envoy.enabled = %t, want true", cfg.Network.Envoy.Enabled)
+	}
+}
+
+func TestWriteEnforceConfigEmitsNetworkPolicyRules(t *testing.T) {
+	t.Parallel()
+
+	path := WriteEnforceConfig(t, []string{"example.com"}, []string{"192.0.2.0/24"})
+
+	cfg, err := config.Load(path, t.TempDir())
+	if err != nil {
+		t.Fatalf("config.Load(%q) error = %v", path, err)
+	}
+
+	if len(cfg.Network.Policy) != 2 {
+		t.Fatalf("network.policy = %#v, want 2 rules", cfg.Network.Policy)
+	}
+	if cfg.Network.Policy[0].Hostname != "example.com" {
+		t.Fatalf("network.policy[0].Hostname = %q, want example.com", cfg.Network.Policy[0].Hostname)
+	}
+	if !reflect.DeepEqual(cfg.Network.Policy[0].Ports, []int{80, 443}) {
+		t.Fatalf("network.policy[0].Ports = %#v, want [80 443]", cfg.Network.Policy[0].Ports)
+	}
+	if cfg.Network.Policy[1].CIDR != "192.0.2.0/24" {
+		t.Fatalf("network.policy[1].CIDR = %q, want 192.0.2.0/24", cfg.Network.Policy[1].CIDR)
+	}
+}
+
+func TestStageBundledEnvoyCopiesBinaryNextToBuiltBox(t *testing.T) {
+	t.Parallel()
+
+	moduleRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(moduleRoot, "bin"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(bin) error = %v", err)
+	}
+	sourcePath := filepath.Join(moduleRoot, "bin", "envoy")
+	if err := os.WriteFile(sourcePath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(envoy) error = %v", err)
+	}
+
+	outputDir := t.TempDir()
+	if err := stageBundledEnvoy(moduleRoot, outputDir); err != nil {
+		t.Fatalf("stageBundledEnvoy() error = %v", err)
+	}
+
+	stagedPath := filepath.Join(outputDir, "envoy")
+	content, err := os.ReadFile(stagedPath)
+	if err != nil {
+		t.Fatalf("ReadFile(staged envoy) error = %v", err)
+	}
+	if string(content) != "#!/bin/sh\nexit 0\n" {
+		t.Fatalf("staged envoy content = %q, want copied binary", string(content))
+	}
+
+	info, err := os.Stat(stagedPath)
+	if err != nil {
+		t.Fatalf("Stat(staged envoy) error = %v", err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("staged envoy mode = %v, want executable bits", info.Mode().Perm())
+	}
+}
+
+func TestStageBundledEnvoyReturnsHelpfulErrorWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	err := stageBundledEnvoy(t.TempDir(), t.TempDir())
+	if err == nil {
+		t.Fatal("stageBundledEnvoy() error = nil, want missing binary error")
+	}
+	if !strings.Contains(err.Error(), "bundled envoy binary") {
+		t.Fatalf("stageBundledEnvoy() error = %q, want bundled envoy context", err.Error())
 	}
 }
 

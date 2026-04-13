@@ -17,7 +17,8 @@ make build
 make test
 ```
 
-`make build` produces both binaries:
+`make build` produces both sandbox binaries and validates that a bundled Envoy
+artifact is available at `./bin/envoy`:
 
 - `./bin/box`
 - `./bin/box-initshim`
@@ -33,9 +34,8 @@ In `monitor` mode, `box` prints a final traffic summary to `stderr` at the end o
 
 `box.yaml` supports two network modes:
 
-- `monitor` for observation plus summary output; it does not restrict general egress
-- `enforce` for DNS-gated egress, dynamic IP allowlisting from allowed DNS answers, and
-  `policy.extra_allowed_cidrs` bootstrap exceptions
+- `monitor` for observation plus summary output through the managed Envoy/policyd path
+- `enforce` for `network.policy`-driven egress controls on outbound HTTP, HTTPS, and DNS
 
 Integration tests cover:
 
