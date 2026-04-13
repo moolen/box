@@ -43,12 +43,13 @@ type Service struct {
 }
 
 type Server struct {
-	grpcServer   *grpc.Server
-	grpcListener net.Listener
-	dnsServer    *dns.Server
-	dnsConn      net.PacketConn
-	stopOnce     sync.Once
-	stopErr      error
+	grpcServer    *grpc.Server
+	grpcListener  net.Listener
+	dnsServer     *dns.Server
+	dnsConn       net.PacketConn
+	proxyListener net.Listener
+	stopOnce      sync.Once
+	stopErr       error
 }
 
 type HTTPCheckRequest struct {
@@ -93,7 +94,7 @@ func NewService(cfg ServiceConfig) *Service {
 	return &Service{cfg: cfg}
 }
 
-func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc *Service) (*Server, error) {
+func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, proxyListenAddr string, proxyUpstreamAddr string, svc *Service) (*Server, error) {
 	if svc == nil {
 		return nil, errors.New("service is required")
 	}
@@ -106,6 +107,15 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc
 		_ = grpcListener.Close()
 		return nil, err
 	}
+	var proxyListener net.Listener
+	if strings.TrimSpace(proxyListenAddr) != "" {
+		proxyListener, err = net.Listen("tcp", strings.TrimSpace(proxyListenAddr))
+		if err != nil {
+			_ = dnsConn.Close()
+			_ = grpcListener.Close()
+			return nil, err
+		}
+	}
 
 	grpcServer := grpc.NewServer()
 	authv3.RegisterAuthorizationServer(grpcServer, svc)
@@ -114,10 +124,11 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc
 		Handler:    dns.HandlerFunc(svc.handleDNS),
 	}
 	runner := &Server{
-		grpcServer:   grpcServer,
-		grpcListener: grpcListener,
-		dnsServer:    dnsServer,
-		dnsConn:      dnsConn,
+		grpcServer:    grpcServer,
+		grpcListener:  grpcListener,
+		dnsServer:     dnsServer,
+		dnsConn:       dnsConn,
+		proxyListener: proxyListener,
 	}
 
 	go func() {
@@ -136,6 +147,9 @@ func Start(ctx context.Context, httpListenAddr string, dnsListenAddr string, svc
 			_ = runner.Stop()
 		}
 	}()
+	if proxyListener != nil {
+		go runner.serveExplicitProxy(proxyUpstreamAddr)
+	}
 
 	return runner, nil
 }
@@ -157,6 +171,11 @@ func (s *Server) Stop() error {
 		}
 		if s.dnsServer != nil {
 			if err := s.dnsServer.Shutdown(); err != nil && !errors.Is(err, net.ErrClosed) && err.Error() != "dns: server not started" {
+				errs = append(errs, err)
+			}
+		}
+		if s.proxyListener != nil {
+			if err := s.proxyListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 				errs = append(errs, err)
 			}
 		}
@@ -322,12 +341,18 @@ func (s *Service) handleDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 	authority := firstNonEmpty(
+		r.Header.Get("X-Box-Original-Authority"),
 		connectAuthority(r),
 		r.Header.Get("Host"),
 		r.Header.Get("X-Forwarded-Host"),
 		r.Header.Get("Authority"),
 	)
-	rawPath := firstNonEmpty(r.Header.Get("Path"), r.Header.Get("X-Envoy-Original-Path"), "/")
+	rawPath := firstNonEmpty(
+		r.Header.Get("X-Box-Original-Target"),
+		r.Header.Get("Path"),
+		r.Header.Get("X-Envoy-Original-Path"),
+		"/",
+	)
 	protocol := inferHTTPProtocol(
 		r.Header.Get("X-Forwarded-Proto"),
 		rawPath,
@@ -341,12 +366,12 @@ func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 	}
 
 	dstIP, dstPort := parseOriginalDestination(r.Header.Get("X-Envoy-Original-Dst-Host"))
-	if !dstIP.IsValid() {
+	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = pathIP
 	}
 
 	_, authorityPort, authorityIP := parseAuthorityDestination(authority)
-	if !dstIP.IsValid() {
+	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = authorityIP
 	}
 
@@ -384,6 +409,10 @@ func inferHTTPProtocol(forwardedProto string, rawPath string, authority string, 
 		case string(ProtocolHTTPS):
 			return ProtocolHTTPS
 		case string(ProtocolHTTP):
+			return ProtocolHTTP
+		case "wss":
+			return ProtocolHTTPS
+		case "ws":
 			return ProtocolHTTP
 		}
 	}

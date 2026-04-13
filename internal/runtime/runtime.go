@@ -72,21 +72,23 @@ type Deps struct {
 }
 
 type PolicyServiceStartRequest struct {
-	RuntimeID     string
-	Mode          string
-	GatewayIP     string
-	ListenAddr    string
-	DNSListenAddr string
-	Rules         []config.NetworkPolicyRule
-	DNSUpstream   []string
-	OnEvent       func(policyd.Event)
+	RuntimeID         string
+	Mode              string
+	GatewayIP         string
+	ListenAddr        string
+	DNSListenAddr     string
+	ProxyListenAddr   string
+	ProxyUpstreamAddr string
+	Rules             []config.NetworkPolicyRule
+	DNSUpstream       []string
+	OnEvent           func(policyd.Event)
 }
 
 type EnvoyStartRequest struct {
 	RuntimeID                  string
 	MonitorMode                bool
 	GatewayIP                  string
-	ExplicitPort               int
+	InternalExplicitPort       int
 	TransparentPort            int
 	DNSPort                    int
 	DNSUpstream                []string
@@ -133,10 +135,11 @@ type Manifest struct {
 }
 
 type EnvoyRuntime struct {
-	ExplicitPort    int    `json:"explicit_port"`
-	TransparentPort int    `json:"transparent_port"`
-	DNSPort         int    `json:"dns_port"`
-	BootstrapPath   string `json:"bootstrap_path"`
+	ExplicitPort         int    `json:"explicit_port"`
+	InternalExplicitPort int    `json:"internal_explicit_port"`
+	TransparentPort      int    `json:"transparent_port"`
+	DNSPort              int    `json:"dns_port"`
+	BootstrapPath        string `json:"bootstrap_path"`
 }
 
 type CARuntime struct {
@@ -381,8 +384,12 @@ func SandboxEnv(manifest Manifest) []string {
 		env = append(env,
 			"HTTP_PROXY="+proxy,
 			"HTTPS_PROXY="+proxy,
+			"WS_PROXY="+proxy,
+			"WSS_PROXY="+proxy,
 			"http_proxy="+proxy,
 			"https_proxy="+proxy,
+			"ws_proxy="+proxy,
+			"wss_proxy="+proxy,
 			"NO_PROXY=127.0.0.1,localhost",
 			"no_proxy=127.0.0.1,localhost",
 		)
@@ -413,14 +420,16 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
-			RuntimeID:     rt.Manifest.RuntimeID,
-			Mode:          cfg.Network.Mode,
-			GatewayIP:     rt.Manifest.GatewayIP,
-			ListenAddr:    policyListenAddr,
-			DNSListenAddr: dnsListenAddr,
-			Rules:         append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
-			DNSUpstream:   append([]string(nil), cfg.Network.DNS.Upstream...),
-			OnEvent:       rt.monitorPolicyEventCallback(),
+			RuntimeID:         rt.Manifest.RuntimeID,
+			Mode:              cfg.Network.Mode,
+			GatewayIP:         rt.Manifest.GatewayIP,
+			ListenAddr:        policyListenAddr,
+			DNSListenAddr:     dnsListenAddr,
+			ProxyListenAddr:   wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort),
+			ProxyUpstreamAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort)),
+			Rules:             append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream:       append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:           rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
 			return fmt.Errorf("start policyd: %w", err)
@@ -435,7 +444,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 			RuntimeID:                  rt.Manifest.RuntimeID,
 			MonitorMode:                strings.EqualFold(cfg.Network.Mode, "monitor"),
 			GatewayIP:                  rt.Manifest.GatewayIP,
-			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
+			InternalExplicitPort:       rt.Manifest.Envoy.InternalExplicitPort,
 			TransparentPort:            rt.Manifest.Envoy.TransparentPort,
 			DNSPort:                    rt.Manifest.Envoy.DNSPort,
 			DNSUpstream:                []string{dnsUpstreamAddr},
@@ -508,14 +517,16 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 	if deps.StartPolicyService != nil {
 		policyRunner, err := deps.StartPolicyService(ctx, PolicyServiceStartRequest{
-			RuntimeID:     rt.Manifest.RuntimeID,
-			Mode:          cfg.Network.Mode,
-			GatewayIP:     rt.Manifest.GatewayIP,
-			ListenAddr:    policyListenAddr,
-			DNSListenAddr: dnsListenAddr,
-			Rules:         append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
-			DNSUpstream:   append([]string(nil), cfg.Network.DNS.Upstream...),
-			OnEvent:       rt.monitorPolicyEventCallback(),
+			RuntimeID:         rt.Manifest.RuntimeID,
+			Mode:              cfg.Network.Mode,
+			GatewayIP:         rt.Manifest.GatewayIP,
+			ListenAddr:        policyListenAddr,
+			DNSListenAddr:     dnsListenAddr,
+			ProxyListenAddr:   wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort),
+			ProxyUpstreamAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort)),
+			Rules:             append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			DNSUpstream:       append([]string(nil), cfg.Network.DNS.Upstream...),
+			OnEvent:           rt.monitorPolicyEventCallback(),
 		})
 		if err != nil {
 			return fmt.Errorf("start policyd: %w", err)
@@ -530,7 +541,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 			RuntimeID:                  rt.Manifest.RuntimeID,
 			MonitorMode:                strings.EqualFold(cfg.Network.Mode, "monitor"),
 			GatewayIP:                  rt.Manifest.GatewayIP,
-			ExplicitPort:               rt.Manifest.Envoy.ExplicitPort,
+			InternalExplicitPort:       rt.Manifest.Envoy.InternalExplicitPort,
 			TransparentPort:            rt.Manifest.Envoy.TransparentPort,
 			DNSPort:                    rt.Manifest.Envoy.DNSPort,
 			DNSUpstream:                []string{dnsUpstreamAddr},
@@ -744,6 +755,13 @@ func loopbackAddrForPort(addr string) (string, error) {
 	return net.JoinHostPort("127.0.0.1", port), nil
 }
 
+func wildcardAddrForPort(port int) string {
+	if port <= 0 {
+		return ""
+	}
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+}
+
 func newRuntimeID(deps Deps) string {
 	if deps.RandomID != nil {
 		return deps.RandomID()
@@ -850,6 +868,12 @@ func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
 	}
 	defer explicit.Close()
 
+	internalExplicit, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return EnvoyRuntime{}, err
+	}
+	defer internalExplicit.Close()
+
 	transparent, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return EnvoyRuntime{}, err
@@ -863,10 +887,11 @@ func allocateEnvoyRuntime(stateDir string) (EnvoyRuntime, error) {
 	defer dnsListener.Close()
 
 	return EnvoyRuntime{
-		ExplicitPort:    listenerPort(explicit.Addr()),
-		TransparentPort: listenerPort(transparent.Addr()),
-		DNSPort:         listenerPort(dnsListener.LocalAddr()),
-		BootstrapPath:   filepath.Join(envoyDir, bootstrapName),
+		ExplicitPort:         listenerPort(explicit.Addr()),
+		InternalExplicitPort: listenerPort(internalExplicit.Addr()),
+		TransparentPort:      listenerPort(transparent.Addr()),
+		DNSPort:              listenerPort(dnsListener.LocalAddr()),
+		BootstrapPath:        filepath.Join(envoyDir, bootstrapName),
 	}, nil
 }
 

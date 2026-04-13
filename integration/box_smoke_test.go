@@ -1,7 +1,12 @@
 package integration
 
 import (
+	"crypto/sha1"
+	"encoding/base64"
+	"fmt"
+	"hash/fnv"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -9,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"gvisor-net/integration/testenv"
 	"gvisor-net/internal/config"
@@ -32,6 +38,12 @@ func TestBoxRunsEnv(t *testing.T) {
 	}
 	if !strings.Contains(output, "HTTPS_PROXY=http://") {
 		t.Fatalf("env output = %q, want HTTPS_PROXY host intercept env", output)
+	}
+	if !strings.Contains(output, "WS_PROXY=http://") {
+		t.Fatalf("env output = %q, want WS_PROXY host intercept env", output)
+	}
+	if !strings.Contains(output, "WSS_PROXY=http://") {
+		t.Fatalf("env output = %q, want WSS_PROXY host intercept env", output)
 	}
 	if !strings.Contains(output, "SSL_CERT_FILE="+rootfs.TrustedCABundlePath) {
 		t.Fatalf("env output = %q, want runtime CA env injection", output)
@@ -112,6 +124,164 @@ func TestBoxCanCurlHTTPSExampleDotComWithoutProxyEnv(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "Example Domain") {
 		t.Fatalf("transparent https curl output = %q, want Example Domain response body", stdout)
+	}
+}
+
+func TestBoxAllowsProxiedWebSocketHandshake(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	port := startLocalWebSocketHandshakeServer(t)
+	binary := testenv.BuildBoxBinary(t)
+	gatewayIP := gatewayIPForTest(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		CIDR:  gatewayIP + "/32",
+		Ports: []int{port},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"bash", "-lc", fmt.Sprintf("curl -v --max-time 5 ws://%s:%d/chat >/tmp/ws.out 2>/tmp/ws.err; cat /tmp/ws.out; echo '---STDERR---'; cat /tmp/ws.err; exit 0", gatewayIP, port),
+	)
+	if err != nil {
+		t.Fatalf("run box proxied ws curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "101 Switching Protocols") || !strings.Contains(stdout, "Received 101, Switching to WebSocket") {
+		t.Fatalf("proxied ws output missing websocket handshake success; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxAllowsTransparentWebSocketHandshake(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	port := startLocalWebSocketHandshakeServer(t)
+	binary := testenv.BuildBoxBinary(t)
+	gatewayIP := gatewayIPForTest(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		CIDR:  gatewayIP + "/32",
+		Ports: []int{port},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "WS_PROXY", "-u", "WSS_PROXY", "-u", "http_proxy", "-u", "https_proxy", "-u", "ws_proxy", "-u", "wss_proxy",
+		"bash", "-lc", fmt.Sprintf("curl -v --max-time 5 ws://%s:%d/chat >/tmp/ws.out 2>/tmp/ws.err; cat /tmp/ws.out; echo '---STDERR---'; cat /tmp/ws.err; exit 0", gatewayIP, port),
+	)
+	if err != nil {
+		t.Fatalf("run box transparent ws curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "101 Switching Protocols") || !strings.Contains(stdout, "Received 101, Switching to WebSocket") {
+		t.Fatalf("transparent ws output missing websocket handshake success; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxAllowsProxiedSecureWebSocketHandshake(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "echo.websocket.org",
+		Ports:    []int{443},
+		HTTP: &config.HTTPPolicyConfig{
+			Path: []string{"/"},
+		},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"bash", "-lc", "curl -v --max-time 5 wss://echo.websocket.org/ >/tmp/wss.out 2>/tmp/wss.err; cat /tmp/wss.out; echo '---STDERR---'; cat /tmp/wss.err; exit 0",
+	)
+	if err != nil {
+		t.Fatalf("run box proxied wss curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Request served by") || !strings.Contains(stdout, "101 Switching Protocols") || !strings.Contains(stdout, "Received 101, Switching to WebSocket") {
+		t.Fatalf("proxied wss output missing websocket handshake success; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxAllowsTransparentSecureWebSocketHandshake(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "echo.websocket.org",
+		Ports:    []int{443},
+		HTTP: &config.HTTPPolicyConfig{
+			Path: []string{"/"},
+		},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "WS_PROXY", "-u", "WSS_PROXY", "-u", "http_proxy", "-u", "https_proxy", "-u", "ws_proxy", "-u", "wss_proxy",
+		"bash", "-lc", "curl -v --max-time 5 wss://echo.websocket.org/ >/tmp/wss.out 2>/tmp/wss.err; cat /tmp/wss.out; echo '---STDERR---'; cat /tmp/wss.err; exit 0",
+	)
+	if err != nil {
+		t.Fatalf("run box transparent wss curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Request served by") || !strings.Contains(stdout, "101 Switching Protocols") || !strings.Contains(stdout, "Received 101, Switching to WebSocket") {
+		t.Fatalf("transparent wss output missing websocket handshake success; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxBlocksWebSocketHandshakeForPathMismatch(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	port := startLocalWebSocketHandshakeServer(t)
+	binary := testenv.BuildBoxBinary(t)
+	gatewayIP := gatewayIPForTest(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "ws.local",
+		Ports:    []int{port},
+		HTTP: &config.HTTPPolicyConfig{
+			Path: []string{"/allowed*"},
+		},
+	}})
+
+	stdout, stderr, _ := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"bash", "-lc", fmt.Sprintf("curl -v --max-time 5 --resolve ws.local:%d:%s ws://ws.local:%d/blocked >/tmp/ws.out 2>/tmp/ws.err; cat /tmp/ws.out; echo '---STDERR---'; cat /tmp/ws.err; exit 0", port, gatewayIP, port),
+	)
+	if !strings.Contains(stdout, "403 Forbidden") || !strings.Contains(stdout, "Refused WebSocket upgrade: 403") {
+		t.Fatalf("ws path mismatch output = %q, want websocket upgrade refusal; stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxBlocksSecureWebSocketHandshakeForPathMismatch(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "echo.websocket.org",
+		Ports:    []int{443},
+		HTTP: &config.HTTPPolicyConfig{
+			Path: []string{"/allowed*"},
+		},
+	}})
+
+	stdout, stderr, _ := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"bash", "-lc", "curl -v --max-time 5 wss://echo.websocket.org/ >/tmp/wss.out 2>/tmp/wss.err; cat /tmp/wss.out; echo '---STDERR---'; cat /tmp/wss.err; exit 0",
+	)
+	if !strings.Contains(stdout, "403 Forbidden") || !strings.Contains(stdout, "Refused WebSocket upgrade: 403") {
+		t.Fatalf("wss path mismatch output = %q, want websocket upgrade refusal; stderr=%q", stdout, stderr)
 	}
 }
 
@@ -727,4 +897,83 @@ func mustLookupIPv4(t *testing.T, host string) string {
 	}
 	t.Fatalf("LookupIP(%q) returned no IPv4 address", host)
 	return ""
+}
+
+func startLocalWebSocketHandshakeServer(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+				http.Error(w, "missing websocket upgrade", http.StatusBadRequest)
+				return
+			}
+			key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
+			if key == "" {
+				http.Error(w, "missing websocket key", http.StatusBadRequest)
+				return
+			}
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("response writer does not support hijacking")
+				return
+			}
+			conn, bufrw, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("Hijack() error = %v", err)
+				return
+			}
+			defer conn.Close()
+
+			accept := websocketAccept(key)
+			if _, err := bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n"); err != nil {
+				t.Errorf("WriteString(status) error = %v", err)
+				return
+			}
+			if _, err := bufrw.WriteString("Upgrade: websocket\r\n"); err != nil {
+				t.Errorf("WriteString(upgrade) error = %v", err)
+				return
+			}
+			if _, err := bufrw.WriteString("Connection: Upgrade\r\n"); err != nil {
+				t.Errorf("WriteString(connection) error = %v", err)
+				return
+			}
+			if _, err := bufrw.WriteString("Sec-WebSocket-Accept: " + accept + "\r\n\r\n"); err != nil {
+				t.Errorf("WriteString(accept) error = %v", err)
+				return
+			}
+			if err := bufrw.Flush(); err != nil {
+				t.Errorf("Flush() error = %v", err)
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+			_, _ = conn.Write([]byte{0x88, 0x00})
+		}),
+	}
+	go func() {
+		_ = srv.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+	})
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func websocketAccept(key string) string {
+	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func gatewayIPForTest(t *testing.T) string {
+	t.Helper()
+
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(t.Name()))
+	thirdOctet := 1 + int(hasher.Sum32()%250)
+	return fmt.Sprintf("100.96.%d.1", thirdOctet)
 }

@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -86,11 +88,14 @@ func TestRunRecordsRandomizedEnvoyPortsAndCAAssets(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if rt.Manifest.Envoy.ExplicitPort == 0 || rt.Manifest.Envoy.TransparentPort == 0 || rt.Manifest.Envoy.DNSPort == 0 {
+	if rt.Manifest.Envoy.ExplicitPort == 0 || rt.Manifest.Envoy.InternalExplicitPort == 0 || rt.Manifest.Envoy.TransparentPort == 0 || rt.Manifest.Envoy.DNSPort == 0 {
 		t.Fatalf("Manifest.Envoy = %#v, want randomized non-zero ports", rt.Manifest.Envoy)
 	}
 	if rt.Manifest.Envoy.ExplicitPort == rt.Manifest.Envoy.TransparentPort ||
+		rt.Manifest.Envoy.ExplicitPort == rt.Manifest.Envoy.InternalExplicitPort ||
 		rt.Manifest.Envoy.ExplicitPort == rt.Manifest.Envoy.DNSPort ||
+		rt.Manifest.Envoy.InternalExplicitPort == rt.Manifest.Envoy.TransparentPort ||
+		rt.Manifest.Envoy.InternalExplicitPort == rt.Manifest.Envoy.DNSPort ||
 		rt.Manifest.Envoy.TransparentPort == rt.Manifest.Envoy.DNSPort {
 		t.Fatalf("Manifest.Envoy = %#v, want distinct listener ports", rt.Manifest.Envoy)
 	}
@@ -272,8 +277,15 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	if !strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want loopback listener", policyReq.DNSListenAddr)
 	}
-	if envoyReq.ExplicitPort != rt.Manifest.Envoy.ExplicitPort {
-		t.Fatalf("Envoy request explicit port = %d, want %d", envoyReq.ExplicitPort, rt.Manifest.Envoy.ExplicitPort)
+	if policyReq.ProxyListenAddr != wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort) {
+		t.Fatalf("PolicyService proxy listen addr = %q, want %q", policyReq.ProxyListenAddr, wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort))
+	}
+	wantProxyUpstream := net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort))
+	if policyReq.ProxyUpstreamAddr != wantProxyUpstream {
+		t.Fatalf("PolicyService proxy upstream addr = %q, want %q", policyReq.ProxyUpstreamAddr, wantProxyUpstream)
+	}
+	if envoyReq.InternalExplicitPort != rt.Manifest.Envoy.InternalExplicitPort {
+		t.Fatalf("Envoy request internal explicit port = %d, want %d", envoyReq.InternalExplicitPort, rt.Manifest.Envoy.InternalExplicitPort)
 	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)

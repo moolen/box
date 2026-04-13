@@ -185,8 +185,12 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 		ExtraEnv: []string{
 			"HTTP_PROXY=http://100.96.0.1:18080",
 			"HTTPS_PROXY=http://100.96.0.1:18080",
+			"WS_PROXY=http://100.96.0.1:18080",
+			"WSS_PROXY=http://100.96.0.1:18080",
 			"http_proxy=http://100.96.0.1:18080",
 			"https_proxy=http://100.96.0.1:18080",
+			"ws_proxy=http://100.96.0.1:18080",
+			"wss_proxy=http://100.96.0.1:18080",
 			"NO_PROXY=127.0.0.1,localhost",
 			"no_proxy=127.0.0.1,localhost",
 		},
@@ -201,11 +205,23 @@ func TestBuildSandboxSpecInjectsForcedProxyAndInitEnv(t *testing.T) {
 	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:18080" {
 		t.Fatalf("HTTPS_PROXY = %q, want host proxy URL", value)
 	}
+	if value := envValue(spec.Process.Env, "WS_PROXY"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("WS_PROXY = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "WSS_PROXY"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("WSS_PROXY = %q, want host proxy URL", value)
+	}
 	if value := envValue(spec.Process.Env, "http_proxy"); value != "http://100.96.0.1:18080" {
 		t.Fatalf("http_proxy = %q, want host proxy URL", value)
 	}
 	if value := envValue(spec.Process.Env, "https_proxy"); value != "http://100.96.0.1:18080" {
 		t.Fatalf("https_proxy = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "ws_proxy"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("ws_proxy = %q, want host proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "wss_proxy"); value != "http://100.96.0.1:18080" {
+		t.Fatalf("wss_proxy = %q, want host proxy URL", value)
 	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
@@ -247,11 +263,23 @@ func TestBuildSandboxSpecInjectsRuntimeProxyAndCAEnv(t *testing.T) {
 	if value := envValue(spec.Process.Env, "HTTPS_PROXY"); value != "http://100.96.0.1:19001" {
 		t.Fatalf("HTTPS_PROXY = %q, want runtime manifest proxy URL", value)
 	}
+	if value := envValue(spec.Process.Env, "WS_PROXY"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("WS_PROXY = %q, want runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "WSS_PROXY"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("WSS_PROXY = %q, want runtime manifest proxy URL", value)
+	}
 	if value := envValue(spec.Process.Env, "http_proxy"); value != "http://100.96.0.1:19001" {
 		t.Fatalf("http_proxy = %q, want lowercase runtime manifest proxy URL", value)
 	}
 	if value := envValue(spec.Process.Env, "https_proxy"); value != "http://100.96.0.1:19001" {
 		t.Fatalf("https_proxy = %q, want lowercase runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "ws_proxy"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("ws_proxy = %q, want lowercase runtime manifest proxy URL", value)
+	}
+	if value := envValue(spec.Process.Env, "wss_proxy"); value != "http://100.96.0.1:19001" {
+		t.Fatalf("wss_proxy = %q, want lowercase runtime manifest proxy URL", value)
 	}
 	if value := envValue(spec.Process.Env, "NO_PROXY"); value != "127.0.0.1,localhost" {
 		t.Fatalf("NO_PROXY = %q, want localhost bypass list", value)
