@@ -52,6 +52,28 @@ func TestBoxCanCurlExampleDotCom(t *testing.T) {
 	}
 }
 
+func TestBoxCanCurlExampleDotComWithoutProxyEnv(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, []string{"example.com"}, nil)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"curl", "-sS", "http://example.com",
+	)
+	if err != nil {
+		t.Fatalf("run box transparent http curl error = %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Example Domain") {
+		t.Fatalf("transparent http curl output = %q, want Example Domain response body", stdout)
+	}
+}
+
 func TestBoxCanCurlHTTPSExampleDotCom(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
@@ -257,6 +279,26 @@ func TestBoxBlocksNonHTTPTCPForAllowedCIDRRule(t *testing.T) {
 	)
 	if err == nil && strings.Contains(stdout, "SSH-2.0-") {
 		t.Fatalf("non-http tcp unexpectedly reached upstream service under cidr allow rule; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxBlocksNonHTTPTCPForNonMatchingPolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "nc")
+
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfig(t, []string{"example.com"}, nil)
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"bash", "-lc", "timeout 5s nc github.com 22 < /dev/null | head -n 1",
+	)
+	if err == nil && strings.Contains(stdout, "SSH-2.0-") {
+		t.Fatalf("non-http tcp unexpectedly reached upstream service without a matching policy; stdout=%q stderr=%q", stdout, stderr)
 	}
 }
 
