@@ -90,6 +90,7 @@ mounts:
     - source: ~/.codex/config.toml
       target: /run/box/codex-home/config.toml
       mode: 0600
+      optional: true
     - source: ~/.codex/auth.json
       target: /run/box/codex-home/auth.json
       mode: 0600

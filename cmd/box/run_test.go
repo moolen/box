@@ -449,6 +449,75 @@ func TestRuntimeExecutorStagesConfiguredFilesIntoRuntimeState(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorSkipsMissingOptionalConfiguredFiles(t *testing.T) {
+	stateDir := t.TempDir()
+	rt := &fakeRuntimeHandle{
+		manifest: boxruntime.Manifest{
+			RuntimeID: "runtime-optional-staged-files",
+			StateDir:  stateDir,
+		},
+	}
+
+	exec := runtimeExecutor{
+		getwd: func() (string, error) {
+			return "/workspace", nil
+		},
+		loadConfig: func(string, string) (config.Config, error) {
+			return config.Config{
+				Sandbox: config.SandboxConfig{
+					Rootfs:         "host-overlay",
+					Workdir:        "/workspace",
+					InheritEnv:     true,
+					CommandShell:   "/bin/bash -lc",
+					WorkdirOverlay: true,
+				},
+				Mounts: config.MountsConfig{
+					StagedRW: []config.StagedFileMount{
+						{
+							Source:   filepath.Join(t.TempDir(), "missing-config.toml"),
+							Target:   "/run/box/codex-home/config.toml",
+							Optional: true,
+						},
+					},
+				},
+				GVisor: config.GVisorConfig{
+					Platform: "ptrace",
+				},
+			}, nil
+		},
+		startRuntime: func(context.Context, config.Config, boxruntime.Deps) (runtimeHandle, error) {
+			return rt, nil
+		},
+		buildRootfsPlan: func(rootfs.PlanRequest) (rootfs.Plan, error) {
+			return rootfs.Plan{}, nil
+		},
+		applyRootfs: func(req rootfs.ApplyRequest) (rootfs.ApplyResult, error) {
+			for _, bind := range req.Plan.Binds {
+				if bind.Target == "/run/box/codex-home/config.toml" {
+					t.Fatalf("unexpected bind for missing optional staged file: %#v", bind)
+				}
+			}
+			return rootfs.ApplyResult{}, nil
+		},
+		buildSandboxSpec: func(gvisor.BuildSpecRequest) (gvisor.Spec, error) {
+			return gvisor.Spec{}, nil
+		},
+		writeBundleSpec: func(string, gvisor.Spec) error {
+			return nil
+		},
+		runSandbox: func(gvisor.RunRequest) error {
+			return nil
+		},
+	}
+
+	if err := exec.Run(runRequest{
+		ConfigPath: "box.yaml",
+		Payload:    []string{"/bin/true"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
 func TestIsTerminalFDDoesNotCloseDescriptor(t *testing.T) {
 	t.Parallel()
 

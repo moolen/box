@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +134,7 @@ func TestBoxAllowsProxiedWebSocketHandshake(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "ws")
 
 	port := startLocalWebSocketHandshakeServer(t)
 	binary := testenv.BuildBoxBinary(t)
@@ -159,6 +161,7 @@ func TestBoxAllowsTransparentWebSocketHandshake(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "ws")
 
 	port := startLocalWebSocketHandshakeServer(t)
 	binary := testenv.BuildBoxBinary(t)
@@ -186,6 +189,7 @@ func TestBoxAllowsProxiedSecureWebSocketHandshake(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "wss")
 
 	binary := testenv.BuildBoxBinary(t)
 	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
@@ -213,6 +217,7 @@ func TestBoxAllowsTransparentSecureWebSocketHandshake(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "wss")
 
 	binary := testenv.BuildBoxBinary(t)
 	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
@@ -241,6 +246,7 @@ func TestBoxBlocksWebSocketHandshakeForPathMismatch(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "ws")
 
 	port := startLocalWebSocketHandshakeServer(t)
 	binary := testenv.BuildBoxBinary(t)
@@ -267,6 +273,7 @@ func TestBoxBlocksSecureWebSocketHandshakeForPathMismatch(t *testing.T) {
 	}
 
 	requireRootIfNeeded(t)
+	requireCurlSupportsSchemes(t, "wss")
 
 	binary := testenv.BuildBoxBinary(t)
 	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
@@ -493,6 +500,9 @@ func TestBoxAllowsICMPToLiteralIPWhenCIDRRuleMatches(t *testing.T) {
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
 		"ping", "-c", "1", "-W", "5", exampleIPv4,
 	)
+	if pingUnsupportedInSandbox(stderr) {
+		t.Skipf("sandbox ping unsupported in this environment: %q", stderr)
+	}
 	if err != nil {
 		t.Fatalf("icmp to literal ip failed despite matching cidr icmp rule; stdout=%q stderr=%q err=%v", stdout, stderr, err)
 	}
@@ -516,6 +526,9 @@ func TestBoxBlocksICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
 		"ping", "-c", "1", "-W", "3", exampleIPv4,
 	)
+	if pingUnsupportedInSandbox(stderr) {
+		t.Skipf("sandbox ping unsupported in this environment: %q", stderr)
+	}
 	if err == nil {
 		t.Fatalf("icmp to literal ip unexpectedly succeeded without matching icmp policy; stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -872,6 +885,9 @@ func TestBoxMonitorModeAllowsICMPButLogsTypeAndCodeForWouldBlockTraffic(t *testi
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
 		"ping", "-c", "1", "-W", "5", exampleIPv4,
 	)
+	if pingUnsupportedInSandbox(stderr) {
+		t.Skipf("sandbox ping unsupported in this environment: %q", stderr)
+	}
 	if err != nil {
 		t.Fatalf("monitor mode should allow icmp traffic while logging would_block; stdout=%q stderr=%q err=%v", stdout, stderr, err)
 	}
@@ -923,6 +939,56 @@ func requireRootIfNeeded(t *testing.T) {
 
 	if err := exec.Command("sudo", "-n", "true").Run(); err != nil {
 		t.Skipf("sudo privileges are required for smoke tests: %v", err)
+	}
+}
+
+func requireCurlSupportsSchemes(t *testing.T, schemes ...string) {
+	t.Helper()
+
+	testenv.RequireCommands(t, "curl")
+
+	output, err := exec.Command("curl", "--version").CombinedOutput()
+	if err != nil {
+		t.Skipf("curl --version failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	protocols := parseCurlProtocols(string(output))
+	for _, scheme := range schemes {
+		if !slices.Contains(protocols, strings.ToLower(strings.TrimSpace(scheme))) {
+			t.Skipf("curl does not support %s on this host: %s", scheme, strings.TrimSpace(string(output)))
+		}
+	}
+}
+
+func parseCurlProtocols(output string) []string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(line), "protocols:") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line[len("Protocols:"):]))
+		for i := range fields {
+			fields[i] = strings.ToLower(fields[i])
+		}
+		return fields
+	}
+	return nil
+}
+
+func pingUnsupportedInSandbox(stderr string) bool {
+	lower := strings.ToLower(strings.TrimSpace(stderr))
+	return strings.Contains(lower, "operation not permitted") ||
+		strings.Contains(lower, "exit status 126")
+}
+
+func TestParseCurlProtocols(t *testing.T) {
+	t.Parallel()
+
+	output := "curl 8.11.1 (x86_64-pc-linux-gnu)\nProtocols: dict file ftp ftps http https ws wss\nFeatures: alt-svc AsynchDNS\n"
+	got := parseCurlProtocols(output)
+	want := []string{"dict", "file", "ftp", "ftps", "http", "https", "ws", "wss"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("parseCurlProtocols() = %#v, want %#v", got, want)
 	}
 }
 

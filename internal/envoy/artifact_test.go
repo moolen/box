@@ -121,6 +121,42 @@ func TestStageBundledBinaryPassesPlatformToContainerRuntime(t *testing.T) {
 	}
 }
 
+func TestStageBundledBinaryParsesContainerIDFromCreateOutputWithPullProgress(t *testing.T) {
+	t.Parallel()
+
+	outputPath := filepath.Join(t.TempDir(), "envoy")
+	var copyArg string
+
+	err := StageBundledBinary(context.Background(), StageRequest{
+		OutputPath: outputPath,
+		Runtime:    "docker",
+		Run: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch {
+			case name == "docker" && len(args) >= 2 && args[0] == "create":
+				return []byte("Unable to find image 'envoyproxy/envoy:distroless-v1.37.1' locally\nsha256:container-123\n"), nil
+			case name == "docker" && len(args) >= 2 && args[0] == "cp":
+				copyArg = args[1]
+				if err := os.WriteFile(outputPath+".tmp", []byte("envoy-binary"), 0o755); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			case name == outputPath+".tmp":
+				return []byte("envoy  version: " + BundledVersion + "\n"), nil
+			case name == "docker" && len(args) >= 2 && args[0] == "rm":
+				return nil, nil
+			default:
+				return nil, errors.New("unexpected command")
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("StageBundledBinary() error = %v", err)
+	}
+	if got, want := copyArg, "sha256:container-123:"+bundledBinaryInImage; got != want {
+		t.Fatalf("docker cp source = %q, want %q", got, want)
+	}
+}
+
 func TestStageBundledBinaryRejectsVersionMismatch(t *testing.T) {
 	t.Parallel()
 

@@ -158,6 +158,9 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if got.GVisor.Platform != "ptrace" {
 		t.Fatalf("gvisor.platform = %q, want %q", got.GVisor.Platform, "ptrace")
 	}
+	if len(got.Mounts.StagedRW) > 0 && !got.Mounts.StagedRW[0].Optional {
+		t.Fatalf("mounts.staged_rw[0].optional = %t, want true for the shipped optional Codex config mount", got.Mounts.StagedRW[0].Optional)
+	}
 }
 
 func TestLoadResolvesWorkdirRelativeToInvocationDir(t *testing.T) {

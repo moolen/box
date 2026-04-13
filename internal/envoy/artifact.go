@@ -86,7 +86,7 @@ func StageBundledBinary(ctx context.Context, req StageRequest) error {
 	if err != nil {
 		return commandError(fmt.Sprintf("create container from %s", BundledImageRef), containerIDBytes, err)
 	}
-	containerID := strings.TrimSpace(string(containerIDBytes))
+	containerID := parseContainerID(containerIDBytes)
 	if containerID == "" {
 		return errors.New("container runtime returned empty container id while staging bundled envoy")
 	}
@@ -147,4 +147,14 @@ func commandError(action string, output []byte, err error) error {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	return fmt.Errorf("%s: %w: %s", action, err, message)
+}
+
+func parseContainerID(output []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
