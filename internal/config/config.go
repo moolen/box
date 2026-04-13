@@ -9,10 +9,9 @@ type Config struct {
 
 type SandboxConfig struct {
 	Rootfs         string   `yaml:"rootfs"`
-	RootfsSource   string   `yaml:"rootfs_source"`
 	Hostname       string   `yaml:"hostname"`
 	Workdir        string   `yaml:"workdir"`
-	WorkdirOverlay *bool    `yaml:"workdir_overlay"`
+	WorkdirOverlay bool     `yaml:"workdir_overlay"`
 	InheritEnv     bool     `yaml:"inherit_env"`
 	Env            []string `yaml:"env"`
 	CommandShell   string   `yaml:"command_shell"`
@@ -22,20 +21,11 @@ type NetworkConfig struct {
 	Mode   string              `yaml:"mode"`
 	Subnet string              `yaml:"subnet"`
 	DNS    DNSConfig           `yaml:"dns"`
-	Envoy  EnvoyConfig         `yaml:"envoy"`
 	Policy []NetworkPolicyRule `yaml:"policy"`
 }
 
 type DNSConfig struct {
-	BindAddr string   `yaml:"bind_addr"`
 	Upstream []string `yaml:"upstream"`
-}
-
-type EnvoyConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Mode     string `yaml:"mode"`
-	HTTPPort int    `yaml:"http_port"`
-	TLSPort  int    `yaml:"tls_port"`
 }
 
 type NetworkPolicyRule struct {
@@ -71,13 +61,4 @@ type StagedFileMount struct {
 
 type GVisorConfig struct {
 	Platform string `yaml:"platform"`
-	Network  string `yaml:"network"`
-	Debug    bool   `yaml:"debug"`
-}
-
-func (cfg SandboxConfig) WorkdirOverlayEnabled() bool {
-	if cfg.WorkdirOverlay == nil {
-		return true
-	}
-	return *cfg.WorkdirOverlay
 }

@@ -32,6 +32,103 @@ buildkit:
 	}
 }
 
+func TestLoadRejectsRemovedSandboxRootfsSource(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  rootfs_source: /tmp/rootfs
+  workdir: .
+network:
+  mode: monitor
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for sandbox.rootfs_source")
+	}
+	if !strings.Contains(err.Error(), "rootfs_source") {
+		t.Fatalf("Load() error = %q, want mention of rootfs_source", err)
+	}
+}
+
+func TestLoadRejectsRemovedDNSBindAddr(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+  dns:
+    bind_addr: auto
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for network.dns.bind_addr")
+	}
+	if !strings.Contains(err.Error(), "bind_addr") {
+		t.Fatalf("Load() error = %q, want mention of bind_addr", err)
+	}
+}
+
+func TestLoadRejectsRemovedEnvoySection(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+  envoy:
+    enabled: true
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for network.envoy")
+	}
+	if !strings.Contains(err.Error(), "envoy") {
+		t.Fatalf("Load() error = %q, want mention of envoy", err)
+	}
+}
+
+func TestLoadRejectsRemovedGVisorFields(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: monitor
+gvisor:
+  platform: ptrace
+  network: sandbox
+  debug: false
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(cfgPath, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() error = nil, want rejection for removed gvisor fields")
+	}
+	if !strings.Contains(err.Error(), "network") && !strings.Contains(err.Error(), "debug") {
+		t.Fatalf("Load() error = %q, want mention of removed gvisor fields", err)
+	}
+}
+
 func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -52,17 +149,11 @@ func TestLoadDefaultsFromRecoveredBoxYAML(t *testing.T) {
 	if !got.Sandbox.InheritEnv {
 		t.Fatalf("sandbox.inherit_env = %t, want true from recovered box.yaml", got.Sandbox.InheritEnv)
 	}
-	if !got.Sandbox.WorkdirOverlayEnabled() {
+	if !got.Sandbox.WorkdirOverlay {
 		t.Fatalf("sandbox.workdir_overlay = %v, want enabled by default", got.Sandbox.WorkdirOverlay)
 	}
 	if got.Network.Subnet != "100.96.0.0/24" {
 		t.Fatalf("subnet = %q, want %q", got.Network.Subnet, "100.96.0.0/24")
-	}
-	if got.Network.DNS.BindAddr != "auto" {
-		t.Fatalf("dns.bind_addr = %q, want %q", got.Network.DNS.BindAddr, "auto")
-	}
-	if got.Network.Envoy.Mode != "peek" {
-		t.Fatalf("envoy.mode = %q, want %q", got.Network.Envoy.Mode, "peek")
 	}
 	if got.GVisor.Platform != "ptrace" {
 		t.Fatalf("gvisor.platform = %q, want %q", got.GVisor.Platform, "ptrace")
@@ -188,7 +279,7 @@ network:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if !got.Sandbox.WorkdirOverlayEnabled() {
+	if !got.Sandbox.WorkdirOverlay {
 		t.Fatalf("sandbox.workdir_overlay = %v, want default enabled when omitted", got.Sandbox.WorkdirOverlay)
 	}
 }
@@ -238,24 +329,8 @@ network:
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if got.Sandbox.WorkdirOverlayEnabled() {
+	if got.Sandbox.WorkdirOverlay {
 		t.Fatalf("sandbox.workdir_overlay = %v, want disabled when explicitly false", got.Sandbox.WorkdirOverlay)
-	}
-}
-
-func TestValidateRejectsEnvoyMITMAtRuntimeBoundary(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Envoy.Enabled = true
-	cfg.Network.Envoy.Mode = "mitm"
-	cfg.Network.Envoy.HTTPPort = 18080
-	cfg.Network.Envoy.TLSPort = 18443
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for mitm mode")
-	}
-	if !strings.Contains(err.Error(), "network.envoy.mode=mitm") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.mode=mitm", err)
 	}
 }
 
@@ -280,20 +355,6 @@ docker:
 	}
 	if !strings.Contains(err.Error(), "docker") {
 		t.Fatalf("Load() error = %q, want mention of docker", err)
-	}
-}
-
-func TestValidateRejectsEnvoyMITMEvenWhenDisabled(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Envoy.Enabled = false
-	cfg.Network.Envoy.Mode = "mitm"
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for mitm mode regardless of enabled flag")
-	}
-	if !strings.Contains(err.Error(), "network.envoy.mode=mitm") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.mode=mitm", err)
 	}
 }
 
@@ -368,25 +429,6 @@ func TestValidateRejectsDeprecatedNetworkModes(t *testing.T) {
 				t.Fatalf("ValidateRuntime() error = %q, want mention of network.mode", err.Error())
 			}
 		})
-	}
-}
-
-func TestDNSBindAddrAutoUsesSentinelValueUntilRuntimePlanning(t *testing.T) {
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs repo root: %v", err)
-	}
-
-	got, err := Load(filepath.Join(repoRoot, "box.yaml"), repoRoot)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if got.Network.DNS.BindAddr != "auto" {
-		t.Fatalf("dns.bind_addr = %q, want %q", got.Network.DNS.BindAddr, "auto")
-	}
-	if err := ValidateRuntime(got); err != nil {
-		t.Fatalf("ValidateRuntime() error = %v, want nil for bind_addr=auto", err)
 	}
 }
 
@@ -688,51 +730,6 @@ func TestValidateRejectsOverlongWildcardHostnameSelector(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsInvalidEnvoyPorts(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Mode = "monitor"
-	cfg.Network.Envoy.Enabled = true
-	cfg.Network.Envoy.HTTPPort = 70000
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want invalid envoy port rejection")
-	}
-	if !strings.Contains(err.Error(), "network.envoy.http_port") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
-	}
-}
-
-func TestValidateRejectsEnabledEnvoyWithZeroPorts(t *testing.T) {
-	cfg := Config{}
-	cfg.Network.Mode = "monitor"
-	cfg.Network.Envoy.Enabled = true
-	cfg.Network.Envoy.HTTPPort = 0
-	cfg.Network.Envoy.TLSPort = 18443
-
-	err := ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for enabled envoy with http_port=0")
-	}
-	if !strings.Contains(err.Error(), "network.envoy.http_port") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.http_port", err)
-	}
-
-	cfg = Config{}
-	cfg.Network.Mode = "monitor"
-	cfg.Network.Envoy.Enabled = true
-	cfg.Network.Envoy.HTTPPort = 18080
-	cfg.Network.Envoy.TLSPort = 0
-
-	err = ValidateRuntime(cfg)
-	if err == nil {
-		t.Fatal("ValidateRuntime() error = nil, want rejection for enabled envoy with tls_port=0")
-	}
-	if !strings.Contains(err.Error(), "network.envoy.tls_port") {
-		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.tls_port", err)
-	}
-}
-
 func intPtr(v int) *int {
 	return &v
 }
@@ -744,8 +741,7 @@ sandbox:
   rootfs: host-overlay
   workdir: .
 network:
-  dns:
-    bind_addr: auto
+  mode: monitor
 `
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

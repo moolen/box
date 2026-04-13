@@ -76,9 +76,6 @@ func TestWriteOpenCodeMonitorConfig(t *testing.T) {
 	if cfg.Network.Mode != "monitor" {
 		t.Fatalf("network.mode = %q, want monitor", cfg.Network.Mode)
 	}
-	if !cfg.Network.Envoy.Enabled {
-		t.Fatalf("network.envoy.enabled = %t, want true", cfg.Network.Envoy.Enabled)
-	}
 }
 
 func TestWriteEnforceConfigEmitsNetworkPolicyRules(t *testing.T) {

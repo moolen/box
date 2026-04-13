@@ -876,7 +876,6 @@ func TestRuntimeExecutorUsesRuntimePreparedWorkdirMountSource(t *testing.T) {
 func TestRuntimeExecutorFallsBackToHostWorkdirWhenOverlayDisabled(t *testing.T) {
 	t.Parallel()
 
-	overlayDisabled := false
 	rt := &fakeRuntimeHandle{
 		manifest: boxruntime.Manifest{
 			RuntimeID: "runtime-workdir-bind",
@@ -895,7 +894,7 @@ func TestRuntimeExecutorFallsBackToHostWorkdirWhenOverlayDisabled(t *testing.T) 
 				Sandbox: config.SandboxConfig{
 					Rootfs:         "host-overlay",
 					Workdir:        "/workspace-src",
-					WorkdirOverlay: &overlayDisabled,
+					WorkdirOverlay: false,
 				},
 			}, nil
 		},

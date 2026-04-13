@@ -145,7 +145,6 @@ func writeManagedConfigWithRules(t *testing.T, mode string, rules []config.Netwo
 
 	content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
-  rootfs_source: ""
   hostname: box
   workdir: .
   workdir_overlay: false
@@ -156,23 +155,15 @@ network:
   mode: %s
   subnet: %s
   dns:
-    bind_addr: auto
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
-  envoy:
-    enabled: true
-    mode: peek
-    http_port: 18080
-    tls_port: 18443
 %s
 mounts:
   extra_ro: []
   extra_rw: []
 gvisor:
   platform: ptrace
-  network: sandbox
-  debug: false
 `, mode, subnet, policySection)
 
 	path := filepath.Join(t.TempDir(), "box-"+mode+".yaml")
@@ -247,7 +238,6 @@ func WriteOpenCodeMonitorConfig(t *testing.T, hostBinDir string, hostPath string
 
 	content := fmt.Sprintf(`sandbox:
   rootfs: host-overlay
-  rootfs_source: ""
   hostname: box
   workdir: .
   workdir_overlay: true
@@ -265,15 +255,9 @@ network:
   mode: monitor
   subnet: %s
   dns:
-    bind_addr: auto
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
-  envoy:
-    enabled: true
-    mode: peek
-    http_port: 18080
-    tls_port: 18443
   policy: []
 mounts:
   extra_ro:
@@ -281,8 +265,6 @@ mounts:
   extra_rw: []
 gvisor:
   platform: ptrace
-  network: sandbox
-  debug: false
 `, hostPath, subnet, hostBinDir)
 
 	path := filepath.Join(t.TempDir(), "box-opencode-monitor.yaml")

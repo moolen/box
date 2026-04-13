@@ -3,11 +3,7 @@
 
 sandbox:
   # `host-overlay` reuses host tooling read-only and bind-mounts the repo read-write.
-  # `image` uses an unpacked rootfs from `rootfs_source`.
   rootfs: host-overlay
-
-  # Required when `rootfs: image`.
-  rootfs_source: ""
 
   # Hostname visible inside the sandbox.
   hostname: box
@@ -26,8 +22,6 @@ sandbox:
 
   # Extra environment variables injected into the sandbox process.
   env:
-    - "PS1=box# "
-    - TERM=xterm
     # Example when using mounts.staged_rw for Codex config projection:
     - CODEX_HOME=/run/box/codex-home
 
@@ -43,27 +37,10 @@ network:
   subnet: 100.96.0.0/24
 
   dns:
-    # `auto` binds port 53 on the sandbox gateway IP in managed network modes.
-    # You can also pin a port with values such as `127.0.0.1:1053`.
-    bind_addr: auto
-
     # Upstreams that the host-side DNS interceptor forwards to.
     upstream:
       - 1.1.1.1:53
       - 8.8.8.8:53
-
-  envoy:
-    # Enables the host-side Envoy interception path.
-    enabled: true
-
-    # `peek` logs HTTP metadata and TLS SNI without full TLS MITM.
-    # `mitm` is still rejected by the runtime today.
-    mode: peek
-
-    # Legacy compatibility knobs. Runtime-owned Envoy listeners are
-    # randomized per sandbox startup and injected into the sandbox env.
-    http_port: 18080
-    tls_port: 18443
 
   # Egress policy rules enforced by the host-managed network layer.
   policy:
@@ -84,7 +61,6 @@ network:
       http:
         path:
           - /index
-
 
 mounts:
   # Extra host paths to bind read-only or read-write into the sandbox.
@@ -122,9 +98,3 @@ mounts:
 gvisor:
   # gVisor platform passed to `runsc`.
   platform: ptrace
-
-  # gVisor networking mode. Keep `sandbox` for the current host-managed netns path.
-  network: sandbox
-
-  # Reserved for additional runtime debugging later.
-  debug: false

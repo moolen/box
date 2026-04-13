@@ -496,7 +496,7 @@ func TestRunSkipsWorkdirOverlayWhenExplicitlyDisabled(t *testing.T) {
 
 	cfg := testConfig("enforce")
 	cfg.Sandbox.Workdir = t.TempDir()
-	cfg.Sandbox.WorkdirOverlay = boolPtr(false)
+	cfg.Sandbox.WorkdirOverlay = false
 
 	exec := &recordingCommandExec{}
 	rt, err := Run(context.Background(), Request{
@@ -1509,30 +1509,20 @@ func fixedClock() time.Time {
 func testConfig(networkMode string) config.Config {
 	return config.Config{
 		Sandbox: config.SandboxConfig{
-			Rootfs:       "host-overlay",
-			Workdir:      "/workspace",
-			Hostname:     "box",
-			CommandShell: "/bin/bash -ilc",
+			Rootfs:         "host-overlay",
+			Workdir:        "/workspace",
+			WorkdirOverlay: true,
+			Hostname:       "box",
+			CommandShell:   "/bin/bash -ilc",
 		},
 		Network: config.NetworkConfig{
 			Mode:   networkMode,
 			Subnet: "100.96.0.0/24",
 			DNS: config.DNSConfig{
-				BindAddr: "auto",
 				Upstream: []string{"1.1.1.1:53"},
-			},
-			Envoy: config.EnvoyConfig{
-				Enabled:  true,
-				Mode:     "peek",
-				HTTPPort: 18080,
-				TLSPort:  18443,
 			},
 		},
 	}
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }
 
 func intPtr(value int) *int {

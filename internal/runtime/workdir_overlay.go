@@ -17,7 +17,7 @@ func prepareWorkdirOverlay(ctx context.Context, cfg config.Config, manifest *Man
 	if !strings.EqualFold(strings.TrimSpace(cfg.Sandbox.Rootfs), "host-overlay") {
 		return nil
 	}
-	if !cfg.Sandbox.WorkdirOverlayEnabled() {
+	if !cfg.Sandbox.WorkdirOverlay {
 		return nil
 	}
 	if execer == nil {
