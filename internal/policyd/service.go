@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	pathpkg "path"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,6 +57,7 @@ type HTTPCheckRequest struct {
 	Protocol        Protocol
 	DestinationIP   netip.Addr
 	DestinationPort int
+	LiteralIP       bool
 	SNI             string
 	Authority       string
 	Method          string
@@ -71,6 +73,7 @@ type TCPCheckRequest struct {
 	Protocol        Protocol
 	DestinationIP   netip.Addr
 	DestinationPort int
+	LiteralIP       bool
 	SNI             string
 	Authority       string
 }
@@ -200,14 +203,40 @@ func (s *Service) Handler() http.Handler {
 }
 
 func (s *Service) CheckHTTP(_ context.Context, req HTTPCheckRequest) (HTTPCheckResponse, error) {
+	path := req.Path
+	isConnect := strings.EqualFold(strings.TrimSpace(req.Method), http.MethodConnect)
+	if !isConnect {
+		canonicalPath, ok := canonicalizeHTTPPath(req.Path)
+		if !ok {
+			decision := finalize(s.cfg.Mode, Decision{
+				Verdict: VerdictDeny,
+				Reason:  "invalid_path",
+			})
+			s.emit(Event{
+				Type:     "http",
+				Protocol: string(req.Protocol),
+				Hostname: strings.TrimSpace(req.Authority),
+				Method:   req.Method,
+				Path:     req.Path,
+				Host:     req.Authority,
+				SNI:      req.SNI,
+				Verdict:  decision.Verdict,
+				Reason:   decision.Reason,
+			})
+			return HTTPCheckResponse{Allowed: allowedFromDecision(s.cfg.Mode, decision), Decision: decision}, nil
+		}
+		path = canonicalPath
+	}
+
 	decision := Evaluate(Request{
 		Protocol:        req.Protocol,
 		DestinationIP:   req.DestinationIP,
 		DestinationPort: req.DestinationPort,
+		LiteralIP:       req.LiteralIP,
 		SNI:             req.SNI,
 		Authority:       req.Authority,
-		Path:            req.Path,
-		IsConnect:       strings.EqualFold(strings.TrimSpace(req.Method), http.MethodConnect),
+		Path:            path,
+		IsConnect:       isConnect,
 	}, s.cfg.Rules, s.cfg.Mode)
 
 	s.emit(Event{
@@ -215,7 +244,7 @@ func (s *Service) CheckHTTP(_ context.Context, req HTTPCheckRequest) (HTTPCheckR
 		Protocol: string(req.Protocol),
 		Hostname: strings.TrimSpace(req.Authority),
 		Method:   req.Method,
-		Path:     req.Path,
+		Path:     path,
 		Host:     req.Authority,
 		SNI:      req.SNI,
 		Verdict:  decision.Verdict,
@@ -234,6 +263,7 @@ func (s *Service) CheckTCP(_ context.Context, req TCPCheckRequest) (TCPCheckResp
 			Protocol:        req.Protocol,
 			DestinationIP:   req.DestinationIP,
 			DestinationPort: req.DestinationPort,
+			LiteralIP:       req.LiteralIP,
 			SNI:             req.SNI,
 			Authority:       req.Authority,
 		}, s.cfg.Rules, s.cfg.Mode)
@@ -374,6 +404,7 @@ func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = authorityIP
 	}
+	literalIP := authorityIP.IsValid() || pathIP.IsValid()
 
 	port := authorityPort
 	if port == 0 {
@@ -390,6 +421,7 @@ func httpCheckRequestFromAuthz(r *http.Request) (HTTPCheckRequest, error) {
 		Protocol:        protocol,
 		DestinationIP:   dstIP,
 		DestinationPort: port,
+		LiteralIP:       literalIP,
 		Authority:       authority,
 		Method:          firstNonEmpty(r.Header.Get("Method"), r.Header.Get("X-Envoy-Original-Method")),
 		Path:            path,
@@ -447,6 +479,43 @@ func normalizeAuthzPath(rawPath string) (path string, authority string, port int
 	}
 
 	return trimmed, "", 0, netip.Addr{}
+}
+
+func canonicalizeHTTPPath(rawPath string) (string, bool) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return "/", true
+	}
+
+	parsed, err := url.ParseRequestURI(trimmed)
+	if err != nil {
+		parsed, err = url.Parse(trimmed)
+		if err != nil {
+			return "", false
+		}
+	}
+
+	pathValue := parsed.EscapedPath()
+	if pathValue == "" {
+		pathValue = parsed.Path
+	}
+	if pathValue == "" {
+		pathValue = "/"
+	}
+
+	unescaped, err := url.PathUnescape(pathValue)
+	if err != nil {
+		return "", false
+	}
+
+	cleaned := pathpkg.Clean(unescaped)
+	if cleaned == "." {
+		cleaned = "/"
+	}
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/" + cleaned
+	}
+	return cleaned, true
 }
 
 func parseOriginalDestination(value string) (netip.Addr, int) {

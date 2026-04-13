@@ -30,10 +30,17 @@ type EnforcePlanInput struct {
 	DNSPort         int
 	ExplicitPort    int
 	TransparentPort int
+	ICMPRules       []ICMPAllowRule
 }
 
 type EnforcePlan struct {
 	Commands []string
+}
+
+type ICMPAllowRule struct {
+	DestinationCIDR string
+	Type            int
+	Code            *int
 }
 
 func BuildMonitorPlan(in MonitorPlanInput) (MonitorPlan, error) {
@@ -121,11 +128,13 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 		fmt.Sprintf("nft add chain inet %s forward { type filter hook forward priority filter; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add chain inet %s postrouting { type nat hook postrouting priority srcnat; policy accept; }", in.TableName),
 		fmt.Sprintf("nft add rule inet %s forward ct state established,related accept", in.TableName),
-		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto icmp accept", in.TableName, in.HostVeth, in.SubnetCIDR),
+	}
+	commands = append(commands, icmpForwardAllowCommands(in.TableName, in.HostVeth, in.SubnetCIDR, in.ICMPRules)...)
+	commands = append(commands,
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s meta l4proto udp drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s forward iifname %s ip saddr %s drop", in.TableName, in.HostVeth, in.SubnetCIDR),
 		fmt.Sprintf("nft add rule inet %s postrouting ip saddr %s masquerade", in.TableName, in.SubnetCIDR),
-	}
+	)
 	commands = append(commands, protectedInputRules(in.TableName, in.HostVeth, in.SubnetCIDR, in.ExplicitPort, in.TransparentPort, in.DNSPort)...)
 	preroutingRules := []string{
 		fmt.Sprintf("iifname %s ip saddr %s meta l4proto udp udp dport 53 redirect to :%d", in.HostVeth, in.SubnetCIDR, in.DNSPort),
@@ -152,6 +161,28 @@ func BuildEnforcePlan(in EnforcePlanInput) (EnforcePlan, error) {
 	}
 
 	return EnforcePlan{Commands: commands}, nil
+}
+
+func icmpForwardAllowCommands(tableName, hostVeth, subnetCIDR string, rules []ICMPAllowRule) []string {
+	commands := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.DestinationCIDR) == "" {
+			continue
+		}
+		cmd := fmt.Sprintf(
+			"nft add rule inet %s forward iifname %s ip saddr %s ip daddr %s meta l4proto icmp icmp type %d",
+			tableName,
+			hostVeth,
+			subnetCIDR,
+			rule.DestinationCIDR,
+			rule.Type,
+		)
+		if rule.Code != nil {
+			cmd += fmt.Sprintf(" icmp code %d", *rule.Code)
+		}
+		commands = append(commands, cmd+" accept")
+	}
+	return commands
 }
 
 func protectedInputRules(tableName, hostVeth, subnetCIDR string, explicitPort, transparentPort, dnsPort int) []string {

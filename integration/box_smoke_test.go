@@ -472,7 +472,36 @@ func TestBoxBlocksNonHTTPTCPForNonMatchingPolicy(t *testing.T) {
 	}
 }
 
-func TestBoxAllowsICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
+func TestBoxAllowsICMPToLiteralIPWhenCIDRRuleMatches(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ping")
+
+	exampleIPv4 := mustLookupIPv4(t, "example.com")
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{{
+		CIDR: exampleIPv4 + "/32",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 8,
+			Code: intPtr(0),
+		}},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"ping", "-c", "1", "-W", "5", exampleIPv4,
+	)
+	if err != nil {
+		t.Fatalf("icmp to literal ip failed despite matching cidr icmp rule; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "1 received") && !strings.Contains(stdout, "1 packets received") {
+		t.Fatalf("icmp output = %q, want successful echo response; stderr=%q", stdout, stderr)
+	}
+}
+
+func TestBoxBlocksICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
 	}
@@ -485,13 +514,13 @@ func TestBoxAllowsICMPToLiteralIPWithoutMatchingPolicy(t *testing.T) {
 	configPath := testenv.WriteEnforceConfig(t, []string{"allowed.example"}, nil)
 
 	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
-		"ping", "-c", "1", "-W", "5", exampleIPv4,
+		"ping", "-c", "1", "-W", "3", exampleIPv4,
 	)
-	if err != nil {
-		t.Fatalf("icmp to literal ip failed despite pass-through behavior; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	if err == nil {
+		t.Fatalf("icmp to literal ip unexpectedly succeeded without matching icmp policy; stdout=%q stderr=%q", stdout, stderr)
 	}
-	if !strings.Contains(stdout, "1 received") && !strings.Contains(stdout, "1 packets received") {
-		t.Fatalf("icmp output = %q, want successful echo response; stderr=%q", stdout, stderr)
+	if strings.Contains(stdout, "1 received") || strings.Contains(stdout, "1 packets received") {
+		t.Fatalf("icmp output = %q, want no successful echo response; stderr=%q", stdout, stderr)
 	}
 }
 
@@ -897,6 +926,10 @@ func mustLookupIPv4(t *testing.T, host string) string {
 	}
 	t.Fatalf("LookupIP(%q) returned no IPv4 address", host)
 	return ""
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func startLocalWebSocketHandshakeServer(t *testing.T) int {

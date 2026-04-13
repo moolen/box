@@ -43,10 +43,16 @@ type NetworkPolicyRule struct {
 	CIDR     string            `yaml:"cidr"`
 	Ports    []int             `yaml:"ports"`
 	HTTP     *HTTPPolicyConfig `yaml:"http"`
+	ICMP     []ICMPPolicyRule  `yaml:"icmp"`
 }
 
 type HTTPPolicyConfig struct {
 	Path []string `yaml:"path"`
+}
+
+type ICMPPolicyRule struct {
+	Type int  `yaml:"type"`
+	Code *int `yaml:"code"`
 }
 
 type MountsConfig struct {

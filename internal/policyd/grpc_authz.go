@@ -98,6 +98,7 @@ func httpCheckRequestFromGRPC(req *authv3.CheckRequest) (HTTPCheckRequest, error
 	if !dstIP.IsValid() || dstIP.IsLoopback() {
 		dstIP = authorityIP
 	}
+	literalIP := authorityIP.IsValid() || pathIP.IsValid()
 
 	port := authorityPort
 	if port == 0 {
@@ -114,6 +115,7 @@ func httpCheckRequestFromGRPC(req *authv3.CheckRequest) (HTTPCheckRequest, error
 		Protocol:        protocol,
 		DestinationIP:   dstIP,
 		DestinationPort: port,
+		LiteralIP:       literalIP,
 		Authority:       authority,
 		Method:          httpReq.GetMethod(),
 		Path:            path,
@@ -165,6 +167,7 @@ func tcpCheckRequestFromGRPC(req *authv3.CheckRequest) (TCPCheckRequest, error) 
 		Protocol:        ProtocolHTTPS,
 		DestinationIP:   dstIP,
 		DestinationPort: dstPort,
+		LiteralIP:       false,
 		SNI:             sni,
 		Authority:       sni,
 	}, nil

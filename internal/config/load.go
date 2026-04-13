@@ -170,12 +170,23 @@ func validateNetworkPolicyRule(rule NetworkPolicyRule) error {
 			return fmt.Errorf("invalid cidr %q: %w", rule.CIDR, err)
 		}
 	}
-	if len(rule.Ports) == 0 {
-		return errors.New("must specify at least one port")
+	if hasHostname && len(rule.ICMP) > 0 {
+		return errors.New("icmp is only supported with cidr rules")
+	}
+	if len(rule.Ports) == 0 && len(rule.ICMP) == 0 {
+		return errors.New("must specify at least one of ports or icmp")
 	}
 	for _, port := range rule.Ports {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("invalid port %d", port)
+		}
+	}
+	for i, icmpRule := range rule.ICMP {
+		if icmpRule.Type < 0 || icmpRule.Type > 255 {
+			return fmt.Errorf("icmp[%d].type %d is invalid; must be between 0 and 255", i, icmpRule.Type)
+		}
+		if icmpRule.Code != nil && (*icmpRule.Code < 0 || *icmpRule.Code > 255) {
+			return fmt.Errorf("icmp[%d].code %d is invalid; must be between 0 and 255", i, *icmpRule.Code)
 		}
 	}
 	if rule.HTTP != nil {

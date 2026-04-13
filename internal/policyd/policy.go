@@ -37,6 +37,7 @@ type Request struct {
 
 	DestinationIP   netip.Addr
 	DestinationPort int
+	LiteralIP       bool
 
 	// Host signals for hostname rules.
 	SNI       string
@@ -70,6 +71,12 @@ func Evaluate(req Request, rules []config.NetworkPolicyRule, mode Mode) Decision
 			Verdict: VerdictAllow,
 			Reason:  "cidr_match",
 			Rule:    "cidr:" + strings.TrimSpace(rule.CIDR),
+		})
+	}
+	if req.LiteralIP {
+		return finalize(mode, Decision{
+			Verdict: VerdictDeny,
+			Reason:  "literal_ip_requires_cidr",
 		})
 	}
 
@@ -141,7 +148,7 @@ func finalize(mode Mode, d Decision) Decision {
 
 func portMatches(ports []int, dst int) bool {
 	if len(ports) == 0 {
-		return true
+		return false
 	}
 	for _, p := range ports {
 		if p == dst {

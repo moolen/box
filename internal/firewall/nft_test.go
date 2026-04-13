@@ -32,7 +32,6 @@ func TestEnforceModeRedirectsTCPAndDNSAndBlocksOtherUDP(t *testing.T) {
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef input iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp udp dport 15353 accept")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef input meta l4proto udp udp dport 15353 drop")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto udp drop")
-	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 meta l4proto icmp accept")
 	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 drop")
 }
 
@@ -139,7 +138,6 @@ func TestEnforceModeRendersEnvoyRedirectAndDropsNonDNSUDP(t *testing.T) {
 	mustContainCommand(t, plan.Commands, "udp dport 53 redirect to :1053")
 	mustContainCommand(t, plan.Commands, "tcp redirect to :19001")
 	mustContainCommand(t, plan.Commands, "meta l4proto udp drop")
-	mustContainCommand(t, plan.Commands, "meta l4proto icmp accept")
 	mustContainCommand(t, plan.Commands, "iifname vethhdeadbeef ip saddr 100.96.0.0/30 drop")
 	mustContainCommand(t, plan.Commands, "masquerade")
 	for _, cmd := range plan.Commands {
@@ -147,6 +145,46 @@ func TestEnforceModeRendersEnvoyRedirectAndDropsNonDNSUDP(t *testing.T) {
 			t.Fatalf("allowset model must not be rendered (found %q)\ncommands=%#v", cmd, plan.Commands)
 		}
 	}
+}
+
+func TestEnforceModeDoesNotAllowICMPWithoutMatchingPolicy(t *testing.T) {
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:       "box_deadbeef",
+		HostVeth:        "vethhdeadbeef",
+		SubnetCIDR:      "100.96.0.0/30",
+		DNSPort:         1053,
+		TransparentPort: 19001,
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error: %v", err)
+	}
+
+	for _, cmd := range plan.Commands {
+		if strings.Contains(cmd, "meta l4proto icmp accept") {
+			t.Fatalf("ICMP must not be blanket-allowed without policy: %q", cmd)
+		}
+	}
+}
+
+func TestEnforceModeRendersICMPAllowRules(t *testing.T) {
+	codeZero := 0
+	plan, err := BuildEnforcePlan(EnforcePlanInput{
+		TableName:       "box_deadbeef",
+		HostVeth:        "vethhdeadbeef",
+		SubnetCIDR:      "100.96.0.0/30",
+		DNSPort:         1053,
+		TransparentPort: 19001,
+		ICMPRules: []ICMPAllowRule{{
+			DestinationCIDR: "198.51.100.0/24",
+			Type:            8,
+			Code:            &codeZero,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildEnforcePlan() error: %v", err)
+	}
+
+	mustContainCommand(t, plan.Commands, "nft add rule inet box_deadbeef forward iifname vethhdeadbeef ip saddr 100.96.0.0/30 ip daddr 198.51.100.0/24 meta l4proto icmp icmp type 8 icmp code 0 accept")
 }
 
 func containsFragment(lines []string, fragment string) bool {

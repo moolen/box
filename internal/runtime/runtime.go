@@ -425,7 +425,7 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 			GatewayIP:         rt.Manifest.GatewayIP,
 			ListenAddr:        policyListenAddr,
 			DNSListenAddr:     dnsListenAddr,
-			ProxyListenAddr:   wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort),
+			ProxyListenAddr:   gatewayAddrForPort(rt.Manifest.GatewayIP, rt.Manifest.Envoy.ExplicitPort),
 			ProxyUpstreamAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort)),
 			Rules:             append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
 			DNSUpstream:       append([]string(nil), cfg.Network.DNS.Upstream...),
@@ -522,7 +522,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 			GatewayIP:         rt.Manifest.GatewayIP,
 			ListenAddr:        policyListenAddr,
 			DNSListenAddr:     dnsListenAddr,
-			ProxyListenAddr:   wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort),
+			ProxyListenAddr:   gatewayAddrForPort(rt.Manifest.GatewayIP, rt.Manifest.Envoy.ExplicitPort),
 			ProxyUpstreamAddr: net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort)),
 			Rules:             append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
 			DNSUpstream:       append([]string(nil), cfg.Network.DNS.Upstream...),
@@ -572,6 +572,7 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 		DNSPort:         rt.Manifest.Envoy.DNSPort,
 		ExplicitPort:    rt.Manifest.Envoy.ExplicitPort,
 		TransparentPort: rt.Manifest.Envoy.TransparentPort,
+		ICMPRules:       buildFirewallICMPAllowRules(cfg.Network.Policy),
 	})
 	if err != nil {
 		return fmt.Errorf("build firewall enforce plan: %w", err)
@@ -586,6 +587,24 @@ func (rt *Runtime) startEnforceResources(ctx context.Context, cfg config.Config,
 	}
 
 	return nil
+}
+
+func buildFirewallICMPAllowRules(rules []config.NetworkPolicyRule) []firewall.ICMPAllowRule {
+	allowRules := make([]firewall.ICMPAllowRule, 0, len(rules))
+	for _, rule := range rules {
+		cidr := strings.TrimSpace(rule.CIDR)
+		if cidr == "" || len(rule.ICMP) == 0 {
+			continue
+		}
+		for _, icmpRule := range rule.ICMP {
+			allowRules = append(allowRules, firewall.ICMPAllowRule{
+				DestinationCIDR: cidr,
+				Type:            icmpRule.Type,
+				Code:            icmpRule.Code,
+			})
+		}
+	}
+	return allowRules
 }
 
 func (rt *Runtime) startNetNSResources(ctx context.Context, cfg config.Config, deps Deps) error {
@@ -755,11 +774,11 @@ func loopbackAddrForPort(addr string) (string, error) {
 	return net.JoinHostPort("127.0.0.1", port), nil
 }
 
-func wildcardAddrForPort(port int) string {
-	if port <= 0 {
+func gatewayAddrForPort(gatewayIP string, port int) string {
+	if strings.TrimSpace(gatewayIP) == "" || port <= 0 {
 		return ""
 	}
-	return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+	return net.JoinHostPort(gatewayIP, strconv.Itoa(port))
 }
 
 func newRuntimeID(deps Deps) string {

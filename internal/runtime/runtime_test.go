@@ -277,8 +277,9 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 	if !strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want loopback listener", policyReq.DNSListenAddr)
 	}
-	if policyReq.ProxyListenAddr != wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort) {
-		t.Fatalf("PolicyService proxy listen addr = %q, want %q", policyReq.ProxyListenAddr, wildcardAddrForPort(rt.Manifest.Envoy.ExplicitPort))
+	wantProxyListenAddr := net.JoinHostPort(rt.Manifest.GatewayIP, strconv.Itoa(rt.Manifest.Envoy.ExplicitPort))
+	if policyReq.ProxyListenAddr != wantProxyListenAddr {
+		t.Fatalf("PolicyService proxy listen addr = %q, want %q", policyReq.ProxyListenAddr, wantProxyListenAddr)
 	}
 	wantProxyUpstream := net.JoinHostPort("127.0.0.1", strconv.Itoa(rt.Manifest.Envoy.InternalExplicitPort))
 	if policyReq.ProxyUpstreamAddr != wantProxyUpstream {
@@ -1041,6 +1042,10 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 	if !strings.HasPrefix(policyReq.DNSListenAddr, "127.0.0.1:") {
 		t.Fatalf("PolicyService DNSListenAddr = %q, want loopback listener", policyReq.DNSListenAddr)
 	}
+	wantProxyListenAddr := net.JoinHostPort(rt.Manifest.GatewayIP, strconv.Itoa(rt.Manifest.Envoy.ExplicitPort))
+	if policyReq.ProxyListenAddr != wantProxyListenAddr {
+		t.Fatalf("PolicyService proxy listen addr = %q, want %q", policyReq.ProxyListenAddr, wantProxyListenAddr)
+	}
 	if envoyReq.TransparentPort != rt.Manifest.Envoy.TransparentPort {
 		t.Fatalf("Envoy request transparent port = %d, want %d", envoyReq.TransparentPort, rt.Manifest.Envoy.TransparentPort)
 	}
@@ -1074,6 +1079,47 @@ func TestEnforceModeStartsPolicyServiceAndEnvoyWithoutLegacyAllowsetCommands(t *
 			t.Fatalf("legacy allowset command must not be emitted; calls=%#v", exec.calls)
 		}
 	}
+}
+
+func TestEnforceModeProgramsICMPAcceptRulesFromCIDRPolicy(t *testing.T) {
+	t.Parallel()
+
+	codeZero := 0
+	cfg := testConfig("enforce")
+	cfg.Network.Policy = []config.NetworkPolicyRule{{
+		CIDR: "198.51.100.0/24",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 8,
+			Code: &codeZero,
+		}},
+	}}
+
+	exec := &recordingCommandExec{}
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-enforce-icmp" },
+		CommandExec: exec,
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	defer func() {
+		_ = rt.Cleanup(context.Background(), Deps{CommandExec: exec})
+	}()
+
+	mustContainCall(t, exec.calls, "ip daddr 198.51.100.0/24 meta l4proto icmp icmp type 8 icmp code 0 accept")
 }
 
 func TestCleanupOnlyDeletesManifestOwnedPaths(t *testing.T) {

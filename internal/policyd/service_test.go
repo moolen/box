@@ -44,6 +44,34 @@ func TestCheckHTTPReturnsDeniedForPathMismatch(t *testing.T) {
 	}
 }
 
+func TestCheckHTTPReturnsDeniedForCanonicalizedPathMismatch(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "example.com",
+			Ports:    []int{443},
+			HTTP: &config.HTTPPolicyConfig{
+				Path: []string{"/allowed/*"},
+			},
+		}},
+	})
+
+	resp, err := svc.CheckHTTP(context.Background(), HTTPCheckRequest{
+		Protocol:        ProtocolHTTPS,
+		DestinationPort: 443,
+		SNI:             "example.com",
+		Authority:       "example.com",
+		Method:          "GET",
+		Path:            "/allowed/../blocked",
+	})
+	if err != nil {
+		t.Fatalf("CheckHTTP() error = %v", err)
+	}
+	if resp.Allowed {
+		t.Fatalf("Allowed = true, want false")
+	}
+}
+
 func TestCheckTCPObserveAllowsButReportsUnsupportedProtocol(t *testing.T) {
 	svc := NewService(ServiceConfig{
 		Mode:  ModeObserve,
@@ -382,6 +410,49 @@ func TestCheckGRPCUsesOriginalTargetHeadersForExplicitWebSocketCIDRRule(t *testi
 	}
 	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.OK {
 		t.Fatalf("status = %v, want %v; denied=%#v", got, codes.OK, resp.GetDeniedResponse())
+	}
+}
+
+func TestCheckGRPCDeniesExplicitLiteralIPForHostnameRule(t *testing.T) {
+	svc := NewService(ServiceConfig{
+		Mode: ModeEnforce,
+		Rules: []config.NetworkPolicyRule{{
+			Hostname: "allowed.example.com",
+			Ports:    []int{443},
+		}},
+	})
+
+	resp, err := svc.Check(context.Background(), &authv3.CheckRequest{
+		Attributes: &authv3.AttributeContext{
+			Destination: &authv3.AttributeContext_Peer{
+				Address: &corev3.Address{
+					Address: &corev3.Address_SocketAddress{
+						SocketAddress: &corev3.SocketAddress{
+							Address: "127.0.0.1",
+							PortSpecifier: &corev3.SocketAddress_PortValue{
+								PortValue: 19001,
+							},
+						},
+					},
+				},
+			},
+			Request: &authv3.AttributeContext_Request{
+				Http: &authv3.AttributeContext_HttpRequest{
+					Method: http.MethodGet,
+					Host:   "allowed.example.com",
+					Path:   "/chat",
+					Headers: map[string]string{
+						"x-box-original-target": "https://203.0.113.7/chat",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if got := codes.Code(resp.GetStatus().GetCode()); got != codes.PermissionDenied {
+		t.Fatalf("status = %v, want %v; ok=%#v", got, codes.PermissionDenied, resp.GetOkResponse())
 	}
 }
 

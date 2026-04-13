@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -417,6 +418,63 @@ network:
 	}
 }
 
+func TestLoadNetworkPolicyRulesWithICMPSelectors(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
+	cfgYAML := `
+sandbox:
+  rootfs: host-overlay
+  workdir: .
+network:
+  mode: enforce
+  policy:
+    - cidr: 198.51.100.0/24
+      icmp:
+        - type: 8
+          code: 0
+        - type: 3
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := Load(cfgPath, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(got.Network.Policy) != 1 {
+		t.Fatalf("network.policy len = %d, want 1", len(got.Network.Policy))
+	}
+
+	icmpField := reflect.ValueOf(got.Network.Policy[0]).FieldByName("ICMP")
+	if !icmpField.IsValid() {
+		t.Fatal("network.policy[0].ICMP field is missing")
+	}
+	if icmpField.Len() != 2 {
+		t.Fatalf("network.policy[0].ICMP len = %d, want 2", icmpField.Len())
+	}
+
+	first := icmpField.Index(0)
+	if got := first.FieldByName("Type").Int(); got != 8 {
+		t.Fatalf("network.policy[0].ICMP[0].Type = %d, want 8", got)
+	}
+	code := first.FieldByName("Code")
+	if code.IsNil() {
+		t.Fatal("network.policy[0].ICMP[0].Code = nil, want 0")
+	}
+	if got := code.Elem().Int(); got != 0 {
+		t.Fatalf("network.policy[0].ICMP[0].Code = %d, want 0", got)
+	}
+
+	second := icmpField.Index(1)
+	if got := second.FieldByName("Type").Int(); got != 3 {
+		t.Fatalf("network.policy[0].ICMP[1].Type = %d, want 3", got)
+	}
+	if !second.FieldByName("Code").IsNil() {
+		t.Fatalf("network.policy[0].ICMP[1].Code = %#v, want nil", second.FieldByName("Code").Interface())
+	}
+}
+
 func TestLoadRejectsLegacyTopLevelPolicy(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "box.yaml")
 	cfgYAML := `
@@ -503,6 +561,44 @@ func TestValidateRejectsInvalidNetworkPolicyRule(t *testing.T) {
 			t.Fatalf("ValidateRuntime() error = %q, want mention of invalid glob", err.Error())
 		}
 	})
+
+	t.Run("rejects hostname rule with icmp selectors", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			Hostname: "example.com",
+			ICMP: []ICMPPolicyRule{{
+				Type: 8,
+			}},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
+		}
+		if !strings.Contains(err.Error(), "icmp is only supported with cidr rules") {
+			t.Fatalf("ValidateRuntime() error = %q, want icmp/cidr rejection", err.Error())
+		}
+	})
+
+	t.Run("rejects invalid icmp type", func(t *testing.T) {
+		cfg := Config{}
+		cfg.Network.Mode = "enforce"
+		cfg.Network.Policy = []NetworkPolicyRule{{
+			CIDR: "198.51.100.0/24",
+			ICMP: []ICMPPolicyRule{{
+				Type: 256,
+			}},
+		}}
+
+		err := ValidateRuntime(cfg)
+		if err == nil {
+			t.Fatal("ValidateRuntime() error = nil, want invalid rule rejection")
+		}
+		if !strings.Contains(err.Error(), "icmp[0].type") {
+			t.Fatalf("ValidateRuntime() error = %q, want mention of icmp[0].type", err.Error())
+		}
+	})
 }
 
 func TestValidateAcceptsValidWildcardHostname(t *testing.T) {
@@ -511,6 +607,22 @@ func TestValidateAcceptsValidWildcardHostname(t *testing.T) {
 	cfg.Network.Policy = []NetworkPolicyRule{{
 		Hostname: "*.example.com",
 		Ports:    []int{443},
+	}}
+
+	if err := ValidateRuntime(cfg); err != nil {
+		t.Fatalf("ValidateRuntime() error = %v, want nil", err)
+	}
+}
+
+func TestValidateAcceptsCIDRRuleWithICMPOnly(t *testing.T) {
+	cfg := Config{}
+	cfg.Network.Mode = "enforce"
+	cfg.Network.Policy = []NetworkPolicyRule{{
+		CIDR: "198.51.100.0/24",
+		ICMP: []ICMPPolicyRule{
+			{Type: 8, Code: intPtr(0)},
+			{Type: 3},
+		},
 	}}
 
 	if err := ValidateRuntime(cfg); err != nil {
@@ -619,6 +731,10 @@ func TestValidateRejectsEnabledEnvoyWithZeroPorts(t *testing.T) {
 	if !strings.Contains(err.Error(), "network.envoy.tls_port") {
 		t.Fatalf("ValidateRuntime() error = %q, want mention of network.envoy.tls_port", err)
 	}
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func TestLoadDefaultsNetworkModeToMonitorWhenOmitted(t *testing.T) {

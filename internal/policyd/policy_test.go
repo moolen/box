@@ -67,6 +67,45 @@ func TestEvaluateCIDRRuleMatchesDestinationIPAndPort(t *testing.T) {
 	}
 }
 
+func TestEvaluateICMPOnlyCIDRRuleDoesNotAllowHTTPS(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		CIDR: "203.0.113.0/24",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 8,
+		}},
+	}}
+
+	decision := Evaluate(Request{
+		Protocol:        ProtocolHTTPS,
+		DestinationIP:   netip.MustParseAddr("203.0.113.7"),
+		DestinationPort: 443,
+	}, rules, ModeEnforce)
+
+	if decision.Verdict != VerdictDeny {
+		t.Fatalf("Verdict = %q, want deny (decision = %#v)", decision.Verdict, decision)
+	}
+}
+
+func TestEvaluateLiteralIPDoesNotMatchHostnameRule(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		Hostname: "allowed.example.com",
+		Ports:    []int{443},
+	}}
+
+	decision := Evaluate(Request{
+		Protocol:        ProtocolHTTPS,
+		DestinationIP:   netip.MustParseAddr("203.0.113.7"),
+		DestinationPort: 443,
+		LiteralIP:       true,
+		SNI:             "allowed.example.com",
+		Authority:       "allowed.example.com",
+	}, rules, ModeEnforce)
+
+	if decision.Verdict != VerdictDeny {
+		t.Fatalf("Verdict = %q, want deny (decision = %#v)", decision.Verdict, decision)
+	}
+}
+
 func TestEvaluatePortMismatchDenies(t *testing.T) {
 	rules := []config.NetworkPolicyRule{{
 		Hostname: "example.com",
