@@ -659,6 +659,7 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 	}
 	return func(event policyd.Event) {
 		hostname := strings.TrimSpace(event.Hostname)
+		destination := strings.TrimSpace(event.Destination)
 		verdict := monitorVerdict(event.Verdict)
 		switch strings.ToLower(strings.TrimSpace(event.Type)) {
 		case "dns":
@@ -667,32 +668,43 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 			rt.monitor.AddHTTP(event.Method, hostname, verdict)
 		case "tls":
 			rt.monitor.AddTLS(hostname, verdict)
+		case "icmp":
+			if event.ICMPType != nil {
+				rt.monitor.AddICMP(destination, *event.ICMPType, event.ICMPCode, verdict)
+			}
 		}
+		rt.monitor.AddReason(event.Reason, verdict)
 
 		rt.logRawMonitorEvent(rawMonitorEvent{
-			Type:     event.Type,
-			Protocol: event.Protocol,
-			Hostname: hostname,
-			Method:   event.Method,
-			Path:     event.Path,
-			Host:     event.Host,
-			SNI:      event.SNI,
-			Verdict:  string(event.Verdict),
-			Reason:   event.Reason,
+			Type:        event.Type,
+			Protocol:    event.Protocol,
+			Hostname:    hostname,
+			Destination: destination,
+			Method:      event.Method,
+			Path:        event.Path,
+			Host:        event.Host,
+			SNI:         event.SNI,
+			ICMPType:    event.ICMPType,
+			ICMPCode:    event.ICMPCode,
+			Verdict:     string(event.Verdict),
+			Reason:      event.Reason,
 		})
 	}
 }
 
 type rawMonitorEvent struct {
-	Type     string `json:"type"`
-	Protocol string `json:"protocol,omitempty"`
-	Hostname string `json:"hostname,omitempty"`
-	Method   string `json:"method,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Host     string `json:"host,omitempty"`
-	SNI      string `json:"sni,omitempty"`
-	Verdict  string `json:"verdict,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	Type        string `json:"type"`
+	Protocol    string `json:"protocol,omitempty"`
+	Hostname    string `json:"hostname,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Host        string `json:"host,omitempty"`
+	SNI         string `json:"sni,omitempty"`
+	ICMPType    *int   `json:"icmp_type,omitempty"`
+	ICMPCode    *int   `json:"icmp_code,omitempty"`
+	Verdict     string `json:"verdict,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 func (rt *Runtime) logRawMonitorEvent(event rawMonitorEvent) {

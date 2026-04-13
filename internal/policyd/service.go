@@ -24,10 +24,13 @@ type Event struct {
 	Type     string
 	Protocol string
 	Hostname string
+	Destination string
 	Method   string
 	Path     string
 	Host     string
 	SNI      string
+	ICMPType *int
+	ICMPCode *int
 	Verdict  Verdict
 	Reason   string
 }

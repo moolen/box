@@ -567,6 +567,8 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 			if req.OnEvent == nil {
 				t.Fatalf("PolicyServiceStartRequest.OnEvent = nil, want callback")
 			}
+			icmpType := 8
+			icmpCode := 0
 			req.OnEvent(policyd.Event{
 				Type:     "dns",
 				Protocol: "dns",
@@ -587,6 +589,15 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 				Hostname: "tls.example.com",
 				Verdict:  policyd.VerdictWouldAllow,
 			})
+			req.OnEvent(policyd.Event{
+				Type:        "icmp",
+				Protocol:    "icmp",
+				Destination: "198.51.100.7",
+				ICMPType:    &icmpType,
+				ICMPCode:    &icmpCode,
+				Verdict:     policyd.VerdictWouldBlock,
+				Reason:      "unsupported_protocol",
+			})
 			return noopRunner{}, nil
 		},
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
@@ -605,7 +616,11 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 	mustContain(t, summary, "GET api.example.com [WOULD_ALLOW]: 1")
 	mustContain(t, summary, "TLS:")
 	mustContain(t, summary, "tls.example.com [WOULD_ALLOW]: 1")
-	mustContain(t, summary, "Total events: 3")
+	mustContain(t, summary, "ICMP:")
+	mustContain(t, summary, "TYPE 8 CODE 0 198.51.100.7 [WOULD_BLOCK]: 1")
+	mustContain(t, summary, "Reasons:")
+	mustContain(t, summary, "unsupported_protocol [WOULD_BLOCK]: 1")
+	mustContain(t, summary, "Total events: 4")
 }
 
 func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
@@ -624,6 +639,8 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 			return nil
 		},
 		StartPolicyService: func(_ context.Context, req PolicyServiceStartRequest) (Runner, error) {
+			icmpType := 8
+			icmpCode := 0
 			req.OnEvent(policyd.Event{
 				Type:     "dns",
 				Protocol: "dns",
@@ -637,6 +654,15 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 				Method:   "POST",
 				Path:     "/submit",
 				Verdict:  policyd.VerdictWouldAllow,
+			})
+			req.OnEvent(policyd.Event{
+				Type:        "icmp",
+				Protocol:    "icmp",
+				Destination: "198.51.100.7",
+				ICMPType:    &icmpType,
+				ICMPCode:    &icmpCode,
+				Verdict:     policyd.VerdictWouldBlock,
+				Reason:      "unsupported_protocol",
 			})
 			return noopRunner{}, nil
 		},
@@ -662,6 +688,12 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 	mustContain(t, text, `"method":"POST"`)
 	mustContain(t, text, `"path":"/submit"`)
 	mustContain(t, text, `"verdict":"would_allow"`)
+	mustContain(t, text, `"type":"icmp"`)
+	mustContain(t, text, `"protocol":"icmp"`)
+	mustContain(t, text, `"destination":"198.51.100.7"`)
+	mustContain(t, text, `"icmp_type":8`)
+	mustContain(t, text, `"icmp_code":0`)
+	mustContain(t, text, `"reason":"unsupported_protocol"`)
 }
 
 func TestEnforceModeForcesGatewayResolvConf(t *testing.T) {

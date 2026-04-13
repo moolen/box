@@ -20,6 +20,10 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	collector.AddHTTP("", "example.com", VerdictAllow)
 	collector.AddHTTP("POST", "", VerdictDeny)
 	collector.AddHTTP("PUT", "bad/host", VerdictDeny)
+	collector.AddICMP("198.51.100.7", 8, intPtr(0), VerdictWouldBlock)
+	collector.AddICMP("198.51.100.7", 8, intPtr(0), VerdictWouldBlock)
+	collector.AddReason("unsupported_protocol", VerdictWouldBlock)
+	collector.AddReason("unsupported_protocol", VerdictWouldBlock)
 
 	snapshot := collector.Snapshot()
 
@@ -73,6 +77,20 @@ func TestCollectorAggregatesDNSHTTPAndTLS(t *testing.T) {
 	if got := snapshot.HTTP[HTTPKey{Method: "PUT", Hostname: UnknownHostname}]; got.Verdict != VerdictDeny {
 		t.Fatalf("HTTP[PUT %q].Verdict = %q, want %q", UnknownHostname, got.Verdict, VerdictDeny)
 	}
+
+	if got := snapshot.ICMP[ICMPKey{Target: "198.51.100.7", Type: 8, Code: 0, HasCode: true}]; got.Count != 2 {
+		t.Fatalf("ICMP[type=8 code=0 target=198.51.100.7].Count = %d, want 2", got.Count)
+	}
+	if got := snapshot.ICMP[ICMPKey{Target: "198.51.100.7", Type: 8, Code: 0, HasCode: true}]; got.Verdict != VerdictWouldBlock {
+		t.Fatalf("ICMP[type=8 code=0 target=198.51.100.7].Verdict = %q, want %q", got.Verdict, VerdictWouldBlock)
+	}
+
+	if got := snapshot.Reasons["unsupported_protocol"]; got.Count != 2 {
+		t.Fatalf("Reasons[unsupported_protocol].Count = %d, want 2", got.Count)
+	}
+	if got := snapshot.Reasons["unsupported_protocol"]; got.Verdict != VerdictWouldBlock {
+		t.Fatalf("Reasons[unsupported_protocol].Verdict = %q, want %q", got.Verdict, VerdictWouldBlock)
+	}
 }
 
 func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
@@ -95,6 +113,18 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 				Verdict: VerdictWouldBlock,
 			},
 		},
+		ICMP: map[ICMPKey]Row{
+			{Target: "198.51.100.7", Type: 8, Code: 0, HasCode: true}: {
+				Count:   4,
+				Verdict: VerdictWouldBlock,
+			},
+		},
+		Reasons: map[string]Row{
+			"unsupported_protocol": {
+				Count:   5,
+				Verdict: VerdictWouldBlock,
+			},
+		},
 	})
 
 	mustContain(t, summary, "Monitor summary")
@@ -104,9 +134,13 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 	mustContain(t, summary, "GET example.com")
 	mustContain(t, summary, "TLS")
 	mustContain(t, summary, UnknownHostname)
+	mustContain(t, summary, "ICMP")
+	mustContain(t, summary, "TYPE 8 CODE 0 198.51.100.7")
+	mustContain(t, summary, "Reasons")
+	mustContain(t, summary, "unsupported_protocol")
 	mustContain(t, summary, "WOULD_ALLOW")
 	mustContain(t, summary, "WOULD_BLOCK")
-	mustContain(t, summary, "Total events: 6")
+	mustContain(t, summary, "Total events: 10")
 
 	dnsOnly := RenderSummary(Snapshot{
 		DNS: map[string]Row{
@@ -123,6 +157,12 @@ func TestRenderSummaryFormatsSectionsAndCounts(t *testing.T) {
 	if strings.Contains(dnsOnly, "TLS") {
 		t.Fatalf("RenderSummary() unexpectedly included TLS section: %q", dnsOnly)
 	}
+	if strings.Contains(dnsOnly, "ICMP") {
+		t.Fatalf("RenderSummary() unexpectedly included ICMP section: %q", dnsOnly)
+	}
+	if strings.Contains(dnsOnly, "Reasons") {
+		t.Fatalf("RenderSummary() unexpectedly included Reasons section: %q", dnsOnly)
+	}
 }
 
 func TestRenderSummaryEmptySnapshotShowsNoTrafficMessage(t *testing.T) {
@@ -137,4 +177,8 @@ func mustContain(t *testing.T, got string, want string) {
 	if !strings.Contains(got, want) {
 		t.Fatalf("string %q does not contain %q", got, want)
 	}
+}
+
+func intPtr(v int) *int {
+	return &v
 }

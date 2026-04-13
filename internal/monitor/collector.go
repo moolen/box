@@ -12,29 +12,44 @@ type HTTPKey struct {
 	Hostname string
 }
 
+type ICMPKey struct {
+	Target  string
+	Type    int
+	Code    int
+	HasCode bool
+}
+
 type Row struct {
 	Count   int
 	Verdict Verdict
 }
 
 type Snapshot struct {
-	DNS  map[string]Row
-	HTTP map[HTTPKey]Row
-	TLS  map[string]Row
+	Total   int
+	DNS     map[string]Row
+	HTTP    map[HTTPKey]Row
+	TLS     map[string]Row
+	ICMP    map[ICMPKey]Row
+	Reasons map[string]Row
 }
 
 type Collector struct {
-	mu   sync.Mutex
-	dns  map[string]Row
-	http map[HTTPKey]Row
-	tls  map[string]Row
+	mu      sync.Mutex
+	dns     map[string]Row
+	http    map[HTTPKey]Row
+	tls     map[string]Row
+	icmp    map[ICMPKey]Row
+	reasons map[string]Row
+	total   int
 }
 
 func NewCollector() *Collector {
 	return &Collector{
-		dns:  make(map[string]Row),
-		http: make(map[HTTPKey]Row),
-		tls:  make(map[string]Row),
+		dns:     make(map[string]Row),
+		http:    make(map[HTTPKey]Row),
+		tls:     make(map[string]Row),
+		icmp:    make(map[ICMPKey]Row),
+		reasons: make(map[string]Row),
 	}
 }
 
@@ -48,6 +63,7 @@ func (c *Collector) AddDNS(hostname string, verdict Verdict) {
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
 	c.dns[display] = row
+	c.total++
 }
 
 func (c *Collector) AddTLS(hostname string, verdict Verdict) {
@@ -60,6 +76,7 @@ func (c *Collector) AddTLS(hostname string, verdict Verdict) {
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
 	c.tls[display] = row
+	c.total++
 }
 
 func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict) {
@@ -76,6 +93,43 @@ func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict) {
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
 	c.http[key] = row
+	c.total++
+}
+
+func (c *Collector) AddICMP(target string, icmpType int, icmpCode *int, verdict Verdict) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	normalized := NormalizeHostname(target)
+	key := ICMPKey{
+		Target: toDisplayHostname(normalized),
+		Type:   icmpType,
+	}
+	if icmpCode != nil {
+		key.Code = *icmpCode
+		key.HasCode = true
+	}
+
+	row := c.icmp[key]
+	row.Count++
+	row.Verdict = normalizeVerdict(verdict)
+	c.icmp[key] = row
+	c.total++
+}
+
+func (c *Collector) AddReason(reason string, verdict Verdict) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	normalized := strings.TrimSpace(reason)
+	if normalized == "" || !isDeniedVerdict(verdict) {
+		return
+	}
+
+	row := c.reasons[normalized]
+	row.Count++
+	row.Verdict = normalizeVerdict(verdict)
+	c.reasons[normalized] = row
 }
 
 func (c *Collector) Snapshot() Snapshot {
@@ -83,9 +137,12 @@ func (c *Collector) Snapshot() Snapshot {
 	defer c.mu.Unlock()
 
 	snapshot := Snapshot{
-		DNS:  make(map[string]Row, len(c.dns)),
-		HTTP: make(map[HTTPKey]Row, len(c.http)),
-		TLS:  make(map[string]Row, len(c.tls)),
+		Total:   c.total,
+		DNS:     make(map[string]Row, len(c.dns)),
+		HTTP:    make(map[HTTPKey]Row, len(c.http)),
+		TLS:     make(map[string]Row, len(c.tls)),
+		ICMP:    make(map[ICMPKey]Row, len(c.icmp)),
+		Reasons: make(map[string]Row, len(c.reasons)),
 	}
 
 	for host, row := range c.dns {
@@ -96,6 +153,12 @@ func (c *Collector) Snapshot() Snapshot {
 	}
 	for host, row := range c.tls {
 		snapshot.TLS[host] = row
+	}
+	for key, row := range c.icmp {
+		snapshot.ICMP[key] = row
+	}
+	for reason, row := range c.reasons {
+		snapshot.Reasons[reason] = row
 	}
 
 	return snapshot
@@ -128,5 +191,14 @@ func normalizeVerdict(verdict Verdict) Verdict {
 		return VerdictWouldBlock
 	default:
 		return VerdictDeny
+	}
+}
+
+func isDeniedVerdict(verdict Verdict) bool {
+	switch normalizeVerdict(verdict) {
+	case VerdictDeny, VerdictWouldBlock:
+		return true
+	default:
+		return false
 	}
 }
