@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -180,6 +181,32 @@ func TestBoxProxiedHTTPSPathRuleBlocksMismatchedPath(t *testing.T) {
 	}
 }
 
+func TestBoxBlocksNonHTTPTCPForAllowedCIDRRule(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "nc")
+
+	githubIPv4 := mustLookupIPv4(t, "github.com")
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteEnforceConfigWithRules(t, []config.NetworkPolicyRule{
+		{
+			CIDR:  githubIPv4 + "/32",
+			Ports: []int{22},
+		},
+	})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+		"bash", "-lc", "timeout 5s nc "+githubIPv4+" 22 < /dev/null | head -n 1",
+	)
+	if err == nil && strings.Contains(stdout, "SSH-2.0-") {
+		t.Fatalf("non-http tcp unexpectedly reached upstream service under cidr allow rule; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 func TestBoxShowsSandboxInterfaceAddress(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration smoke tests require Linux")
@@ -351,4 +378,20 @@ func firstNonLoopbackIPv4Prefix(t *testing.T, output string) netip.Prefix {
 
 	t.Fatalf("ip output = %q, want non-loopback ipv4 prefix", output)
 	return netip.Prefix{}
+}
+
+func mustLookupIPv4(t *testing.T, host string) string {
+	t.Helper()
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		t.Fatalf("LookupIP(%q) error = %v", host, err)
+	}
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	t.Fatalf("LookupIP(%q) returned no IPv4 address", host)
+	return ""
 }
