@@ -86,6 +86,48 @@ func TestEvaluateICMPOnlyCIDRRuleDoesNotAllowHTTPS(t *testing.T) {
 	}
 }
 
+func TestEvaluateICMPCIDRRuleMatchesTypeAndCode(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		CIDR: "203.0.113.0/24",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 8,
+			Code: intPtr(0),
+		}},
+	}}
+
+	decision := EvaluateICMP(netip.MustParseAddr("203.0.113.7"), 8, 0, rules, ModeObserve)
+
+	if decision.Verdict != VerdictWouldAllow {
+		t.Fatalf("Verdict = %q, want would_allow (decision = %#v)", decision.Verdict, decision)
+	}
+	if decision.Reason != "cidr_match" {
+		t.Fatalf("Reason = %q, want cidr_match", decision.Reason)
+	}
+}
+
+func TestEvaluateICMPCIDRRuleRejectsMismatchedCode(t *testing.T) {
+	rules := []config.NetworkPolicyRule{{
+		CIDR: "203.0.113.0/24",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 8,
+			Code: intPtr(0),
+		}},
+	}}
+
+	decision := EvaluateICMP(netip.MustParseAddr("203.0.113.7"), 8, 3, rules, ModeObserve)
+
+	if decision.Verdict != VerdictWouldBlock {
+		t.Fatalf("Verdict = %q, want would_block (decision = %#v)", decision.Verdict, decision)
+	}
+	if decision.Reason != "no_matching_rule" {
+		t.Fatalf("Reason = %q, want no_matching_rule", decision.Reason)
+	}
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
 func TestEvaluateLiteralIPDoesNotMatchHostnameRule(t *testing.T) {
 	rules := []config.NetworkPolicyRule{{
 		Hostname: "allowed.example.com",

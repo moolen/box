@@ -60,6 +60,7 @@ type Runner interface {
 
 type PolicyServiceFactory func(ctx context.Context, req PolicyServiceStartRequest) (Runner, error)
 type EnvoyFactory func(ctx context.Context, req EnvoyStartRequest) (Runner, error)
+type ICMPMonitorFactory func(ctx context.Context, req ICMPMonitorStartRequest) (Runner, error)
 
 type Deps struct {
 	Clock                func() time.Time
@@ -68,6 +69,7 @@ type Deps struct {
 	AllocateNetResources func(ctx context.Context, runtimeID string, subnetPool string) (netns.Resources, error)
 	StartPolicyService   PolicyServiceFactory
 	StartEnvoy           EnvoyFactory
+	StartICMPMonitor     ICMPMonitorFactory
 	MonitorPreflight     MonitorPreflightFunc
 }
 
@@ -97,6 +99,15 @@ type EnvoyStartRequest struct {
 	PolicyListenAddr           string
 	TransparentTLSCertificates []TransparentTLSCertificate
 	UpstreamTrustBundlePath    string
+}
+
+type ICMPMonitorStartRequest struct {
+	RuntimeID  string
+	NetNS      string
+	Interface  string
+	SubnetCIDR string
+	Rules      []config.NetworkPolicyRule
+	OnEvent    func(policyd.Event)
 }
 
 type MonitorPreflightRequest struct {
@@ -462,6 +473,27 @@ func (rt *Runtime) startMonitorResources(ctx context.Context, cfg config.Config,
 			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "envoy")
 		}
 	}
+	startICMPMonitor := deps.StartICMPMonitor
+	if startICMPMonitor == nil {
+		startICMPMonitor = startICMPObserver
+	}
+	if startICMPMonitor != nil {
+		icmpRunner, err := startICMPMonitor(ctx, ICMPMonitorStartRequest{
+			RuntimeID:  rt.Manifest.RuntimeID,
+			NetNS:      rt.Manifest.Net.NetNS,
+			Interface:  rt.Manifest.Net.HostVeth,
+			SubnetCIDR: cfg.Network.Subnet,
+			Rules:      append([]config.NetworkPolicyRule(nil), cfg.Network.Policy...),
+			OnEvent:    rt.monitorPolicyEventCallback(),
+		})
+		if err != nil {
+			return fmt.Errorf("start icmp monitor: %w", err)
+		}
+		if icmpRunner != nil {
+			rt.runners["icmp_monitor"] = icmpRunner
+			rt.Manifest.StartedRunners = append(rt.Manifest.StartedRunners, "icmp_monitor")
+		}
+	}
 
 	firewallPlan, err := firewall.BuildMonitorPlan(firewall.MonitorPlanInput{
 		TableName:    rt.Manifest.Net.TableName,
@@ -663,17 +695,16 @@ func (rt *Runtime) monitorPolicyEventCallback() func(policyd.Event) {
 		verdict := monitorVerdict(event.Verdict)
 		switch strings.ToLower(strings.TrimSpace(event.Type)) {
 		case "dns":
-			rt.monitor.AddDNS(hostname, verdict)
+			rt.monitor.AddDNS(hostname, verdict, event.Reason)
 		case "http":
-			rt.monitor.AddHTTP(event.Method, hostname, verdict)
+			rt.monitor.AddHTTP(event.Method, hostname, verdict, event.Reason)
 		case "tls":
-			rt.monitor.AddTLS(hostname, verdict)
+			rt.monitor.AddTLS(hostname, verdict, event.Reason)
 		case "icmp":
 			if event.ICMPType != nil {
-				rt.monitor.AddICMP(destination, *event.ICMPType, event.ICMPCode, verdict)
+				rt.monitor.AddICMP(destination, *event.ICMPType, event.ICMPCode, verdict, event.Reason)
 			}
 		}
-		rt.monitor.AddReason(event.Reason, verdict)
 
 		rt.logRawMonitorEvent(rawMonitorEvent{
 			Type:        event.Type,

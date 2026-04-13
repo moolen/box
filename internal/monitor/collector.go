@@ -22,38 +22,36 @@ type ICMPKey struct {
 type Row struct {
 	Count   int
 	Verdict Verdict
+	Reason  string
 }
 
 type Snapshot struct {
-	Total   int
-	DNS     map[string]Row
-	HTTP    map[HTTPKey]Row
-	TLS     map[string]Row
-	ICMP    map[ICMPKey]Row
-	Reasons map[string]Row
+	Total int
+	DNS   map[string]Row
+	HTTP  map[HTTPKey]Row
+	TLS   map[string]Row
+	ICMP  map[ICMPKey]Row
 }
 
 type Collector struct {
-	mu      sync.Mutex
-	dns     map[string]Row
-	http    map[HTTPKey]Row
-	tls     map[string]Row
-	icmp    map[ICMPKey]Row
-	reasons map[string]Row
-	total   int
+	mu    sync.Mutex
+	dns   map[string]Row
+	http  map[HTTPKey]Row
+	tls   map[string]Row
+	icmp  map[ICMPKey]Row
+	total int
 }
 
 func NewCollector() *Collector {
 	return &Collector{
-		dns:     make(map[string]Row),
-		http:    make(map[HTTPKey]Row),
-		tls:     make(map[string]Row),
-		icmp:    make(map[ICMPKey]Row),
-		reasons: make(map[string]Row),
+		dns:  make(map[string]Row),
+		http: make(map[HTTPKey]Row),
+		tls:  make(map[string]Row),
+		icmp: make(map[ICMPKey]Row),
 	}
 }
 
-func (c *Collector) AddDNS(hostname string, verdict Verdict) {
+func (c *Collector) AddDNS(hostname string, verdict Verdict, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	normalized := NormalizeHostname(hostname)
@@ -62,11 +60,12 @@ func (c *Collector) AddDNS(hostname string, verdict Verdict) {
 	row := c.dns[display]
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
+	row.Reason = normalizeReason(reason, verdict)
 	c.dns[display] = row
 	c.total++
 }
 
-func (c *Collector) AddTLS(hostname string, verdict Verdict) {
+func (c *Collector) AddTLS(hostname string, verdict Verdict, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	normalized := NormalizeHostname(hostname)
@@ -75,11 +74,12 @@ func (c *Collector) AddTLS(hostname string, verdict Verdict) {
 	row := c.tls[display]
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
+	row.Reason = normalizeReason(reason, verdict)
 	c.tls[display] = row
 	c.total++
 }
 
-func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict) {
+func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -92,11 +92,12 @@ func (c *Collector) AddHTTP(method string, hostname string, verdict Verdict) {
 	row := c.http[key]
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
+	row.Reason = normalizeReason(reason, verdict)
 	c.http[key] = row
 	c.total++
 }
 
-func (c *Collector) AddICMP(target string, icmpType int, icmpCode *int, verdict Verdict) {
+func (c *Collector) AddICMP(target string, icmpType int, icmpCode *int, verdict Verdict, reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -113,23 +114,9 @@ func (c *Collector) AddICMP(target string, icmpType int, icmpCode *int, verdict 
 	row := c.icmp[key]
 	row.Count++
 	row.Verdict = normalizeVerdict(verdict)
+	row.Reason = normalizeReason(reason, verdict)
 	c.icmp[key] = row
 	c.total++
-}
-
-func (c *Collector) AddReason(reason string, verdict Verdict) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	normalized := strings.TrimSpace(reason)
-	if normalized == "" || !isDeniedVerdict(verdict) {
-		return
-	}
-
-	row := c.reasons[normalized]
-	row.Count++
-	row.Verdict = normalizeVerdict(verdict)
-	c.reasons[normalized] = row
 }
 
 func (c *Collector) Snapshot() Snapshot {
@@ -137,12 +124,11 @@ func (c *Collector) Snapshot() Snapshot {
 	defer c.mu.Unlock()
 
 	snapshot := Snapshot{
-		Total:   c.total,
-		DNS:     make(map[string]Row, len(c.dns)),
-		HTTP:    make(map[HTTPKey]Row, len(c.http)),
-		TLS:     make(map[string]Row, len(c.tls)),
-		ICMP:    make(map[ICMPKey]Row, len(c.icmp)),
-		Reasons: make(map[string]Row, len(c.reasons)),
+		Total: c.total,
+		DNS:   make(map[string]Row, len(c.dns)),
+		HTTP:  make(map[HTTPKey]Row, len(c.http)),
+		TLS:   make(map[string]Row, len(c.tls)),
+		ICMP:  make(map[ICMPKey]Row, len(c.icmp)),
 	}
 
 	for host, row := range c.dns {
@@ -156,9 +142,6 @@ func (c *Collector) Snapshot() Snapshot {
 	}
 	for key, row := range c.icmp {
 		snapshot.ICMP[key] = row
-	}
-	for reason, row := range c.reasons {
-		snapshot.Reasons[reason] = row
 	}
 
 	return snapshot
@@ -177,6 +160,13 @@ func normalizeMethod(method string) string {
 		return "UNKNOWN"
 	}
 	return strings.ToUpper(normalized)
+}
+
+func normalizeReason(reason string, verdict Verdict) string {
+	if !isDeniedVerdict(verdict) {
+		return ""
+	}
+	return strings.TrimSpace(reason)
 }
 
 func normalizeVerdict(verdict Verdict) Verdict {

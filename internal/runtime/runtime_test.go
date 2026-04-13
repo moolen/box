@@ -203,6 +203,7 @@ func TestMonitorModeRewritesResolvConfToGatewayIP(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -248,6 +249,7 @@ func TestMonitorModeStartsPolicyServiceAndEnvoyWithScopedResources(t *testing.T)
 			envoyReq = req
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -391,6 +393,7 @@ func TestRunUsesInjectedNetworkAllocation(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -445,6 +448,7 @@ func TestMonitorModeRecordsOwnedNetworkTeardownCommands(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -603,6 +607,7 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -617,10 +622,69 @@ func TestMonitorModeCapturesMonitorSummaryFromPolicyEvents(t *testing.T) {
 	mustContain(t, summary, "TLS:")
 	mustContain(t, summary, "tls.example.com [WOULD_ALLOW]: 1")
 	mustContain(t, summary, "ICMP:")
-	mustContain(t, summary, "TYPE 8 CODE 0 198.51.100.7 [WOULD_BLOCK]: 1")
-	mustContain(t, summary, "Reasons:")
-	mustContain(t, summary, "unsupported_protocol [WOULD_BLOCK]: 1")
+	mustContain(t, summary, "TYPE 8 CODE 0 198.51.100.7 [WOULD_BLOCK]: 1 (unsupported_protocol)")
 	mustContain(t, summary, "Total events: 4")
+}
+
+func TestMonitorModeCapturesMonitorSummaryFromObservedICMPTraffic(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig("monitor")
+	cfg.Network.Policy = []config.NetworkPolicyRule{{
+		CIDR: "198.51.100.0/24",
+		ICMP: []config.ICMPPolicyRule{{
+			Type: 3,
+			Code: intPtr(1),
+		}},
+	}}
+
+	rt, err := Run(context.Background(), Request{
+		Config:    cfg,
+		StateRoot: t.TempDir(),
+	}, Deps{
+		Clock:       fixedClock,
+		RandomID:    func() string { return "runtime-monitor-observed-icmp" },
+		CommandExec: noopCommandExec{},
+		MonitorPreflight: func(context.Context, MonitorPreflightRequest) error {
+			return nil
+		},
+		StartPolicyService: func(context.Context, PolicyServiceStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
+			return noopRunner{}, nil
+		},
+		StartICMPMonitor: func(_ context.Context, req ICMPMonitorStartRequest) (Runner, error) {
+			if req.OnEvent == nil {
+				t.Fatalf("ICMPMonitorStartRequest.OnEvent = nil, want callback")
+			}
+			if req.NetNS == "" {
+				t.Fatalf("ICMPMonitorStartRequest.NetNS = %q, want non-empty", req.NetNS)
+			}
+			if req.Interface == "" {
+				t.Fatalf("ICMPMonitorStartRequest.Interface = %q, want non-empty", req.Interface)
+			}
+			icmpType := 8
+			icmpCode := 0
+			req.OnEvent(policyd.Event{
+				Type:        "icmp",
+				Protocol:    "icmp",
+				Destination: "203.0.113.7",
+				ICMPType:    &icmpType,
+				ICMPCode:    &icmpCode,
+				Verdict:     policyd.VerdictWouldBlock,
+				Reason:      "no_matching_rule",
+			})
+			return noopRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	summary := rt.MonitorSummary()
+	mustContain(t, summary, "ICMP:")
+	mustContain(t, summary, "TYPE 8 CODE 0 203.0.113.7 [WOULD_BLOCK]: 1 (no_matching_rule)")
 }
 
 func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
@@ -669,6 +733,7 @@ func TestMonitorModeAppendsRawTrafficEventsToEventLog(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -815,6 +880,7 @@ func TestRunCleansTrustedOrphansBeforeMonitorPreflight(t *testing.T) {
 		StartEnvoy: func(context.Context, EnvoyStartRequest) (Runner, error) {
 			return noopRunner{}, nil
 		},
+		StartICMPMonitor: noopICMPMonitorFactory,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -1418,6 +1484,10 @@ func (noopRunner) Stop() error {
 	return nil
 }
 
+func noopICMPMonitorFactory(context.Context, ICMPMonitorStartRequest) (Runner, error) {
+	return noopRunner{}, nil
+}
+
 type failingCommandExec struct {
 	calls    []string
 	failures map[string]error
@@ -1462,6 +1532,10 @@ func testConfig(networkMode string) config.Config {
 }
 
 func boolPtr(value bool) *bool {
+	return &value
+}
+
+func intPtr(value int) *int {
 	return &value
 }
 

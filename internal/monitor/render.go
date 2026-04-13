@@ -22,7 +22,7 @@ func RenderSummary(snapshot Snapshot) string {
 		keys := sortedHosts(snapshot.DNS)
 		for _, host := range keys {
 			row := snapshot.DNS[host]
-			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", host, strings.ToUpper(string(row.Verdict)), row.Count))
+			b.WriteString(fmt.Sprintf("  %s [%s]: %d%s\n", host, strings.ToUpper(string(row.Verdict)), row.Count, formatReasonSuffix(row)))
 		}
 	}
 
@@ -32,7 +32,7 @@ func RenderSummary(snapshot Snapshot) string {
 		keys := sortedHTTPKeys(snapshot.HTTP)
 		for _, key := range keys {
 			row := snapshot.HTTP[key]
-			b.WriteString(fmt.Sprintf("  %s %s [%s]: %d\n", key.Method, key.Hostname, strings.ToUpper(string(row.Verdict)), row.Count))
+			b.WriteString(fmt.Sprintf("  %s %s [%s]: %d%s\n", key.Method, key.Hostname, strings.ToUpper(string(row.Verdict)), row.Count, formatReasonSuffix(row)))
 		}
 	}
 
@@ -42,7 +42,7 @@ func RenderSummary(snapshot Snapshot) string {
 		keys := sortedHosts(snapshot.TLS)
 		for _, host := range keys {
 			row := snapshot.TLS[host]
-			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", host, strings.ToUpper(string(row.Verdict)), row.Count))
+			b.WriteString(fmt.Sprintf("  %s [%s]: %d%s\n", host, strings.ToUpper(string(row.Verdict)), row.Count, formatReasonSuffix(row)))
 		}
 	}
 
@@ -52,17 +52,7 @@ func RenderSummary(snapshot Snapshot) string {
 		keys := sortedICMPKeys(snapshot.ICMP)
 		for _, key := range keys {
 			row := snapshot.ICMP[key]
-			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", formatICMPKey(key), strings.ToUpper(string(row.Verdict)), row.Count))
-		}
-	}
-
-	if len(snapshot.Reasons) > 0 {
-		wroteSection = true
-		b.WriteString("Reasons:\n")
-		keys := sortedHosts(snapshot.Reasons)
-		for _, reason := range keys {
-			row := snapshot.Reasons[reason]
-			b.WriteString(fmt.Sprintf("  %s [%s]: %d\n", reason, strings.ToUpper(string(row.Verdict)), row.Count))
+			b.WriteString(fmt.Sprintf("  %s [%s]: %d%s\n", formatICMPKey(key), strings.ToUpper(string(row.Verdict)), row.Count, formatReasonSuffix(row)))
 		}
 	}
 	if !wroteSection {
@@ -139,4 +129,11 @@ func formatICMPKey(key ICMPKey) string {
 		label += fmt.Sprintf(" CODE %d", key.Code)
 	}
 	return label + " " + key.Target
+}
+
+func formatReasonSuffix(row Row) string {
+	if strings.TrimSpace(row.Reason) == "" {
+		return ""
+	}
+	return " (" + row.Reason + ")"
 }

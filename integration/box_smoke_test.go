@@ -854,6 +854,44 @@ func TestBoxMonitorModeAllowsTransparentHTTPSPathMismatchButLogsWouldBlockVerdic
 	}
 }
 
+func TestBoxMonitorModeAllowsICMPButLogsTypeAndCodeForWouldBlockTraffic(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration smoke tests require Linux")
+	}
+
+	requireRootIfNeeded(t)
+	testenv.RequireCommands(t, "ping")
+
+	exampleIPv4 := mustLookupIPv4(t, "example.com")
+	binary := testenv.BuildBoxBinary(t)
+	configPath := testenv.WriteMonitorConfigWithRules(t, []config.NetworkPolicyRule{{
+		Hostname: "allowed.example",
+		Ports:    []int{443},
+	}})
+
+	stdout, stderr, err := testenv.RunBinary(binary.ModuleRoot, binary.BinaryPath, true, "--config", configPath, "--",
+		"ping", "-c", "1", "-W", "5", exampleIPv4,
+	)
+	if err != nil {
+		t.Fatalf("monitor mode should allow icmp traffic while logging would_block; stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "1 received") && !strings.Contains(stdout, "1 packets received") {
+		t.Fatalf("monitor mode icmp output = %q, want successful echo response; stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "ICMP:") {
+		t.Fatalf("stderr missing icmp monitor section: %q", stderr)
+	}
+	if !strings.Contains(stderr, "TYPE 8 CODE 0 "+exampleIPv4+" [WOULD_BLOCK]") {
+		t.Fatalf("stderr missing icmp type/code monitor details: %q", stderr)
+	}
+	if !strings.Contains(stderr, "TYPE 8 CODE 0 "+exampleIPv4+" [WOULD_BLOCK]: 1 (no_matching_rule)") {
+		t.Fatalf("stderr missing inline icmp would_block reason: %q", stderr)
+	}
+	if strings.Contains(stderr, "Reasons:") {
+		t.Fatalf("stderr unexpectedly still contains reasons section: %q", stderr)
+	}
+}
+
 func runBoxSmoke(t *testing.T, payload ...string) string {
 	t.Helper()
 

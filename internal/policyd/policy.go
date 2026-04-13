@@ -132,6 +132,32 @@ func Evaluate(req Request, rules []config.NetworkPolicyRule, mode Mode) Decision
 	})
 }
 
+func EvaluateICMP(destinationIP netip.Addr, icmpType int, icmpCode int, rules []config.NetworkPolicyRule, mode Mode) Decision {
+	for _, rule := range rules {
+		cidr := strings.TrimSpace(rule.CIDR)
+		if cidr == "" || len(rule.ICMP) == 0 {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(cidr)
+		if err != nil || !destinationIP.IsValid() || !pfx.Contains(destinationIP) {
+			continue
+		}
+		if !icmpTupleMatches(rule.ICMP, icmpType, icmpCode) {
+			continue
+		}
+		return finalize(mode, Decision{
+			Verdict: VerdictAllow,
+			Reason:  "cidr_match",
+			Rule:    "cidr:" + cidr,
+		})
+	}
+
+	return finalize(mode, Decision{
+		Verdict: VerdictDeny,
+		Reason:  "no_matching_rule",
+	})
+}
+
 func finalize(mode Mode, d Decision) Decision {
 	switch mode {
 	case ModeObserve:
@@ -154,6 +180,19 @@ func portMatches(ports []int, dst int) bool {
 		if p == dst {
 			return true
 		}
+	}
+	return false
+}
+
+func icmpTupleMatches(rules []config.ICMPPolicyRule, icmpType int, icmpCode int) bool {
+	for _, rule := range rules {
+		if rule.Type != icmpType {
+			continue
+		}
+		if rule.Code != nil && *rule.Code != icmpCode {
+			continue
+		}
+		return true
 	}
 	return false
 }
